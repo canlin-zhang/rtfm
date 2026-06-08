@@ -115,6 +115,22 @@ def test_health_check_reports_schema_version(home):
     assert out["schema_version"] == rtfm.SCHEMA_VERSION
 
 
+def test_find_duplicates_groups_by_content(home, tmp_path):
+    d = tmp_path / "docs"
+    d.mkdir()
+    body = "shared content body\n"
+    for n in ("a.md", "b.md", "c.md"):
+        (d / n).write_text(body)
+    (d / "unique.md").write_text("different body\n")
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    out = rtfm.find_duplicates()
+    assert len(out["duplicates"]) == 1  # only the 3-way duplicate
+    g = out["duplicates"][0]
+    assert g["n_locations"] == 3
+    assert {loc["relpath"] for loc in g["locations"]} == {"a.md", "b.md", "c.md"}
+
+
 def test_source_filter_restricts_search(home, tmp_path):
     """source= filter on search_index returns only hits from that source."""
     # Index two sources with distinct, non-overlapping content.

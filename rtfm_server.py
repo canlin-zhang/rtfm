@@ -501,6 +501,34 @@ def reindex(source: str | None = None) -> dict:
 
 
 @mcp.tool()
+def find_duplicates(source: str | None = None, min_locations: int = 2) -> dict:
+    """List contents that live at >= min_locations paths (byte-identical files under multiple
+    paths/versions). Optionally restrict to contents that appear in `source`. Groups are
+    sorted by location count, descending."""
+    conn = get_index_db()
+    if source is not None:
+        rows = conn.execute(
+            "SELECT sha256, COUNT(*) c FROM locations GROUP BY sha256 "
+            "HAVING c >= ? AND sha256 IN (SELECT sha256 FROM locations WHERE source=?)",
+            (min_locations, source)).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT sha256, COUNT(*) c FROM locations GROUP BY sha256 HAVING c >= ?",
+            (min_locations,)).fetchall()
+    groups = []
+    for sha, c in rows:
+        locs = conn.execute(
+            "SELECT source, relpath FROM locations WHERE sha256=? ORDER BY source, relpath",
+            (sha,)).fetchall()
+        kind = conn.execute("SELECT locator_kind FROM contents WHERE sha256=?", (sha,)).fetchone()
+        groups.append({"sha256": sha, "n_locations": c,
+                       "locator_kind": kind[0] if kind else None,
+                       "locations": [{"source": s, "relpath": r} for (s, r) in locs]})
+    groups.sort(key=lambda g: g["n_locations"], reverse=True)
+    return {"duplicates": groups}
+
+
+@mcp.tool()
 def read(source: str, relpath: str, start: int = 1, end: int | None = None) -> str:
     """Read a page range (PDF) or line range (text) from a file in a source.
 
