@@ -10,8 +10,8 @@ def test_plugin_manifest_valid():
     assert m["name"] == "rtfm" and m["description"]
 
 
-def test_mcp_json_points_at_launcher():
-    m = json.loads((ROOT / ".mcp.json").read_text())
+def test_mcp_server_points_at_launcher():
+    m = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text())
     server = m["mcpServers"]["rtfm"]
     assert server["command"] == "python3"
     assert "${CLAUDE_PLUGIN_ROOT}/bin/launch" in server["args"]
