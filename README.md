@@ -36,10 +36,11 @@ add more sources by editing `~/.rtfm/manifest.toml` (see `manifest.example.toml`
 
 ## Status
 
-**Plan 1 (core MVP) implemented** — zero-config default source, PDF + Markdown/text
-indexing into one FTS index with page/line citations, the `search`/`read`/`list_sources`/
-`health_check` tools, the uv-or-venv launcher, and plugin packaging. HTML + anchors,
-git-repo sources + refresh, mutation tools, and OCR are on the [roadmap](docs/ROADMAP.md).
+Early but working. Today rtfm gives you zero-config search over a default drop-folder: PDF and
+Markdown/text files are indexed into one full-text index with page/line citations, exposed
+through the `search` / `read` / `list_sources` / `health_check` tools, with a uv-or-venv
+launcher and Claude Code plugin packaging. HTML with anchor citations, git-backed repo sources
+with auto-refresh, file-curation tools, and OCR are planned — see the [roadmap](docs/ROADMAP.md).
 
 Architecture decisions live in [docs/adr/](docs/adr/); domain language in
 [CONTEXT.md](CONTEXT.md).

@@ -1,5 +1,6 @@
 # tests/test_config.py
 from pathlib import Path
+
 import rtfm_server as rt
 
 

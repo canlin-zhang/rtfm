@@ -22,7 +22,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 # --- config -----------------------------------------------------------------
-TEXT_EXTS = {".txt", ".md"}          # Plan 2 widens this and adds .html
+TEXT_EXTS = {".txt", ".md"}          # more text/markup formats (e.g. .html) added later
 CHUNK_LINES = 50
 
 
@@ -86,7 +86,9 @@ def _rows_for_file(path: Path) -> list[tuple[str, str, str]]:
     return rows
 
 
-def index_file(conn: sqlite3.Connection, source: str, path: Path, root: Path) -> tuple[bool, str | None]:
+def index_file(
+    conn: sqlite3.Connection, source: str, path: Path, root: Path
+) -> tuple[bool, str | None]:
     ext = path.suffix.lower()
     if ext != ".pdf" and ext not in TEXT_EXTS:
         return False, f"unsupported extension {ext}"
@@ -98,7 +100,8 @@ def index_file(conn: sqlite3.Connection, source: str, path: Path, root: Path) ->
     conn.execute("DELETE FROM doc_fts WHERE source=? AND relpath=?", (source, rel))
     conn.execute("DELETE FROM doc_meta WHERE source=? AND relpath=?", (source, rel))
     conn.executemany(
-        "INSERT INTO doc_fts(source, relpath, locator_kind, locator_value, text) VALUES (?,?,?,?,?)",
+        "INSERT INTO doc_fts(source, relpath, locator_kind, locator_value, text) "
+        "VALUES (?,?,?,?,?)",
         [(source, rel, k, v, t) for (k, v, t) in rows],
     )
     conn.execute(
@@ -157,7 +160,7 @@ def index_source(conn: sqlite3.Connection, src: Source) -> int:
 @dataclass
 class Source:
     name: str
-    type: str                       # "dir" (Plan 3 adds "repo")
+    type: str                       # "dir" (a "repo" type is added later)
     path: Path | None = None
     url: str | None = None
     mutable: bool = False

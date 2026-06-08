@@ -14,10 +14,10 @@ def test_bootstrap_creates_default(home):
 
 
 def test_load_explicit_sources(home):
+    default = rt.default_source_dir()
     (home / "manifest.toml").write_text(
-        '[[source]]\nname="default"\ntype="dir"\npath="%s"\nmutable=true\n'
+        f'[[source]]\nname="default"\ntype="dir"\npath="{default}"\nmutable=true\n'
         '[[source]]\nname="vendor"\ntype="dir"\npath="/opt/vendor/doc"\n'
-        % rt.default_source_dir()
     )
     sources, warnings = rt.load_manifest()
     assert [s.name for s in sources] == ["default", "vendor"]

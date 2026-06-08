@@ -1,6 +1,6 @@
 # Roadmap
 
-Deferred scope, each with the decision that parked it. Not in the first release.
+Deferred scope, each with the decision that parked it. Not yet implemented.
 
 - **Web sources** — index public doc sites as a third sync type alongside `dir` and `repo`
   (`web`, Refreshed by re-fetch). Experimental and cooperative-only: no OCR, no JS
