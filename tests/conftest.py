@@ -2,7 +2,6 @@
 import pytest
 
 
-
 @pytest.fixture
 def home(tmp_path, monkeypatch):
     """Point RTFM_HOME at a tmp dir for the duration of a test."""

@@ -7,7 +7,8 @@ def test_index_pdf_pages(home, sample_pdf):
     ok, err = rt.index_file(conn, "src", sample_pdf, sample_pdf.parent)
     assert ok, err
     rows = conn.execute(
-        "SELECT locator_kind, locator_value, text FROM doc_fts WHERE source='src' ORDER BY locator_value"
+        "SELECT locator_kind, locator_value, text FROM doc_fts "
+        "WHERE source='src' ORDER BY locator_value"
     ).fetchall()
     assert [r[0] for r in rows] == ["page", "page"]
     assert rows[0][1] == "1" and "alpha" in rows[0][2]
@@ -19,7 +20,8 @@ def test_index_text_lines(home, sample_txt):
     ok, err = rt.index_file(conn, "src", sample_txt, sample_txt.parent)
     assert ok, err
     rows = conn.execute(
-        "SELECT locator_kind, locator_value FROM doc_fts WHERE source='src' ORDER BY CAST(locator_value AS INT)"
+        "SELECT locator_kind, locator_value FROM doc_fts "
+        "WHERE source='src' ORDER BY CAST(locator_value AS INT)"
     ).fetchall()
     assert rows[0] == ("line", "1")
     assert rows[1] == ("line", "51")        # 50-line chunks
