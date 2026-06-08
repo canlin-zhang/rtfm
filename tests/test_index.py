@@ -157,3 +157,44 @@ def test_failed_extraction_recorded_not_raised(home, tmp_path):
     assert row is not None
     assert row[0] == 0
     assert row[1] is not None and len(row[1]) > 0
+
+
+def test_failed_extraction_not_retried_on_unchanged_bytes(home, tmp_path):
+    """A failed extraction is remembered; a second reindex with unchanged bytes does NOT retry it.
+
+    Spec §3: "Failed extractions are recorded so they are not retried every run;
+    a content is retried only if its bytes change (new sha)."
+    """
+    d = tmp_path / "docs"
+    d.mkdir()
+    bad = d / "bad.pdf"
+    bad.write_bytes(b"\x00\x01\x02\x03 not a pdf")
+    src = rtfm.Source(name="docs", type="dir", path=d)
+    conn = rtfm.get_index_db()
+
+    # First run: extraction is attempted and fails.
+    first = rtfm.reindex_source(conn, src)
+    assert first["errors"] == 1, f"expected 1 error on first run, got {first}"
+    assert first["newly_extracted"] == 0
+
+    # Confirm the failure is recorded in contents.
+    sha = conn.execute(
+        "SELECT sha256 FROM locations WHERE source='docs' AND relpath='bad.pdf'"
+    ).fetchone()[0]
+    row_after_first = conn.execute(
+        "SELECT extracted_ok FROM contents WHERE sha256=?", (sha,)
+    ).fetchone()
+    assert row_after_first is not None and row_after_first[0] == 0
+
+    # Second run: file bytes unchanged — must NOT re-attempt extraction.
+    second = rtfm.reindex_source(conn, src)
+    assert second["errors"] == 0, f"expected 0 errors on second run (no retry), got {second}"
+    assert second["newly_extracted"] == 0
+    # The bad file still counts as a skip (it was in `already`).
+    assert second["extraction_skips"] == 1
+
+    # The contents row is preserved with extracted_ok=0 (not removed or flipped).
+    row_after_second = conn.execute(
+        "SELECT extracted_ok FROM contents WHERE sha256=?", (sha,)
+    ).fetchone()
+    assert row_after_second is not None and row_after_second[0] == 0

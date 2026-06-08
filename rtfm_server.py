@@ -185,7 +185,7 @@ def reindex_source(conn: sqlite3.Connection, src: Source) -> dict:
 
     shas_here = {sha for (sha, _) in present.values()}
     summary["unique_contents"] = len(shas_here)
-    already = {r[0] for r in conn.execute("SELECT sha256 FROM contents WHERE extracted_ok=1")}
+    already = {r[0] for r in conn.execute("SELECT sha256 FROM contents")}
     need = shas_here - already
     summary["extraction_skips"] = summary["files_seen"] - len(need)
 
