@@ -24,6 +24,8 @@ from mcp.server.fastmcp import FastMCP
 # --- config -----------------------------------------------------------------
 TEXT_EXTS = {".txt", ".md"}          # more text/markup formats (e.g. .html) added later
 CHUNK_LINES = 50
+SCHEMA_VERSION = 2                   # index DB is a cache; mismatch ⇒ drop & rebuild
+MAX_LOCATIONS = 5                    # default cap on locations listed per search hit
 
 
 def corpus_home() -> Path:
@@ -47,24 +49,50 @@ def get_index_db() -> sqlite3.Connection:
     p = index_db_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(p)
+    if conn.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION:
+        _migrate_schema(conn)
+    return conn
+
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """The index DB is a cache. On any version mismatch, drop all prior tables and rebuild
+    the empty content-addressed schema; the next reindex repopulates it."""
     conn.executescript(
         """
-        CREATE TABLE IF NOT EXISTS doc_meta (
+        DROP TABLE IF EXISTS doc_meta;
+        DROP TABLE IF EXISTS doc_fts;
+        DROP TABLE IF EXISTS contents;
+        DROP TABLE IF EXISTS locations;
+        DROP TABLE IF EXISTS content_fts;
+        CREATE TABLE contents (
+            sha256       TEXT PRIMARY KEY,
+            locator_kind TEXT NOT NULL,
+            n_chunks     INTEGER NOT NULL,
+            extracted_ok INTEGER NOT NULL,
+            error        TEXT
+        );
+        CREATE TABLE locations (
             source  TEXT NOT NULL,
             relpath TEXT NOT NULL,
+            sha256  TEXT NOT NULL,
             mtime   REAL NOT NULL,
-            sha256  TEXT,
             PRIMARY KEY (source, relpath)
         );
-        CREATE VIRTUAL TABLE IF NOT EXISTS doc_fts USING fts5(
-            source UNINDEXED, relpath UNINDEXED,
-            locator_kind UNINDEXED, locator_value UNINDEXED,
-            text
+        CREATE INDEX idx_locations_sha ON locations(sha256);
+        CREATE VIRTUAL TABLE content_fts USING fts5(
+            sha256 UNINDEXED, locator_kind UNINDEXED, locator_value UNINDEXED, text
         );
         """
     )
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
-    return conn
+
+
+def _workers() -> int:
+    env = os.environ.get("RTFM_WORKERS")
+    if env and env.isdigit() and int(env) > 0:
+        return int(env)
+    return min(os.cpu_count() or 4, 8)
 
 
 def _rows_for_file(path: Path) -> list[tuple[str, str, str]]:
@@ -86,42 +114,100 @@ def _rows_for_file(path: Path) -> list[tuple[str, str, str]]:
     return rows
 
 
-def index_file(
-    conn: sqlite3.Connection, source: str, path: Path, root: Path
-) -> tuple[bool, str | None]:
-    ext = path.suffix.lower()
-    if ext != ".pdf" and ext not in TEXT_EXTS:
-        return False, f"unsupported extension {ext}"
-    rel = str(path.relative_to(root))
-    raw = path.read_bytes()
-    sha = hashlib.sha256(raw).hexdigest()
-    mtime = path.stat().st_mtime
-    rows = _rows_for_file(path)
-    conn.execute("DELETE FROM doc_fts WHERE source=? AND relpath=?", (source, rel))
-    conn.execute("DELETE FROM doc_meta WHERE source=? AND relpath=?", (source, rel))
-    conn.executemany(
-        "INSERT INTO doc_fts(source, relpath, locator_kind, locator_value, text) "
-        "VALUES (?,?,?,?,?)",
-        [(source, rel, k, v, t) for (k, v, t) in rows],
-    )
-    conn.execute(
-        "INSERT INTO doc_meta(source, relpath, mtime, sha256) VALUES (?,?,?,?)",
-        (source, rel, mtime, sha),
-    )
+def _extract_rows(path_str: str) -> tuple[list[tuple[str, str, str]], str | None]:
+    """Process-pool worker (module-level so it pickles): extract rows for one file.
+    Returns (rows, error); a failed extraction yields ([], message) instead of raising."""
+    try:
+        return _rows_for_file(Path(path_str)), None
+    except Exception as e:
+        return [], f"{type(e).__name__}: {e}"
+
+
+def _extract_many(jobs: list[tuple[str, str]]) -> list[tuple[str, list, str | None]]:
+    """jobs: [(sha, representative_path)] -> [(sha, rows, error)]. Serial; Task 3 parallelizes."""
+    return [(sha, *_extract_rows(path)) for (sha, path) in jobs]
+
+
+def reindex_source(conn: sqlite3.Connection, src: Source) -> dict:
+    """Rebuild one dir source: dedup by content hash, extract each unique content once, map
+    every path to its content, purge vanished files, GC orphaned contents. Returns a summary."""
+    summary = {"source": src.name, "files_seen": 0, "unique_contents": 0,
+               "newly_extracted": 0, "deduped_skips": 0, "purged": 0, "errors": 0}
+    if src.path is None or not src.path.exists():
+        return summary
+    files = iter_source_files(src)
+    summary["files_seen"] = len(files)
+
+    existing = {r[0]: (r[1], r[2]) for r in conn.execute(
+        "SELECT relpath, sha256, mtime FROM locations WHERE source=?", (src.name,))}
+
+    present: dict[str, tuple[str, float]] = {}
+    for f in files:
+        rel = str(f.relative_to(src.path))
+        mtime = f.stat().st_mtime
+        prev = existing.get(rel)
+        if prev and prev[1] == mtime:
+            sha = prev[0]                                   # mtime match: reuse stored sha
+        else:
+            sha = hashlib.sha256(f.read_bytes()).hexdigest()
+        present[rel] = (sha, mtime)
+
+    vanished = set(existing) - set(present)
+    for rel in vanished:
+        conn.execute("DELETE FROM locations WHERE source=? AND relpath=?", (src.name, rel))
+    summary["purged"] = len(vanished)
+
+    for rel, (sha, mtime) in present.items():
+        conn.execute(
+            "INSERT INTO locations(source, relpath, sha256, mtime) VALUES(?,?,?,?) "
+            "ON CONFLICT(source, relpath) DO UPDATE SET "
+            "sha256=excluded.sha256, mtime=excluded.mtime",
+            (src.name, rel, sha, mtime))
     conn.commit()
-    return True, None
+
+    shas_here = {sha for (sha, _) in present.values()}
+    summary["unique_contents"] = len(shas_here)
+    already = {r[0] for r in conn.execute("SELECT sha256 FROM contents WHERE extracted_ok=1")}
+    need = shas_here - already
+    summary["deduped_skips"] = summary["files_seen"] - len(need)
+
+    jobs: dict[str, str] = {}
+    for rel in sorted(present):                             # deterministic representative path
+        sha = present[rel][0]
+        if sha in need and sha not in jobs:
+            jobs[sha] = str(src.path / rel)
+
+    for sha, rows, error in _extract_many(list(jobs.items())):
+        kind = rows[0][0] if rows else "line"
+        conn.execute("DELETE FROM content_fts WHERE sha256=?", (sha,))
+        conn.executemany(
+            "INSERT INTO content_fts(sha256, locator_kind, locator_value, text) VALUES(?,?,?,?)",
+            [(sha, k, v, t) for (k, v, t) in rows])
+        conn.execute(
+            "INSERT INTO contents(sha256, locator_kind, n_chunks, extracted_ok, error) "
+            "VALUES(?,?,?,?,?) ON CONFLICT(sha256) DO UPDATE SET "
+            "locator_kind=excluded.locator_kind, n_chunks=excluded.n_chunks, "
+            "extracted_ok=excluded.extracted_ok, error=excluded.error",
+            (sha, kind, len(rows), 0 if error else 1, error))
+        summary["errors" if error else "newly_extracted"] += 1
+    conn.commit()
+
+    conn.execute(
+        "DELETE FROM content_fts WHERE sha256 NOT IN (SELECT DISTINCT sha256 FROM locations)")
+    conn.execute(
+        "DELETE FROM contents WHERE sha256 NOT IN (SELECT DISTINCT sha256 FROM locations)")
+    conn.commit()
+    return summary
 
 
-def ensure_indexed(conn: sqlite3.Connection, source: str, path: Path, root: Path) -> str:
-    """Index if new/changed (by mtime). Returns 'indexed' or 'skipped'."""
-    rel = str(path.relative_to(root))
-    row = conn.execute(
-        "SELECT mtime FROM doc_meta WHERE source=? AND relpath=?", (source, rel)
-    ).fetchone()
-    if row is None or row[0] != path.stat().st_mtime:
-        index_file(conn, source, path, root)
-        return "indexed"
-    return "skipped"
+def _default_stale(conn: sqlite3.Connection, src: Source) -> bool:
+    """Cheap (relpath, mtime) comparison for the mutable drop-dir; performs no extraction."""
+    if src.path is None or not src.path.exists():
+        return False
+    on_disk = {str(f.relative_to(src.path)): f.stat().st_mtime for f in iter_source_files(src)}
+    indexed = {r[0]: r[1] for r in conn.execute(
+        "SELECT relpath, mtime FROM locations WHERE source=?", (src.name,))}
+    return on_disk != indexed
 
 
 def iter_source_files(src: Source) -> list[Path]:
@@ -138,22 +224,6 @@ def iter_source_files(src: Source) -> list[Path]:
             continue
         out.append(f)
     return sorted(out)
-
-
-def index_source(conn: sqlite3.Connection, src: Source) -> int:
-    """Index/refresh all supported files in a source, purge deleted ones. Returns file count."""
-    if src.path is None:
-        return 0
-    present = {str(f.relative_to(src.path)) for f in iter_source_files(src)}
-    indexed = {r[0] for r in conn.execute(
-        "SELECT relpath FROM doc_meta WHERE source=?", (src.name,)).fetchall()}
-    for rel in indexed - present:
-        conn.execute("DELETE FROM doc_fts WHERE source=? AND relpath=?", (src.name, rel))
-        conn.execute("DELETE FROM doc_meta WHERE source=? AND relpath=?", (src.name, rel))
-    conn.commit()
-    for f in iter_source_files(src):
-        ensure_indexed(conn, src.name, f, src.path)
-    return len(present)
 
 # --- manifest ---------------------------------------------------------------
 
@@ -305,49 +375,44 @@ def _sanitize_fts(query: str) -> str:
 
 
 def search_index(conn: sqlite3.Connection, query: str, source: str | None = None,
-                 limit: int = 50) -> list[dict]:
-    """Return hits as {source, relpath, locator_kind, locator_value, snippet}.
-
-    AND first (all terms in one chunk), OR/BM25 fallback for multi-term queries.
-    """
+                 limit: int = 20, max_locations: int = MAX_LOCATIONS) -> list[dict]:
+    """Dedup'd hits keyed by content sha. AND-first, then OR/BM25 fallback. Each hit lists up
+    to `max_locations` of the paths its content lives at, plus total_locations."""
     q = query.strip()
     if not q:
         return []
     sanitized = _sanitize_fts(q)
-    where = "text MATCH ?"
+    base = "SELECT sha256, locator_kind, locator_value, text FROM content_fts WHERE text MATCH ?"
     params: list = [sanitized]
-    if source:
-        where = "source = ? AND " + where
-        params = [source, sanitized]
+    if source is not None:
+        base += " AND sha256 IN (SELECT sha256 FROM locations WHERE source=?)"
+        params.append(source)
     try:
-        rows = conn.execute(
-            f"SELECT source, relpath, locator_kind, locator_value, text FROM doc_fts "
-            f"WHERE {where} LIMIT ?", (*params, limit)
-        ).fetchall()
+        rows = conn.execute(base + " LIMIT ?", (*params, limit)).fetchall()
     except sqlite3.OperationalError:
         rows = []
     terms = [t for t in sanitized.split() if len(t) >= 3] or sanitized.split()
     if not rows and len(terms) > 1:
-        or_q = " OR ".join(terms)
-        params[-1] = or_q
+        params[0] = " OR ".join(terms)
         try:
-            rows = conn.execute(
-                f"SELECT source, relpath, locator_kind, locator_value, text FROM doc_fts "
-                f"WHERE {where} ORDER BY bm25(doc_fts) LIMIT ?", (*params, limit)
-            ).fetchall()
+            rows = conn.execute(base + " ORDER BY bm25(content_fts) LIMIT ?",
+                                (*params, limit)).fetchall()
         except sqlite3.OperationalError:
             rows = []
-    hits = []
     qterms = [t.lower() for t in sanitized.split() if len(t) > 1]
-    for s, rel, kind, val, text in rows:
-        snippet = next(
-            (ln.strip() for ln in text.split("\n")
-             if any(t in ln.lower() for t in qterms)), text.strip().split("\n")[0]
-        )
-        hits.append({
-            "source": s, "relpath": rel, "locator_kind": kind,
-            "locator_value": val, "snippet": snippet[:_SNIPPET_CAP],
-        })
+    hits = []
+    for sha, kind, val, text in rows:
+        snippet = next((ln.strip() for ln in text.split("\n")
+                        if any(t in ln.lower() for t in qterms)),
+                       text.strip().split("\n")[0])
+        locs = conn.execute(
+            "SELECT source, relpath FROM locations WHERE sha256=? ORDER BY source, relpath LIMIT ?",
+            (sha, max_locations)).fetchall()
+        total = conn.execute("SELECT COUNT(*) FROM locations WHERE sha256=?", (sha,)).fetchone()[0]
+        hits.append({"sha256": sha, "locator_kind": kind, "locator_value": val,
+                     "snippet": snippet[:_SNIPPET_CAP],
+                     "locations": [{"source": s, "relpath": r} for (s, r) in locs],
+                     "total_locations": total})
     return hits
 
 
@@ -372,31 +437,60 @@ def read_document_text(src: Source, relpath: str, start: int = 1, end: int | Non
 mcp = FastMCP("rtfm")
 
 
-def _load_and_index() -> tuple[list[Source], list[str], sqlite3.Connection]:
-    sources, warnings = load_manifest()
-    conn = get_index_db()
-    for s in sources:
-        if s.type == "dir":
-            index_source(conn, s)
-    return sources, warnings, conn
+def _never_indexed(conn: sqlite3.Connection, sources: list[Source],
+                   only: str | None = None) -> list[str]:
+    return [s.name for s in sources
+            if (only is None or only == s.name)
+            and conn.execute("SELECT COUNT(*) FROM locations WHERE source=?",
+                             (s.name,)).fetchone()[0] == 0]
 
 
 @mcp.tool()
-def search(query: str, source: str | None = None, max_files: int = 20) -> dict:
-    """Search the corpus. Returns hits with format-native locators (page/line).
+def search(query: str, source: str | None = None, max_files: int = 20,
+           max_locations: int = MAX_LOCATIONS) -> dict:
+    """Search the corpus (query-only — never rebuilds a pointed-to source). Returns dedup'd
+    hits, each listing up to `max_locations` paths its content lives at, plus total_locations.
+
+    The mutable `default` drop-dir self-heals here via a cheap staleness check. Other sources
+    are built with reindex(); a query against an unindexed source returns [] and a WARNING.
 
     Args:
         query: text to search for.
         source: restrict to one source name (None = all).
         max_files: cap on returned hits.
+        max_locations: cap on paths listed per hit (use find_duplicates for the full list).
     """
-    sources, warnings, conn = _load_and_index()
-    hits = search_index(conn, query, source=source, limit=max_files)
+    sources, warnings = load_manifest()
+    conn = get_index_db()
+    for s in sources:
+        if s.mutable and s.type == "dir" and _default_stale(conn, s):
+            reindex_source(conn, s)
+    hits = search_index(conn, query, source=source, limit=max_files, max_locations=max_locations)
     resp: dict = {"results": hits, "sources_searched": [s.name for s in sources]}
+    never = _never_indexed(conn, sources, only=source)
+    if never:
+        warnings = list(warnings) + [
+            f"!!! NOT INDEXED !!! source(s) {never} have no index yet — "
+            f"run reindex('{never[0]}') to build it."]
     if warnings:
         resp["WARNING"] = warnings
     if not query.strip():
         resp["error"] = "Query must be non-empty."
+    return resp
+
+
+@mcp.tool()
+def reindex(source: str | None = None) -> dict:
+    """Build/refresh the index. The ONLY tool that extracts. Pass a source name to rebuild
+    just that source, or omit to rebuild all dir sources. Returns a per-source summary."""
+    sources, warnings = load_manifest()
+    conn = get_index_db()
+    targets = [s for s in sources if s.type == "dir" and (source is None or s.name == source)]
+    if source is not None and not targets:
+        return {"error": f"source '{source}' not found or not a dir source. Call list_sources()."}
+    resp: dict = {"reindexed": [reindex_source(conn, s) for s in targets]}
+    if warnings:
+        resp["WARNING"] = warnings
     return resp
 
 
@@ -416,17 +510,18 @@ def read(source: str, relpath: str, start: int = 1, end: int | None = None) -> s
 
 @mcp.tool()
 def list_sources() -> dict:
-    """List configured sources and their indexed file counts."""
+    """List configured sources with indexed-file and unique-content counts (query-only)."""
     sources, warnings = load_manifest()
     conn = get_index_db()
     out = []
     for s in sources:
-        n = conn.execute(
-            "SELECT COUNT(DISTINCT relpath) FROM doc_meta WHERE source=?", (s.name,)
-        ).fetchone()[0]
+        files = conn.execute("SELECT COUNT(*) FROM locations WHERE source=?",
+                             (s.name,)).fetchone()[0]
+        uniq = conn.execute("SELECT COUNT(DISTINCT sha256) FROM locations WHERE source=?",
+                            (s.name,)).fetchone()[0]
         out.append({"name": s.name, "type": s.type,
                     "path": str(s.path) if s.path else s.url,
-                    "mutable": s.mutable, "indexed_files": n})
+                    "mutable": s.mutable, "indexed_files": files, "unique_contents": uniq})
     resp = {"sources": out}
     if warnings:
         resp["WARNING"] = warnings
@@ -435,7 +530,7 @@ def list_sources() -> dict:
 
 @mcp.tool()
 def health_check() -> dict:
-    """Check server health: corpus home, index DB, PDF extractors, sources."""
+    """Check server health: corpus home, schema version, index DB, PDF extractors, sources."""
     status: dict = {"server": "rtfm", "ok": True, "issues": []}
     status["corpus_home"] = str(corpus_home())
     try:
@@ -451,7 +546,7 @@ def health_check() -> dict:
             status[mod] = False
     try:
         conn = get_index_db()
-        conn.execute("SELECT 1")
+        status["schema_version"] = conn.execute("PRAGMA user_version").fetchone()[0]
         sources, warnings = load_manifest()
         status["sources"] = [{"name": s.name, "type": s.type} for s in sources]
         if warnings:
