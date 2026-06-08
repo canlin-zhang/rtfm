@@ -1,4 +1,5 @@
 # tests/test_index.py
+import os
 import sqlite3
 
 import rtfm_server as rtfm
@@ -40,7 +41,7 @@ def test_reindex_dedups_identical_files(home, tmp_path):
     assert summary["files_seen"] == 2
     assert summary["unique_contents"] == 1
     assert summary["newly_extracted"] == 1
-    assert summary["deduped_skips"] == 1
+    assert summary["extraction_skips"] == 1
     assert conn.execute("SELECT COUNT(*) FROM contents").fetchone()[0] == 1
     assert conn.execute("SELECT COUNT(*) FROM locations WHERE source='docs'").fetchone()[0] == 2
 
@@ -53,7 +54,7 @@ def test_reindex_reuses_sha_on_unchanged_mtime(home, tmp_path):
     conn = rtfm.get_index_db()
     rtfm.reindex_source(conn, src)
     again = rtfm.reindex_source(conn, src)  # nothing changed
-    assert again["deduped_skips"] == 1 and again["newly_extracted"] == 0
+    assert again["extraction_skips"] == 1 and again["newly_extracted"] == 0
 
 
 def test_reindex_purges_and_gcs_deleted_files(home, tmp_path):
@@ -84,3 +85,55 @@ def test_reindex_indexes_pdf_pages(home, sample_pdf, tmp_path):
     ).fetchall()
     assert [r[0] for r in rows] == ["page", "page"]
     assert rows[0][1] == "1"
+
+
+def test_edit_in_place_reextracts_and_gcs_old_sha(home, tmp_path):
+    """Rewriting a file in place: new sha extracted, old sha GC'd, search finds new content."""
+    d = tmp_path / "docs"
+    d.mkdir()
+    f = d / "a.md"
+    src = rtfm.Source(name="docs", type="dir", path=d)
+    conn = rtfm.get_index_db()
+
+    f.write_text("content X original body\n")
+    rtfm.reindex_source(conn, src)
+    sha_x = conn.execute("SELECT sha256 FROM locations WHERE relpath='a.md'").fetchone()[0]
+
+    # Rewrite with different content and bump mtime so the fast-path re-hashes.
+    f.write_text("content Y replacement body\n")
+    new_mtime = f.stat().st_mtime + 1.0
+    os.utime(f, (new_mtime, new_mtime))
+
+    rtfm.reindex_source(conn, src)
+
+    # Only one row in contents: the new sha, not the old one.
+    assert conn.execute("SELECT COUNT(*) FROM contents").fetchone()[0] == 1
+    sha_y = conn.execute("SELECT sha256 FROM locations WHERE relpath='a.md'").fetchone()[0]
+    assert sha_y != sha_x
+
+    # FTS finds the new content, not the old.
+    hits = rtfm.search_index(conn, "replacement")
+    assert hits and any("replacement" in h["snippet"] for h in hits)
+    assert not rtfm.search_index(conn, "original")
+
+
+def test_failed_extraction_recorded_not_raised(home, tmp_path):
+    """A file that all extractors reject is recorded with extracted_ok=0; reindex does not raise."""
+    d = tmp_path / "docs"
+    d.mkdir()
+    bad = d / "bad.pdf"
+    bad.write_bytes(b"\x00\x01\x02\x03 this is definitely not a pdf and has no pdf header")
+    src = rtfm.Source(name="docs", type="dir", path=d)
+    conn = rtfm.get_index_db()
+
+    summary = rtfm.reindex_source(conn, src)  # must not raise
+
+    assert summary["errors"] == 1
+    assert summary["newly_extracted"] == 0
+    row = conn.execute(
+        "SELECT extracted_ok, error FROM contents WHERE sha256 IN "
+        "(SELECT sha256 FROM locations WHERE relpath='bad.pdf')"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == 0
+    assert row[1] is not None and len(row[1]) > 0

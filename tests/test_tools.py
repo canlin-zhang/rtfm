@@ -113,3 +113,27 @@ def test_health_check_reports_schema_version(home):
     out = rtfm.health_check()
     assert out["ok"] is True
     assert out["schema_version"] == rtfm.SCHEMA_VERSION
+
+
+def test_source_filter_restricts_search(home, tmp_path):
+    """source= filter on search_index returns only hits from that source."""
+    # Index two sources with distinct, non-overlapping content.
+    d_docs = tmp_path / "docs"
+    d_docs.mkdir()
+    (d_docs / "guide.md").write_text("alpha unique_one content here\n")
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, rtfm.Source(name="docs", type="dir", path=d_docs))
+
+    d_manual = tmp_path / "manual"
+    d_manual.mkdir()
+    (d_manual / "ref.md").write_text("bravo unique_two content here\n")
+    rtfm.load_manifest()  # bootstrap default so manifest exists
+    _add_source("manual", d_manual)
+    rtfm.reindex_source(conn, rtfm.Source(name="manual", type="dir", path=d_manual))
+
+    # unique_two is in manual, not docs.
+    hits_manual = rtfm.search_index(conn, "unique_two", source="manual")
+    assert hits_manual and any("unique_two" in h["snippet"] for h in hits_manual)
+
+    hits_docs = rtfm.search_index(conn, "unique_two", source="docs")
+    assert hits_docs == []

@@ -130,9 +130,15 @@ def _extract_many(jobs: list[tuple[str, str]]) -> list[tuple[str, list, str | No
 
 def reindex_source(conn: sqlite3.Connection, src: Source) -> dict:
     """Rebuild one dir source: dedup by content hash, extract each unique content once, map
-    every path to its content, purge vanished files, GC orphaned contents. Returns a summary."""
+    every path to its content, purge vanished files, GC orphaned contents. Returns a summary.
+
+    extraction_skips = files_seen - unique contents that required fresh extraction this run.
+    Covers two cases: byte-identical duplicates within the same run (same sha, only one job
+    submitted) and contents already extracted in a prior run (cache hits in `contents`).
+    Value: files_seen - len(need), where need = unique shas not yet in contents.
+    """
     summary = {"source": src.name, "files_seen": 0, "unique_contents": 0,
-               "newly_extracted": 0, "deduped_skips": 0, "purged": 0, "errors": 0}
+               "newly_extracted": 0, "extraction_skips": 0, "purged": 0, "errors": 0}
     if src.path is None or not src.path.exists():
         return summary
     files = iter_source_files(src)
@@ -169,7 +175,7 @@ def reindex_source(conn: sqlite3.Connection, src: Source) -> dict:
     summary["unique_contents"] = len(shas_here)
     already = {r[0] for r in conn.execute("SELECT sha256 FROM contents WHERE extracted_ok=1")}
     need = shas_here - already
-    summary["deduped_skips"] = summary["files_seen"] - len(need)
+    summary["extraction_skips"] = summary["files_seen"] - len(need)
 
     jobs: dict[str, str] = {}
     for rel in sorted(present):                             # deterministic representative path
