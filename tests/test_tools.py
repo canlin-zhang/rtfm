@@ -131,6 +131,49 @@ def test_find_duplicates_groups_by_content(home, tmp_path):
     assert {loc["relpath"] for loc in g["locations"]} == {"a.md", "b.md", "c.md"}
 
 
+def test_find_duplicates_source_scopes_count_and_paths(home, tmp_path):
+    """source= scopes both the count and listed paths to within-source duplicates."""
+    body = "shared content for dedup test\n"
+
+    # Source A: two files with the same content (within-source duplicate)
+    d_a = tmp_path / "srcA"
+    d_a.mkdir()
+    (d_a / "a1.md").write_text(body)
+    (d_a / "a2.md").write_text(body)
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, rtfm.Source(name="srcA", type="dir", path=d_a))
+
+    # Source B: one file with the same content (not a within-source duplicate)
+    d_b = tmp_path / "srcB"
+    d_b.mkdir()
+    (d_b / "b1.md").write_text(body)
+    rtfm.load_manifest()
+    _add_source("srcA", d_a)
+    _add_source("srcB", d_b)
+    rtfm.reindex_source(conn, rtfm.Source(name="srcB", type="dir", path=d_b))
+
+    # Within source A: one group, count=2, only A paths
+    out_a = rtfm.find_duplicates(source="srcA")
+    assert len(out_a["duplicates"]) == 1
+    g = out_a["duplicates"][0]
+    assert g["n_locations"] == 2
+    assert all(loc["source"] == "srcA" for loc in g["locations"])
+    assert {loc["relpath"] for loc in g["locations"]} == {"a1.md", "a2.md"}
+
+    # Within source B: empty (content appears only once in B)
+    out_b = rtfm.find_duplicates(source="srcB")
+    assert out_b["duplicates"] == []
+
+    # Global (no source): one group, count=3, all three paths across A and B
+    out_all = rtfm.find_duplicates()
+    assert len(out_all["duplicates"]) == 1
+    g_all = out_all["duplicates"][0]
+    assert g_all["n_locations"] == 3
+    sources_in_group = {loc["source"] for loc in g_all["locations"]}
+    assert sources_in_group == {"srcA", "srcB"}
+    assert len(g_all["locations"]) == 3
+
+
 def test_source_filter_restricts_search(home, tmp_path):
     """source= filter on search_index returns only hits from that source."""
     # Index two sources with distinct, non-overlapping content.
