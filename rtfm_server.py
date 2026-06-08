@@ -124,8 +124,20 @@ def _extract_rows(path_str: str) -> tuple[list[tuple[str, str, str]], str | None
 
 
 def _extract_many(jobs: list[tuple[str, str]]) -> list[tuple[str, list, str | None]]:
-    """jobs: [(sha, representative_path)] -> [(sha, rows, error)]. Serial; Task 3 parallelizes."""
-    return [(sha, *_extract_rows(path)) for (sha, path) in jobs]
+    """jobs: [(sha, representative_path)] -> [(sha, rows, error)]. Parallel across unique
+    contents (dedup has already cut the job count). Workers = RTFM_WORKERS or min(cpus, 8)."""
+    if not jobs:
+        return []
+    if len(jobs) == 1 or _workers() == 1:
+        return [(sha, *_extract_rows(path)) for (sha, path) in jobs]
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    out: list[tuple[str, list, str | None]] = []
+    with ProcessPoolExecutor(max_workers=_workers()) as ex:
+        futs = {ex.submit(_extract_rows, path): sha for (sha, path) in jobs}
+        for fut in as_completed(futs):
+            rows, error = fut.result()
+            out.append((futs[fut], rows, error))
+    return out
 
 
 def reindex_source(conn: sqlite3.Connection, src: Source) -> dict:

@@ -117,6 +117,26 @@ def test_edit_in_place_reextracts_and_gcs_old_sha(home, tmp_path):
     assert not rtfm.search_index(conn, "original")
 
 
+def test_workers_respects_env(monkeypatch):
+    monkeypatch.setenv("RTFM_WORKERS", "3")
+    assert rtfm._workers() == 3
+    monkeypatch.delenv("RTFM_WORKERS", raising=False)
+    assert rtfm._workers() >= 1
+
+
+def test_parallel_extraction_matches_serial(home, tmp_path, monkeypatch):
+    d = tmp_path / "docs"
+    d.mkdir()
+    for i in range(4):
+        (d / f"f{i}.md").write_text(f"unique body {i} keyword{i}\n")
+    monkeypatch.setenv("RTFM_WORKERS", "2")  # force the pool path
+    conn = rtfm.get_index_db()
+    summary = rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    assert summary["unique_contents"] == 4 and summary["newly_extracted"] == 4
+    hits = rtfm.search_index(conn, "keyword2")
+    assert hits and hits[0]["locations"][0]["relpath"] == "f2.md"
+
+
 def test_failed_extraction_recorded_not_raised(home, tmp_path):
     """A file that all extractors reject is recorded with extracted_ok=0; reindex does not raise."""
     d = tmp_path / "docs"
