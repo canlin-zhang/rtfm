@@ -29,6 +29,25 @@ installed it's used automatically (fast path); otherwise rtfm builds a private v
 under `~/.rtfm/venv` on first run — no manual dependency install either way.
 *Optional:* install `poppler-utils` (`pdftotext`) for best-quality PDF extraction.
 
+## Two ways to use it
+
+**Quick-and-dirty (the `default` drop-dir).** Drop PDFs or Markdown/text into `~/.rtfm/default`
+and just `search` — the default dir re-indexes itself on search, so dropped files show up with
+no extra step. Keep it small; it's a scratch space.
+
+**Organized corpus (pointed-to folders).** For a large, structured doc set (e.g. a vendor's
+documentation tree), add a `dir` source in `~/.rtfm/manifest.toml` pointing at the folder, then
+build it once:
+
+```
+reindex("vendor-docs")
+```
+
+Searches are instant afterward. Pointed-to sources are **not** indexed automatically — a search
+against an unbuilt source returns a warning telling you to `reindex` it. Byte-identical files
+that repeat across version subfolders are extracted once; `find_duplicates` lists every path a
+given content lives at.
+
 ## Use
 
 Drop PDFs / `.md` / `.txt` into `~/.rtfm/default/`, then ask Claude to search them, or
