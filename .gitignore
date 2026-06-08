@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.db
+.venv/
+# never commit a real corpus home if RTFM_HOME is pointed into the tree
+/.rtfm/
+# dev process scaffolding (implementation plans, specs) — not published
+docs/superpowers/

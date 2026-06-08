@@ -1,0 +1,30 @@
+# rtfm source manifest — copy to ~/.rtfm/manifest.toml (or $RTFM_HOME/manifest.toml)
+# and edit. Each [[source]] declares one place rtfm indexes, in place. rtfm never
+# moves or copies your files out; it only reads them (see ADR 0001).
+
+# The default drop-dir. Auto-created on first run. The only source rtfm may MODIFY
+# (mutable = true), and even then only when you explicitly ask it to (ADR 0001).
+[[source]]
+name    = "default"
+type    = "dir"
+path    = "~/.rtfm/default"
+mutable = true
+
+# A licensed vendor doc install, indexed in place and read-only:
+# [[source]]
+# name = "vendor-tool-2025.06"     # names must be unique; version-stamp duplicates
+# type = "dir"
+# path = "/opt/vendor-tool/2025.06/doc"
+
+# (future) A git doc repo you already cloned — rtfm pulls --ff-only on a staleness window:
+# [[source]]
+# name    = "arch-docs"
+# type    = "repo"
+# path    = "~/work/arch-docs"
+# refresh = true
+
+# (future) A git doc repo rtfm clones and keeps current for you:
+# [[source]]
+# name = "some-docs"
+# type = "repo"
+# url  = "https://github.com/org/some-docs"

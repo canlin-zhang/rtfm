@@ -1,0 +1,11 @@
+{
+  "name": "rtfm",
+  "owner": { "name": "Canlin Zhang" },
+  "plugins": [
+    {
+      "name": "rtfm",
+      "source": "./",
+      "description": "Read The Full Manual — local document-corpus search."
+    }
+  ]
+}
