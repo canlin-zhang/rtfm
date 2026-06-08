@@ -1,30 +1,21 @@
-# rtfm source manifest — copy to ~/.rtfm/manifest.toml (or $RTFM_HOME/manifest.toml)
-# and edit. Each [[source]] declares one place rtfm indexes, in place. rtfm never
-# moves or copies your files out; it only reads them (see ADR 0001).
+# rtfm source manifest. Copy to ~/.rtfm/manifest.toml and edit.
+# Each [[source]] is one place rtfm indexes, in place. Two modes:
+#
+#   1. The "default" drop-dir — quick-and-dirty scratch. Drop files in, search finds them
+#      (it self-heals on search). Created for you automatically; keep it small.
+#   2. Pointed-to folders — an organized corpus you manage. These are indexed only when you
+#      run the `reindex` tool, so a large set never blocks a search. Read-only by default.
 
-# The default drop-dir. Auto-created on first run. The only source rtfm may MODIFY
-# (mutable = true), and even then only when you explicitly ask it to (ADR 0001).
 [[source]]
-name    = "default"
+name    = "default"            # the zero-config drop-dir; the only mutable source by default
 type    = "dir"
 path    = "~/.rtfm/default"
 mutable = true
 
-# A licensed vendor doc install, indexed in place and read-only:
+# Example: point at a large, organized doc set. Run reindex("vendor-docs") once after adding it;
+# searches are instant thereafter. Byte-identical files across version subfolders are stored once.
 # [[source]]
-# name = "vendor-tool-2025.06"     # names must be unique; version-stamp duplicates
-# type = "dir"
-# path = "/opt/vendor-tool/2025.06/doc"
-
-# (future) A git doc repo you already cloned — rtfm pulls --ff-only on a staleness window:
-# [[source]]
-# name    = "arch-docs"
-# type    = "repo"
-# path    = "~/work/arch-docs"
-# refresh = true
-
-# (future) A git doc repo rtfm clones and keeps current for you:
-# [[source]]
-# name = "some-docs"
-# type = "repo"
-# url  = "https://github.com/org/some-docs"
+# name    = "vendor-docs"
+# type    = "dir"
+# path    = "/path/to/vendor/Documentation"
+# mutable = false
