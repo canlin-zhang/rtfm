@@ -16,13 +16,13 @@ Answer the user's question using **only** text found in the indexed corpus via r
 
 ### 1. Search
 
-Call `mcp__plugin_rtfm_rtfm__search(query)` with the key terms from the question. Note `sources_searched` to stay aware of the full corpus. Small new or edited files are auto-indexed on search; if the response carries a `STALE SOURCE` warning (a source has more new/changed files than the auto-reindex budget), build it yourself with `mcp__plugin_rtfm_rtfm__reindex('<source>')`, then search again.
+Call `search` with `query` — the key terms from the question. Note `sources_searched` to stay aware of the full corpus. Small new or edited files are auto-indexed on search; if the response carries a `STALE SOURCE` warning (a source has more new/changed files than the auto-reindex budget), build it yourself with `reindex('<source>')`, then search again.
 
 If the first query returns nothing useful, try narrower or alternative terms — don't give up after one miss.
 
 ### 2. Read
 
-For each promising hit, call `mcp__plugin_rtfm_rtfm__read(source, relpath, start, end)` to retrieve the actual text around the hit's locator: read ±1–2 pages (PDF) or a surrounding line range (text) for full context. A hit's `locations` lists up to a few of the paths its content lives at (`total_locations` is the true count; `find_duplicates` gives the full list) — any one reads identically.
+For each promising hit, call `read` with `source`, `relpath`, `start`, `end` to retrieve the actual text around the hit's locator: read ±1–2 pages (PDF) or a surrounding line range (text) for full context. A hit's `locations` lists up to a few of the paths its content lives at (`total_locations` is the true count; `find_duplicates` gives the full list) — any one reads identically.
 
 ### 3. Answer
 
