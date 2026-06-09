@@ -1,5 +1,6 @@
 # tests/test_packaging.py
 import json
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -30,6 +31,8 @@ def test_read_the_manual_skill_bundled_and_devendored():
     assert text.startswith("---")
     frontmatter = text.split("---", 2)[1]
     assert "name: read-the-manual" in frontmatter and "description:" in frontmatter
-    # ADR 0008: skills reference rtfm's tools, never a predecessor server.
-    assert "mcp__specs__" not in text
-    assert "mcp__plugin_rtfm_rtfm__search" in text
+    # ADR 0008: every MCP tool the skill references must be rtfm's own (allowlist > denylist).
+    tool_refs = re.findall(r"mcp__\w+", text)
+    assert tool_refs, "skill references no MCP tools"
+    assert all(ref.startswith("mcp__plugin_rtfm_rtfm__") for ref in tool_refs), tool_refs
+    assert "mcp__plugin_rtfm_rtfm__search" in text and "mcp__plugin_rtfm_rtfm__read" in text

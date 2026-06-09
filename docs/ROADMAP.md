@@ -23,7 +23,7 @@ Deferred scope, each with the decision that parked it. Not yet implemented.
   document-level signal: searching even an exact document title can surface incidental mentions
   scattered across other documents rather than the doc that bears that title. Tackle it by
   extracting *more from the corpus*, not by reinventing ranking: capture document **title**
-  (PDF metadata + front-page heading), **outline/TOC** (`fitz.get_toc()`), and headings; index
+  (PDF metadata + front-page heading), **outline/TOC** (`doc.get_toc()`), and headings; index
   them as high-weight fields and surface the title in hits. First determine whether the titled
   doc's text is even extracted (a front-page title may be an image) vs. merely out-ranked.
   Deferred from Plan 1's page-text-only MVP; **sequenced after the skill work**, which rides on

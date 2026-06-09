@@ -2,7 +2,7 @@
 
 A local MCP server that makes large, can't-read-by-hand technical documentation — PDF spec
 sets and documentation repositories — searchable, with grounded, cited answers. Published
-as the `rtfm` plugin (skills `check` and `audit`). The "F" is for *Full*: it ingests the
+as the `rtfm` plugin (skill `read-the-manual`; `audit` planned with Plan 4). The "F" is for *Full*: it ingests the
 whole manual so you can search all of it, not just skim.
 
 ## Language

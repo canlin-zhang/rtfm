@@ -264,16 +264,18 @@ def test_extraction_works_from_worker_thread_with_event_loop(home, tmp_path):
 
 
 def test_reindex_indexes_rst_files(home, tmp_path):
-    """`.rst` (reStructuredText/Sphinx) is plain text — it indexes like `.md`, with line locators.
-    Unlocks Sphinx doc trees. Fails before `.rst` is in TEXT_EXTS (file skipped)."""
+    """`.rst` and `.rest` (reStructuredText) are plain text — they index like `.md`, with line
+    locators. Unlocks Sphinx doc trees. Fails before they're in TEXT_EXTS (files skipped)."""
     d = tmp_path / "docs"
     d.mkdir()
     (d / "guide.rst").write_text(
         "Widget Protocol\n===============\n\nThe widget protocol defines flits and credits.\n")
+    (d / "manual.rest").write_text(
+        "Credit Scheme\n=============\n\nCredits gate the flit pipeline downstream.\n")
     conn = rtfm.get_index_db()
     summary = rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
-    assert summary["files_seen"] == 1 and summary["newly_extracted"] == 1
+    assert summary["files_seen"] == 2 and summary["newly_extracted"] == 2
     rows = conn.execute("SELECT locator_kind FROM content_fts").fetchall()
-    assert rows and rows[0][0] == "line"
-    hits = rtfm.search_index(conn, "widget protocol flits")
-    assert any("widget protocol" in h["snippet"].lower() for h in hits)
+    assert rows and all(r[0] == "line" for r in rows)
+    assert rtfm.search_index(conn, "widget protocol flits")
+    assert rtfm.search_index(conn, "credits flit pipeline downstream")
