@@ -27,8 +27,10 @@ def test_migration_drops_old_schema(home):
     conn = rtfm.get_index_db()
     assert conn.execute("PRAGMA user_version").fetchone()[0] == rtfm.SCHEMA_VERSION
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert "doc_meta" not in tables and "doc_fts" not in tables
-    assert {"contents", "locations"} <= tables
+    assert "doc_meta" not in tables                        # legacy table dropped
+    assert {"contents", "locations", "doc_fts"} <= tables   # current v3 schema present
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(doc_fts)")}
+    assert {"title", "headings"} <= cols                    # old doc_fts(text) rebuilt for v3
 
 
 def test_reindex_dedups_identical_files(home, tmp_path):
