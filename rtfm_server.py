@@ -115,7 +115,7 @@ def _rows_for_file(path: Path) -> list[tuple[str, str, str]]:
 
 
 def _extract_rows(path_str: str) -> tuple[list[tuple[str, str, str]], str | None]:
-    """Process-pool worker (module-level so it pickles): extract rows for one file.
+    """Extraction worker, run in a thread by _extract_many: extract rows for one file.
     Returns (rows, error); a failed extraction yields ([], message) instead of raising."""
     try:
         return _rows_for_file(Path(path_str)), None
@@ -125,14 +125,20 @@ def _extract_rows(path_str: str) -> tuple[list[tuple[str, str, str]], str | None
 
 def _extract_many(jobs: list[tuple[str, str]]) -> list[tuple[str, list, str | None]]:
     """jobs: [(sha, representative_path)] -> [(sha, rows, error)]. Parallel across unique
-    contents (dedup has already cut the job count). Workers = RTFM_WORKERS or min(cpus, 8)."""
+    contents (dedup has already cut the job count) with a THREAD pool. A process pool is
+    unsafe here: this runs inside the FastMCP server, whose sync tools execute on a worker
+    thread, so a fork-based ProcessPoolExecutor deadlocks — forked workers inherit locks held
+    by threads that don't exist in the child and hang at startup (0% CPU, server wedged). This
+    is invisible to pytest (single-threaded). Threads carry the common case anyway: extraction
+    is dominated by the `pdftotext` subprocess, which releases the GIL. Workers = RTFM_WORKERS
+    or min(cpus, 8)."""
     if not jobs:
         return []
     if len(jobs) == 1 or _workers() == 1:
         return [(sha, *_extract_rows(path)) for (sha, path) in jobs]
-    from concurrent.futures import ProcessPoolExecutor, as_completed
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     out: list[tuple[str, list, str | None]] = []
-    with ProcessPoolExecutor(max_workers=_workers()) as ex:
+    with ThreadPoolExecutor(max_workers=_workers()) as ex:
         futs = {ex.submit(_extract_rows, path): sha for (sha, path) in jobs}
         for fut in as_completed(futs):
             rows, error = fut.result()

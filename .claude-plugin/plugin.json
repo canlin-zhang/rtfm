@@ -1,7 +1,7 @@
 {
   "name": "rtfm",
   "description": "Read The Full Manual — search large technical documentation (PDF spec sets, doc repos) with grounded, cited answers.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": { "name": "Canlin Zhang" },
   "license": "MIT",
   "homepage": "https://github.com/canlin-zhang/rtfm",

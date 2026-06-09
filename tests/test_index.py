@@ -198,3 +198,63 @@ def test_failed_extraction_not_retried_on_unchanged_bytes(home, tmp_path):
         "SELECT extracted_ok FROM contents WHERE sha256=?", (sha,)
     ).fetchone()
     assert row_after_second is not None and row_after_second[0] == 0
+
+
+def test_extraction_runs_in_current_process_not_forked(home, tmp_path, monkeypatch):
+    """Regression guard for the FastMCP-server deadlock: parallel extraction must run in THIS
+    process (a thread pool), never a forked child. A process pool deadlocks inside the server
+    (forked workers inherit thread-held locks and hang). Force the pool path and assert every
+    extraction ran under our PID. The old ProcessPoolExecutor fails this: a forked worker runs
+    in a different PID and its appends never reach our list (and this closure spy isn't even
+    picklable for a process pool)."""
+    d = tmp_path / "docs"
+    d.mkdir()
+    for i in range(4):
+        (d / f"f{i}.md").write_text(f"body {i} keyword{i}\n")
+    monkeypatch.setenv("RTFM_WORKERS", "4")  # force the pool path (>1 worker, >1 job)
+
+    seen_pids: list[int] = []
+    real = rtfm._extract_rows
+
+    def spy(path_str):
+        seen_pids.append(os.getpid())
+        return real(path_str)
+
+    monkeypatch.setattr(rtfm, "_extract_rows", spy)
+    conn = rtfm.get_index_db()
+    summary = rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+
+    assert summary["newly_extracted"] == 4
+    assert seen_pids, "extraction worker never ran in this process (out-of-process pool?)"
+    assert all(pid == os.getpid() for pid in seen_pids)
+
+
+def test_extraction_works_from_worker_thread_with_event_loop(home, tmp_path):
+    """Mimic the FastMCP server runtime: a sync tool runs on a worker thread while an asyncio
+    event loop runs in the background. Reindex must complete here, not wedge — the old
+    fork-based pool could deadlock under exactly these conditions; a thread pool cannot."""
+    import asyncio
+    import threading
+
+    d = tmp_path / "docs"
+    d.mkdir()
+    for i in range(4):
+        (d / f"f{i}.md").write_text(f"body {i} keyword{i}\n")
+
+    loop = asyncio.new_event_loop()
+    threading.Thread(target=loop.run_forever, daemon=True).start()
+
+    result: dict = {}
+    done = threading.Event()
+
+    def run_reindex():
+        conn = rtfm.get_index_db()  # sqlite connection owned by this thread
+        result["summary"] = rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+        done.set()
+
+    threading.Thread(target=run_reindex, daemon=True).start()
+    completed = done.wait(timeout=30)
+    loop.call_soon_threadsafe(loop.stop)
+
+    assert completed, "reindex did not complete from a worker thread within 30s (deadlock?)"
+    assert result["summary"]["newly_extracted"] == 4
