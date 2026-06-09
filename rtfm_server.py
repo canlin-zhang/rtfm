@@ -164,14 +164,23 @@ def _pdf_doc_signal(path: Path) -> tuple[str, str]:
 
 
 def _text_doc_signal(path: Path) -> tuple[str, str]:
-    """(title, headings) for markup. ATX (`#`) and setext/rst underline headings; title = first."""
+    """(title, headings) for markup. ATX (`#`) and setext/rst underline headings; title = first.
+    A leading `---` YAML frontmatter block is skipped so its closing fence isn't read as a setext
+    underline (which would make a frontmatter key the title)."""
     lines = path.read_text(errors="replace").splitlines()
+    start = 0
+    if lines and lines[0].strip() == "---":
+        for j in range(1, len(lines)):
+            if lines[j].strip() == "---":
+                start = j + 1
+                break
     headings: list[str] = []
-    for i, raw in enumerate(lines):
-        line = raw.strip()
+    for i in range(start, len(lines)):
+        line = lines[i].strip()
         if line.startswith("#"):
             headings.append(line.lstrip("#").strip())
-        elif set(line) <= set("=-~^") and len(line) >= 3 and i > 0 and lines[i - 1].strip():
+        elif (len(line) >= 3 and len(set(line)) == 1 and line[0] in "=-~^"
+              and i > start and lines[i - 1].strip()):       # homogeneous setext/rst underline
             headings.append(lines[i - 1].strip())
     headings = [h for h in headings if h]
     return (headings[0] if headings else ""), "\n".join(headings)
@@ -574,7 +583,8 @@ def search_index(conn: sqlite3.Connection, query: str, source: str | None = None
     except sqlite3.OperationalError:
         drows = []
     for sha, title, headings in drows:
-        in_title = any(t in (title or "").lower() for t in qterms)
+        title_tokens = set(re.findall(r"\w+", (title or "").lower()))   # token match, as FTS5 did
+        in_title = any(t in title_tokens for t in qterms)
         locs, total = _locations_for(conn, sha, max_locations)
         snippet = title if in_title else _best_snippet(headings, qterms)
         hits.append({"sha256": sha, "locator_kind": "title" if in_title else "heading",

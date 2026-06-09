@@ -94,6 +94,79 @@ def test_search_tool_flags_fuzzy(home, tmp_path):
     assert out.get("fuzzy") is True
 
 
+def test_heading_only_match_classified_as_heading(home, tmp_path):
+    """A query that is a substring of a title word but a real token only in the headings must be
+    classified as a heading match — not mislabeled 'title' by substring coincidence."""
+    d = tmp_path / "docs"
+    d.mkdir()
+    _titled_pdf(d / "x.pdf", "Flux Capacitor Notes", ["Cap Reference"], ["unrelated body"])
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    hits = rtfm.search_index(conn, "cap")            # 'cap' is a heading token, not in 'capacitor'
+    assert hits and hits[0]["locator_kind"] == "heading"
+
+
+def test_frontmatter_not_treated_as_title(home, tmp_path):
+    """A YAML frontmatter block must not have its closing `---` fence read as a setext underline,
+    which would make a frontmatter key the document title."""
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "g.md").write_text("---\ntitle: meta\nauthor: bar\n---\n\n# Real Heading\n\nbody\n")
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    assert conn.execute("SELECT title FROM doc_fts").fetchone()[0] == "Real Heading"
+
+
+def test_title_match_outranks_heading_match(home, tmp_path):
+    """The bm25 title weight (10) must outrank the heading weight (5): a title match ranks above a
+    heading-only match. A weight regression would otherwise pass silently."""
+    d = tmp_path / "docs"
+    d.mkdir()
+    _titled_pdf(d / "a.pdf", "Zephyr Protocol", [], ["body one"])             # match in title
+    _titled_pdf(d / "b.pdf", "Other Doc", ["Zephyr Appendix"], ["body two"])  # match in heading
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    hits = rtfm.search_index(conn, "zephyr")
+    assert hits[0]["locations"][0]["relpath"] == "a.pdf"
+    assert hits[0]["locator_kind"] == "title"
+
+
+def test_pdf_title_falls_back_to_page_text(home, tmp_path):
+    """No usable metadata title → first substantial page-1 line becomes the title."""
+    d = tmp_path / "docs"
+    d.mkdir()
+    _titled_pdf(d / "x.pdf", None, [], ["Quokka Reference Manual", "body text here"])
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    assert "Quokka Reference Manual" in conn.execute("SELECT title FROM doc_fts").fetchone()[0]
+
+
+def test_doc_fts_purged_when_file_removed(home, tmp_path):
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "g.md").write_text("# Gadget Manual\nbody\n")
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    assert conn.execute("SELECT COUNT(*) FROM doc_fts").fetchone()[0] == 1
+    (d / "g.md").unlink()
+    rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    assert conn.execute("SELECT COUNT(*) FROM doc_fts").fetchone()[0] == 0    # GC'd with the file
+
+
+def test_title_ranking_respects_source_filter(home, tmp_path):
+    da = tmp_path / "a"
+    da.mkdir()
+    _titled_pdf(da / "x.pdf", "Quasar Spec", [], ["body"])
+    db_ = tmp_path / "b"
+    db_.mkdir()
+    (db_ / "y.md").write_text("nothing relevant\n")
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, rtfm.Source("a", "dir", da))
+    rtfm.reindex_source(conn, rtfm.Source("b", "dir", db_))
+    assert rtfm.search_index(conn, "quasar", source="a")             # title hit in its own source
+    assert rtfm.search_index(conn, "quasar", source="b") == []       # scoped out of source b
+
+
 def test_snippet_picks_best_coverage_line(home, tmp_path):
     d = tmp_path / "docs"
     d.mkdir()
