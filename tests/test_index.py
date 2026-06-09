@@ -242,7 +242,8 @@ def test_extraction_works_from_worker_thread_with_event_loop(home, tmp_path):
         (d / f"f{i}.md").write_text(f"body {i} keyword{i}\n")
 
     loop = asyncio.new_event_loop()
-    threading.Thread(target=loop.run_forever, daemon=True).start()
+    loop_thread = threading.Thread(target=loop.run_forever, daemon=True)
+    loop_thread.start()
 
     result: dict = {}
     done = threading.Event()
@@ -255,6 +256,8 @@ def test_extraction_works_from_worker_thread_with_event_loop(home, tmp_path):
     threading.Thread(target=run_reindex, daemon=True).start()
     completed = done.wait(timeout=30)
     loop.call_soon_threadsafe(loop.stop)
+    loop_thread.join(timeout=5)  # run_forever returns once stopped; then free the loop
+    loop.close()
 
     assert completed, "reindex did not complete from a worker thread within 30s (deadlock?)"
     assert result["summary"]["newly_extracted"] == 4

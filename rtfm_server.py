@@ -130,8 +130,12 @@ def _extract_many(jobs: list[tuple[str, str]]) -> list[tuple[str, list, str | No
     thread, so a fork-based ProcessPoolExecutor deadlocks — forked workers inherit locks held
     by threads that don't exist in the child and hang at startup (0% CPU, server wedged). This
     is invisible to pytest (single-threaded). Threads carry the common case anyway: extraction
-    is dominated by the `pdftotext` subprocess, which releases the GIL. Workers = RTFM_WORKERS
-    or min(cpus, 8)."""
+    is dominated by the `pdftotext` subprocess, which releases the GIL. Tradeoff vs. a process
+    pool: a hard crash in a worker (e.g. a segfault in a native PDF extractor) takes down the
+    whole server here, where a process pool would have contained it — acceptable because the hot
+    path is the isolated `pdftotext` subprocess and the pure-Python fallbacks rarely segfault; a
+    `spawn`-context process pool would regain isolation without the fork hazard if that changes.
+    Workers = RTFM_WORKERS or min(cpus, 8)."""
     if not jobs:
         return []
     if len(jobs) == 1 or _workers() == 1:
