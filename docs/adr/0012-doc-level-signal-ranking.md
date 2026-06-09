@@ -9,8 +9,9 @@ incidental mentions scattered across other documents above the document that *be
 A `doc_fts` FTS5 table holds one row per unique content — `(sha256, title, headings)` — alongside
 the per-chunk `content_fts`. `search` queries both: a document whose title or headings match ranks
 **first**, then body matches (AND-first, OR/BM25 fallback). Every hit carries the document `title`;
-a body hit reached via the OR fallback is flagged `fuzzy`; snippets pick the line covering the
-most query terms. This is the Tier 1 search-quality win — richer extraction inside FTS5, not a
+when the body search uses the OR/BM25 fallback every body hit in that call is flagged `fuzzy`
+(title/heading hits are always `fuzzy=False`); snippets pick the line covering the most query
+terms. This is the Tier 1 search-quality win — richer extraction inside FTS5, not a
 ranking rewrite (the engine rehaul is the reserved 1.0.0; see ROADMAP).
 
 ## Considered Options

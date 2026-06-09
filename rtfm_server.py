@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
 import sqlite3
@@ -18,10 +19,13 @@ import subprocess
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 from mcp.server.fastmcp import FastMCP
 
 # --- config -----------------------------------------------------------------
+_log = logging.getLogger("rtfm")
+
 TEXT_EXTS = {".txt", ".md", ".rst", ".rest"}   # plain text → line locators (.html later)
 CHUNK_LINES = 50
 SCHEMA_VERSION = 3                   # index DB is a cache; mismatch ⇒ drop & rebuild
@@ -165,8 +169,12 @@ def _pdf_doc_signal(path: Path) -> tuple[str, str]:
 
 def _text_doc_signal(path: Path) -> tuple[str, str]:
     """(title, headings) for markup. ATX (`#`) and setext/rst underline headings; title = first.
-    A leading `---` YAML frontmatter block is skipped so its closing fence isn't read as a setext
-    underline (which would make a frontmatter key the title)."""
+
+    Contract for a setext/rst underline: a homogeneous run of one underline char (`= - ~ ^`,
+    length ≥ 3) directly under a non-blank line makes that line a heading — CommonMark-aligned
+    (`paragraph\\n---` is a heading; a `---` after a blank line is a horizontal rule, not a
+    heading). A leading `---` YAML frontmatter block is skipped first so its closing fence isn't
+    misread as an underline (which would make a frontmatter key the title)."""
     lines = path.read_text(errors="replace").splitlines()
     start = 0
     if lines and lines[0].strip() == "---":
@@ -187,16 +195,21 @@ def _text_doc_signal(path: Path) -> tuple[str, str]:
 
 
 def _doc_signal_for_file(path: Path) -> tuple[str, str]:
-    """Doc-level (title, headings) for ranking. Best-effort: any failure (missing pymupdf, bad
-    PDF) yields ("", "") so a signal miss never blocks body extraction."""
+    """Doc-level (title, headings) for ranking. Best-effort — a failure yields ("", "") so the
+    document still ranks on body text and signal extraction never blocks body extraction. The
+    failure is logged (not silent): a broken/absent pymupdf would otherwise strip title/heading
+    ranking corpus-wide with nothing to grep."""
     ext = path.suffix.lower()
     try:
         if ext == ".pdf":
             return _pdf_doc_signal(path)
         if ext in TEXT_EXTS:
             return _text_doc_signal(path)
-    except Exception:
-        pass
+    except ImportError as e:
+        _log.warning("doc-signal disabled for %s (%s) — body search unaffected; reinstall to "
+                     "restore title/heading ranking", path, e)
+    except Exception as e:
+        _log.warning("doc-signal extraction failed for %s: %s", path, e, exc_info=True)
     return "", ""
 
 
@@ -211,8 +224,18 @@ def _extract_rows(path_str: str) -> tuple[list[tuple[str, str, str]], str, str, 
         return [], "", "", f"{type(e).__name__}: {e}"
 
 
-def _extract_many(jobs: list[tuple[str, str]]) -> list[tuple[str, list, str, str, str | None]]:
-    """jobs: [(sha, path)] -> [(sha, rows, title, headings, error)]. Parallel across unique
+class _Extracted(NamedTuple):
+    """One content's extraction result. Named so the two adjacent strings (title, headings) can't
+    be swapped by positional unpacking downstream."""
+    sha: str
+    rows: list
+    title: str
+    headings: str
+    error: str | None
+
+
+def _extract_many(jobs: list[tuple[str, str]]) -> list[_Extracted]:
+    """jobs: [(sha, path)] -> [_Extracted(sha, rows, title, headings, error)]. Parallel over unique
     contents (dedup has already cut the job count) with a THREAD pool. A process pool is
     unsafe here: this runs inside the FastMCP server, whose sync tools execute on a worker
     thread, so a fork-based ProcessPoolExecutor deadlocks — forked workers inherit locks held
@@ -227,13 +250,13 @@ def _extract_many(jobs: list[tuple[str, str]]) -> list[tuple[str, list, str, str
     if not jobs:
         return []
     if len(jobs) == 1 or _workers() == 1:
-        return [(sha, *_extract_rows(path)) for (sha, path) in jobs]
+        return [_Extracted(sha, *_extract_rows(path)) for (sha, path) in jobs]
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    out: list[tuple[str, list, str, str, str | None]] = []
+    out: list[_Extracted] = []
     with ThreadPoolExecutor(max_workers=_workers()) as ex:
         futs = {ex.submit(_extract_rows, path): sha for (sha, path) in jobs}
         for fut in as_completed(futs):
-            out.append((futs[fut], *fut.result()))
+            out.append(_Extracted(futs[fut], *fut.result()))
     return out
 
 
@@ -292,22 +315,22 @@ def reindex_source(conn: sqlite3.Connection, src: Source) -> dict:
         if sha in need and sha not in jobs:
             jobs[sha] = str(src.path / rel)
 
-    for sha, rows, title, headings, error in _extract_many(list(jobs.items())):
-        kind = rows[0][0] if rows else "line"
-        conn.execute("DELETE FROM content_fts WHERE sha256=?", (sha,))
+    for ex in _extract_many(list(jobs.items())):
+        kind = ex.rows[0][0] if ex.rows else "line"
+        conn.execute("DELETE FROM content_fts WHERE sha256=?", (ex.sha,))
         conn.executemany(
             "INSERT INTO content_fts(sha256, locator_kind, locator_value, text) VALUES(?,?,?,?)",
-            [(sha, k, v, t) for (k, v, t) in rows])
-        conn.execute("DELETE FROM doc_fts WHERE sha256=?", (sha,))
+            [(ex.sha, k, v, t) for (k, v, t) in ex.rows])
+        conn.execute("DELETE FROM doc_fts WHERE sha256=?", (ex.sha,))
         conn.execute("INSERT INTO doc_fts(sha256, title, headings) VALUES(?,?,?)",
-                     (sha, title, headings))
+                     (ex.sha, ex.title, ex.headings))
         conn.execute(
             "INSERT INTO contents(sha256, locator_kind, n_chunks, extracted_ok, error) "
             "VALUES(?,?,?,?,?) ON CONFLICT(sha256) DO UPDATE SET "
             "locator_kind=excluded.locator_kind, n_chunks=excluded.n_chunks, "
             "extracted_ok=excluded.extracted_ok, error=excluded.error",
-            (sha, kind, len(rows), 0 if error else 1, error))
-        summary["errors" if error else "newly_extracted"] += 1
+            (ex.sha, kind, len(ex.rows), 0 if ex.error else 1, ex.error))
+        summary["errors" if ex.error else "newly_extracted"] += 1
     conn.commit()
 
     for tbl in ("content_fts", "doc_fts", "contents"):           # GC contents with no live path
@@ -556,71 +579,93 @@ def _locations_for(conn: sqlite3.Connection, sha: str,
     return [{"source": s, "relpath": r} for (s, r) in locs], total
 
 
+# Substrings marking a real index problem (corrupt / missing table / locked) vs a benign FTS5
+# syntax edge. Corruption is surfaced (raised → reindex warning), not hidden behind empty results.
+_FTS_CORRUPTION = ("no such table", "no such column", "malformed", "database is locked")
+
+
+def _fts_rows(conn: sqlite3.Connection, sql: str, params: tuple) -> list:
+    """Run an FTS query. Returns [] on a benign FTS5-syntax OperationalError (rare, given
+    _sanitize_fts), but RE-RAISES when the error signals a corrupt/missing/locked index so the
+    caller turns it into a reindex warning instead of a silent empty result."""
+    try:
+        return conn.execute(sql, params).fetchall()
+    except sqlite3.OperationalError as e:
+        if any(s in str(e).lower() for s in _FTS_CORRUPTION):
+            raise
+        return []
+
+
+def _make_hit(conn: sqlite3.Connection, sha: str, kind: str, val: str, title: str | None,
+              snippet: str, fuzzy: bool, max_locations: int) -> dict:
+    """One search-result row — a single keyset for both doc-level and body hits, so the two
+    construction sites can't drift apart. `locator_value` is "" for doc-level (title/heading)
+    hits: they point at the document, not a page/line."""
+    locs, total = _locations_for(conn, sha, max_locations)
+    return {"sha256": sha, "locator_kind": kind, "locator_value": val, "title": title or "",
+            "fuzzy": fuzzy, "snippet": (snippet or "")[:_SNIPPET_CAP],
+            "locations": locs, "total_locations": total}
+
+
 def search_index(conn: sqlite3.Connection, query: str, source: str | None = None,
                  limit: int = 20, max_locations: int = MAX_LOCATIONS) -> list[dict]:
-    """Dedup'd hits keyed by content sha. Doc-level signal first: a document whose title/headings
-    match ranks above documents that merely mention the terms in body (the Tier 1 win). Body
-    matches follow, AND-first then OR/BM25 fallback (each body hit then carries `fuzzy=True`).
-    Every hit carries the document `title` and lists up to `max_locations` of its paths."""
+    """Hits keyed by content sha, one per document. Doc-level signal first: a document whose
+    title/headings match ranks above documents that merely mention the terms in body (the Tier 1
+    win); body matches follow, AND-first then OR/BM25 fallback. `fuzzy` is per *call*, not per
+    hit — True on every body hit when the OR fallback was used, always False on title/heading
+    hits. Every hit carries the document `title`. Raises sqlite3.OperationalError on a corrupt
+    index (the caller turns that into a reindex warning)."""
     q = query.strip()
     if not q:
         return []
     sanitized = _sanitize_fts(q)
-    qterms = [t.lower() for t in sanitized.split() if len(t) > 1]
+    qtokens = [t.lower() for t in sanitized.split()]              # all tokens, for classification
+    qterms = [t for t in qtokens if len(t) > 1]                  # >1-char only — snippet scoring
     src_clause = " AND sha256 IN (SELECT sha256 FROM locations WHERE source=?)"
+    src_params: tuple = (source,) if source is not None else ()
     hits: list[dict] = []
     seen: set[str] = set()
 
-    # 1. Doc-level signal — title/heading matches rank first.
+    # 1. Doc-level signal — title/heading matches rank first (title weighted over headings).
     doc_sql = "SELECT sha256, title, headings FROM doc_fts WHERE doc_fts MATCH ?"
-    dparams: list = [sanitized]
     if source is not None:
         doc_sql += src_clause
-        dparams.append(source)
-    try:
-        drows = conn.execute(doc_sql + " ORDER BY bm25(doc_fts, 1.0, 10.0, 5.0) LIMIT ?",
-                             (*dparams, limit)).fetchall()
-    except sqlite3.OperationalError:
-        drows = []
-    for sha, title, headings in drows:
-        title_tokens = set(re.findall(r"\w+", (title or "").lower()))   # token match, as FTS5 did
-        in_title = any(t in title_tokens for t in qterms)
-        locs, total = _locations_for(conn, sha, max_locations)
+    for sha, title, headings in _fts_rows(
+            conn, doc_sql + " ORDER BY bm25(doc_fts, 1.0, 10.0, 5.0) LIMIT ?",
+            (sanitized, *src_params, limit)):
+        title_tokens = {t.lower() for t in re.findall(r"\w+", title or "")}   # token match, as FTS5
+        in_title = any(t in title_tokens for t in qtokens)
         snippet = title if in_title else _best_snippet(headings, qterms)
-        hits.append({"sha256": sha, "locator_kind": "title" if in_title else "heading",
-                     "locator_value": "", "title": title or "", "fuzzy": False,
-                     "snippet": snippet[:_SNIPPET_CAP],
-                     "locations": locs, "total_locations": total})
+        hits.append(_make_hit(conn, sha, "title" if in_title else "heading", "",
+                              title, snippet, False, max_locations))
         seen.add(sha)
 
-    # 2. Body matches — AND first, OR/BM25 fallback.
+    # 2. Body matches. AND first — GROUP BY sha so a multi-chunk doc yields one row and doesn't eat
+    #    the LIMIT window (distinct-doc fetch). OR/BM25 fallback can't GROUP BY (bm25 is per-row),
+    #    so it over-fetches ranked rows and dedups to distinct docs in Python.
     base = "SELECT sha256, locator_kind, locator_value, text FROM content_fts WHERE text MATCH ?"
-    bparams: list = [sanitized]
     if source is not None:
         base += src_clause
-        bparams.append(source)
-    try:
-        brows = conn.execute(base + " LIMIT ?", (*bparams, limit)).fetchall()
-    except sqlite3.OperationalError:
-        brows = []
+    headroom = limit + len(seen)                                 # seen docs may also match in body
+    brows = _fts_rows(conn, base + " GROUP BY sha256 LIMIT ?", (sanitized, *src_params, headroom))
     fuzzy = False
     terms = [t for t in sanitized.split() if len(t) >= 3] or sanitized.split()
     if not brows and len(terms) > 1:
-        bparams[0] = " OR ".join(terms)
-        try:
-            brows = conn.execute(base + " ORDER BY bm25(content_fts) LIMIT ?",
-                                 (*bparams, limit)).fetchall()
-            fuzzy = True
-        except sqlite3.OperationalError:
-            brows = []
+        ranked = _fts_rows(conn, base + " ORDER BY bm25(content_fts) LIMIT ?",
+                           (" OR ".join(terms), *src_params, headroom * 8))
+        brows, picked = [], set()
+        for row in ranked:
+            if row[0] not in picked:
+                picked.add(row[0])
+                brows.append(row)
+                if len(brows) >= headroom:
+                    break
+        fuzzy = True
     for sha, kind, val, text in brows:
-        if sha in seen:                                   # already surfaced as a title/heading hit
+        if sha in seen:                                          # already a title/heading hit
             continue
-        locs, total = _locations_for(conn, sha, max_locations)
-        hits.append({"sha256": sha, "locator_kind": kind, "locator_value": val,
-                     "title": _doc_title(conn, sha), "fuzzy": fuzzy,
-                     "snippet": _best_snippet(text, qterms)[:_SNIPPET_CAP],
-                     "locations": locs, "total_locations": total})
+        hits.append(_make_hit(conn, sha, kind, val, _doc_title(conn, sha),
+                              _best_snippet(text, qterms), fuzzy, max_locations))
         seen.add(sha)
     return hits[:limit]
 
@@ -687,7 +732,14 @@ def search(query: str, source: str | None = None, max_files: int = 20,
             warnings.append(
                 f"!!! AUTO-REINDEX FAILED '{s.name}' !!! {type(e).__name__}: {e} — searching "
                 f"previously indexed content only. Recover: run reindex('{s.name}').")
-    hits = search_index(conn, query, source=source, limit=max_files, max_locations=max_locations)
+    try:
+        hits = search_index(conn, query, source=source, limit=max_files,
+                            max_locations=max_locations)
+    except sqlite3.OperationalError as e:                # corrupt/missing/locked index
+        hits = []
+        warnings.append(
+            f"!!! INDEX ERROR !!! {e} — the search index looks corrupt or busy. "
+            f"Recover: run reindex() to rebuild it.")
     resp: dict = {"results": hits, "sources_searched": [s.name for s in sources]}
     if any(h.get("fuzzy") for h in hits):                # OR/BM25 fallback — terms didn't co-occur
         resp["fuzzy"] = True

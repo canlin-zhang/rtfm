@@ -167,6 +167,60 @@ def test_title_ranking_respects_source_filter(home, tmp_path):
     assert rtfm.search_index(conn, "quasar", source="b") == []       # scoped out of source b
 
 
+def test_body_docs_not_starved_by_dedup(home, tmp_path):
+    """A multi-chunk and/or already-title-matched doc must not eat the body LIMIT window and
+    starve other distinct docs below max_files (the sha-dedup needs distinct-doc fetching)."""
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "a.md").write_text("# Widget Guide\n" + "\n".join(["widget"] * 300))  # title + ~6 chunks
+    (d / "b.md").write_text("widget appears here\n")
+    (d / "c.md").write_text("widget also here\n")
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    hits = rtfm.search_index(conn, "widget", limit=2)
+    assert len({h["sha256"] for h in hits}) == 2          # A (title) + a body doc, not just A
+
+
+def test_sane_title_rejects_authoring_artifacts(home, tmp_path):
+    """A junk metadata title (authoring artifact) is rejected; title falls back to page text."""
+    d = tmp_path / "docs"
+    d.mkdir()
+    _titled_pdf(d / "x.pdf", "Microsoft Word - draft.docx", [], ["Quokka Reference Manual", "body"])
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    assert conn.execute("SELECT title FROM doc_fts").fetchone()[0] == "Quokka Reference Manual"
+
+
+def test_first_substantial_line_skips_short_and_numeric():
+    assert rtfm._first_substantial_line("1234\nabc\nReal Title\nmore") == "Real Title"
+
+
+def test_serial_extraction_path_indexes_doc_signal(home, tmp_path, monkeypatch):
+    """RTFM_WORKERS=1 serial extraction yields the same _Extracted shape as the pool path."""
+    monkeypatch.setenv("RTFM_WORKERS", "1")
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "a.md").write_text("# Alpha Guide\nbody one\n")
+    (d / "b.md").write_text("# Bravo Guide\nbody two\n")          # 2 distinct jobs, run serially
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    titles = {r[0] for r in conn.execute("SELECT title FROM doc_fts")}
+    assert titles == {"Alpha Guide", "Bravo Guide"}
+
+
+def test_search_warns_on_index_corruption(home, tmp_path):
+    """A corrupt/missing FTS table surfaces a reindex warning, not a silent empty result."""
+    rtfm.load_manifest()
+    (rtfm.default_source_dir() / "a.md").write_text("widget here\n")
+    rtfm.reindex(source=None)
+    conn = rtfm.get_index_db()
+    conn.execute("DROP TABLE content_fts")                       # simulate index corruption
+    conn.commit()
+    out = rtfm.search(query="widget")
+    assert out["results"] == []
+    assert "WARNING" in out and any("reindex" in w.lower() for w in out["WARNING"])
+
+
 def test_snippet_picks_best_coverage_line(home, tmp_path):
     d = tmp_path / "docs"
     d.mkdir()
