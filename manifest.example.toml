@@ -1,10 +1,15 @@
 # rtfm source manifest. Copy to ~/.rtfm/manifest.toml and edit.
-# Each [[source]] is one place rtfm indexes, in place. Two modes:
+# Each [[source]] is one place rtfm indexes, in place.
 #
-#   1. The "default" drop-dir — quick-and-dirty scratch. Drop files in, search finds them
-#      (it self-heals on search). Created for you automatically; keep it small.
-#   2. Pointed-to folders — an organized corpus you manage. These are indexed only when you
-#      run the `reindex` tool, so a large set never blocks a search. Read-only by default.
+# search keeps sources current automatically: when a source has only a few new/changed files
+# (RTFM_AUTO_REINDEX_MAX, default 10) it is reindexed inline, so dropping or editing a handful of
+# files just works. A larger batch is NOT auto-indexed — that would block the query on extraction
+# — so search warns and you run `reindex("<name>")` once. Two modes follow from this:
+#
+#   1. The "default" drop-dir — quick-and-dirty scratch. Drop a few files in, search finds them.
+#      Created for you automatically; keep it small.
+#   2. Pointed-to folders — an organized corpus you manage. Run `reindex("<name>")` once after
+#      first adding a large set; thereafter small changes auto-reindex on search. Read-only by default.
 
 [[source]]
 name    = "default"            # the zero-config drop-dir; the only mutable source by default

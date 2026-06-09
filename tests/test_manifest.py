@@ -52,3 +52,52 @@ def test_malformed_manifest_degrades_loudly(home):
     # the search tool must degrade without raising
     out = rtfm.search(query="anything")
     assert out["results"] == [] and "WARNING" in out
+
+
+def test_missing_path_source_warns_but_keeps_it_and_others(home, tmp_path):
+    """A dir source whose path does not exist is kept (so it stays visible) and warned about;
+    other sources still load. Never silently dropped, never crashes the load."""
+    good = tmp_path / "good"
+    good.mkdir()
+    (home / "manifest.toml").write_text(
+        f'[[source]]\nname="good"\ntype="dir"\npath="{good}"\n'
+        '[[source]]\nname="missing"\ntype="dir"\npath="/no/such/place"\n'
+    )
+    sources, warnings = rtfm.load_manifest()
+    assert {s.name for s in sources} == {"good", "missing"}
+    assert any("missing" in w and "/no/such/place" in w for w in warnings)
+
+
+def test_dir_source_without_path_is_dropped_with_warning(home):
+    """A dir source with no `path` at all is unusable, so it is dropped — but loudly."""
+    (home / "manifest.toml").write_text('[[source]]\nname="nopath"\ntype="dir"\n')
+    sources, warnings = rtfm.load_manifest()
+    assert all(s.name != "nopath" for s in sources)
+    assert any("nopath" in w for w in warnings)
+
+
+def test_path_not_a_directory_warns(home, tmp_path):
+    """A dir source pointed at a file (not a directory) is warned about."""
+    f = tmp_path / "afile.md"
+    f.write_text("hi\n")
+    (home / "manifest.toml").write_text(
+        f'[[source]]\nname="filey"\ntype="dir"\npath="{f}"\n'
+    )
+    sources, warnings = rtfm.load_manifest()
+    assert any("filey" in w for w in warnings)
+
+
+def test_search_tolerates_invalid_source(home, tmp_path):
+    """search degrades gracefully when a configured source is broken: it returns hits from the
+    good sources and surfaces the warning, never raising."""
+    good = tmp_path / "good"
+    good.mkdir()
+    (good / "g.md").write_text("the widget protocol defines flits\n")
+    (home / "manifest.toml").write_text(
+        f'[[source]]\nname="default"\ntype="dir"\npath="{rtfm.default_source_dir()}"\nmutable=true\n'
+        f'[[source]]\nname="good"\ntype="dir"\npath="{good}"\n'
+        '[[source]]\nname="broken"\ntype="dir"\npath="/no/such/place"\n'
+    )
+    out = rtfm.search(query="widget protocol")
+    assert any("widget protocol" in h["snippet"] for h in out["results"])
+    assert "WARNING" in out and any("broken" in w for w in out["WARNING"])

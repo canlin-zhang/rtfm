@@ -3,7 +3,7 @@
 # mirrored here so `uv run pytest` works and `import rtfm_server` resolves from the root.
 [project]
 name = "rtfm"
-version = "0.3.0"
+version = "0.4.0"
 description = "Read The Full Manual — local document-corpus search MCP server."
 requires-python = ">=3.11"
 dependencies = [

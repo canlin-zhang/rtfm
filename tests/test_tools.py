@@ -72,17 +72,67 @@ def test_read_text_line_range(home, tmp_path):
     assert "widget protocol" in text and "intro line" not in text
 
 
-def test_search_is_query_only_and_warns_on_unindexed(home, tmp_path):
+def test_search_auto_reindexes_small_unindexed_source(home, tmp_path):
+    """A newly-added small source (within the auto-reindex budget) is indexed inline on search;
+    the user no longer has to call reindex first. Phase 2 amends the old query-only behavior."""
     d = tmp_path / "manual"
     d.mkdir()
     (d / "m.md").write_text("the widget protocol defines flits\n")
     rtfm.load_manifest()  # bootstrap default
     _add_source("manual", d)  # configured but NOT reindexed
     out = rtfm.search(query="widget protocol", source="manual")
-    assert out["results"] == []
-    assert "WARNING" in out and any("NOT INDEXED" in w for w in out["WARNING"])
+    assert any("widget protocol" in h["snippet"] for h in out["results"])
     conn = rtfm.get_index_db()
-    assert conn.execute("SELECT COUNT(*) FROM locations WHERE source='manual'").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM locations WHERE source='manual'").fetchone()[0] == 1
+
+
+def test_search_warns_and_falls_back_on_large_unindexed_source(home, tmp_path, monkeypatch):
+    """A source whose new/changed file count exceeds the budget is NOT reindexed inline (no
+    blocking extraction): search serves prior content and warns to run reindex explicitly."""
+    monkeypatch.setenv("RTFM_AUTO_REINDEX_MAX", "2")
+    d = tmp_path / "big"
+    d.mkdir()
+    for i in range(3):  # 3 new files > budget of 2
+        (d / f"f{i}.md").write_text("the widget protocol defines flits\n")
+    rtfm.load_manifest()
+    _add_source("big", d)
+    out = rtfm.search(query="widget protocol", source="big")
+    assert out["results"] == []
+    assert "WARNING" in out and any("big" in w and "reindex" in w for w in out["WARNING"])
+    conn = rtfm.get_index_db()
+    assert conn.execute("SELECT COUNT(*) FROM locations WHERE source='big'").fetchone()[0] == 0
+
+
+def test_search_auto_reindexes_changed_file(home, tmp_path):
+    """An already-indexed source whose file changed on disk is refreshed on the next search."""
+    import os
+    d = tmp_path / "manual"
+    d.mkdir()
+    f = d / "m.md"
+    f.write_text("the gadget protocol is old\n")
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, rtfm.Source("manual", "dir", d))
+    rtfm.load_manifest()
+    _add_source("manual", d)
+    f.write_text("the widget protocol is new\n")          # changed content...
+    os.utime(f, (1_900_000_000, 1_900_000_000))            # ...and a clearly newer mtime
+    out = rtfm.search(query="widget protocol", source="manual")
+    assert any("widget protocol" in h["snippet"] for h in out["results"])
+    assert rtfm.search(query="gadget", source="manual")["results"] == []  # stale content gone
+
+
+def test_search_auto_reindex_disabled_with_zero_budget(home, tmp_path, monkeypatch):
+    """RTFM_AUTO_REINDEX_MAX=0 disables inline auto-reindex entirely — even one new file only
+    warns. The explicit, never-blocks escape hatch."""
+    monkeypatch.setenv("RTFM_AUTO_REINDEX_MAX", "0")
+    d = tmp_path / "manual"
+    d.mkdir()
+    (d / "m.md").write_text("the widget protocol defines flits\n")
+    rtfm.load_manifest()
+    _add_source("manual", d)
+    out = rtfm.search(query="widget protocol", source="manual")
+    assert out["results"] == []
+    assert "WARNING" in out and any("manual" in w for w in out["WARNING"])
 
 
 def test_default_self_heals_on_search(home):
