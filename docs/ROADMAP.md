@@ -19,15 +19,25 @@ Deferred scope, each with the decision that parked it. Not yet implemented.
   clones left under the Corpus home after their Source is removed from the Manifest. See
   [ADR 0007](adr/0007-repo-linked-vs-managed.md).
 
-- **Search quality via richer extraction** — keyword BM25 over page/line text carries no
-  document-level signal: searching even an exact document title can surface incidental mentions
-  scattered across other documents rather than the doc that bears that title. Tackle it by
-  extracting *more from the corpus*, not by reinventing ranking: capture document **title**
-  (PDF metadata + front-page heading), **outline/TOC** (`doc.get_toc()`), and headings; index
-  them as high-weight fields and surface the title in hits. First determine whether the titled
-  doc's text is even extracted (a front-page title may be an image) vs. merely out-ranked.
-  Deferred from Plan 1's page-text-only MVP; **sequenced after the skill work**, which rides on
-  search relevance.
+- **Search quality** — keyword BM25 over page/line text carries no document-level signal:
+  searching even an exact document title can surface incidental mentions scattered across other
+  documents rather than the doc that bears that title. Two tiers, by cost and by version:
+
+  - **Tier 1 — richer extraction within FTS5 (pre-1.0, a minor bump).** The cheap win that
+    stays inside the current SQLite FTS5 engine: extract *more from the corpus*, don't reinvent
+    ranking. Capture document **title** (PDF metadata + front-page heading), **outline/TOC**
+    (`doc.get_toc()`), and headings; index them as high-weight FTS5 columns (BM25F-style field
+    boosts) and surface the title in hits. First determine whether the titled doc's text is even
+    extracted (a front-page title may be an image) vs. merely out-ranked. Deferred from Plan 1's
+    page-text-only MVP; **sequenced after the skill work**, which rides on search relevance.
+
+  - **Tier 2 — search-engine rehaul (the 1.0.0 release).** A complete overhaul of the search and
+    index mechanism, replacing the hand-rolled FTS5 index + ranking with an existing open-source
+    full-text search framework (candidate: Whoosh / Whoosh-Reloaded; specific framework TBD).
+    This is the reserved **1.0.0** milestone — the first release whose relevance no longer rests
+    on a bespoke index. Evaluate before committing: dependency weight vs. the FastMCP/`uv`
+    launcher (ADR 0009), native field-boosting and phrase/proximity support, and a migration
+    path off the content-addressed FTS5 schema.
 
 - **Mutation tools + the `audit` skill (Plan 4)** — `rename`/`delete` gated to `mutable`
   Sources (ADR 0001), plus the de-vendored `audit` skill (sha256 dedup via `find_duplicates`

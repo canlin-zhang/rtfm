@@ -95,6 +95,20 @@ def _workers() -> int:
     return min(os.cpu_count() or 4, 8)
 
 
+AUTO_REINDEX_MAX_FILES = 10          # inline new/changed-file budget on query (0 = none)
+
+
+def _auto_reindex_max() -> int:
+    """Max new/changed files a source may have for `search` to reindex it inline. Bounds query
+    latency (PDF extraction is the cost); larger deltas fall back to a 'run reindex' warning.
+    RTFM_AUTO_REINDEX_MAX overrides; 0 disables inline reindexing of new/changed files (files
+    that vanished on disk are still purged inline — that costs nothing)."""
+    env = os.environ.get("RTFM_AUTO_REINDEX_MAX")
+    if env and env.isdigit():
+        return int(env)
+    return AUTO_REINDEX_MAX_FILES
+
+
 def _rows_for_file(path: Path) -> list[tuple[str, str, str]]:
     """Return (locator_kind, locator_value, text) rows for a supported file, else []."""
     ext = path.suffix.lower()
@@ -228,14 +242,23 @@ def reindex_source(conn: sqlite3.Connection, src: Source) -> dict:
     return summary
 
 
-def _default_stale(conn: sqlite3.Connection, src: Source) -> bool:
-    """Cheap (relpath, mtime) comparison for the mutable drop-dir; performs no extraction."""
+def _stale_delta(conn: sqlite3.Connection, src: Source) -> tuple[int, bool]:
+    """Cheap staleness check for any dir source — stat + (relpath, mtime) compare, no hashing
+    or extraction. Returns (changed, stale):
+
+      changed  count of new or mtime-changed files — the ones that would need fresh extraction.
+               Bounds the cost of an inline auto-reindex (see _auto_reindex_max).
+      stale    whether the index differs from disk at all, including files that vanished on
+               disk (which a reindex purges essentially for free, so they don't inflate `changed`).
+    """
     if src.path is None or not src.path.exists():
-        return False
-    on_disk = {str(f.relative_to(src.path)): f.stat().st_mtime for f in iter_source_files(src)}
+        return 0, False
     indexed = {r[0]: r[1] for r in conn.execute(
         "SELECT relpath, mtime FROM locations WHERE source=?", (src.name,))}
-    return on_disk != indexed
+    on_disk = {str(f.relative_to(src.path)): f.stat().st_mtime for f in iter_source_files(src)}
+    changed = sum(1 for rel, mtime in on_disk.items() if indexed.get(rel) != mtime)
+    stale = changed > 0 or set(indexed) != set(on_disk)   # latter catches vanished files
+    return changed, stale
 
 
 def iter_source_files(src: Source) -> list[Path]:
@@ -304,11 +327,34 @@ def _source_from_table(t: dict) -> Source:
     )
 
 
+def _validate_source(s: Source) -> str | None:
+    """Loud warning if a source is misconfigured, else None. A dir source needs an existing,
+    readable directory; a `path`-less dir source is unusable (the caller drops it). The point is
+    that one bad entry never silently disappears and never breaks the others."""
+    if s.type != "dir":
+        return None
+    if s.path is None:
+        return (f"!!! INVALID SOURCE '{s.name}' !!! dir source has no 'path' — skipping it. "
+                f"Recover: add path = \"...\" in {manifest_path()}.")
+    if not s.path.exists():
+        return (f"!!! SOURCE PATH MISSING '{s.name}' !!! {s.path} does not exist — this source "
+                f"indexes nothing. Recover: fix 'path' in {manifest_path()} or remove it.")
+    if not s.path.is_dir():
+        return (f"!!! SOURCE PATH NOT A DIRECTORY '{s.name}' !!! {s.path} is a file, not a "
+                f"directory. Recover: point 'path' at a folder in {manifest_path()}.")
+    if not os.access(s.path, os.R_OK):
+        return (f"!!! SOURCE UNREADABLE '{s.name}' !!! {s.path} is not readable (permissions). "
+                f"Recover: fix permissions or 'path' in {manifest_path()}.")
+    return None
+
+
 def load_manifest() -> tuple[list[Source], list[str]]:
     """Return (sources, warnings). Bootstraps a default manifest if none exists.
 
-    Duplicate names are resolved first-wins; each refused duplicate yields a loud,
-    actionable warning string (ADR 0006). Never raises on duplicates.
+    Duplicate names are resolved first-wins; each refused duplicate yields a loud, actionable
+    warning (ADR 0006). Misconfigured sources are validated: a `path`-less dir source is dropped,
+    a missing/non-dir/unreadable path is kept-but-warned (so it stays visible and self-heals if
+    the path appears). Never raises — one bad entry never breaks the rest.
     """
     _ensure_bootstrap()
     try:
@@ -334,6 +380,11 @@ def load_manifest() -> tuple[list[Source], list[str]]:
                 f"(version-stamp them, e.g. '{s.name}-2025.06')."
             )
             continue
+        warn = _validate_source(s)
+        if warn:
+            warnings.append(warn)
+            if s.type == "dir" and s.path is None:
+                continue                       # unusable — drop it (loudly, above)
         seen[s.name] = s
         sources.append(s)
     return sources, warnings
@@ -465,22 +516,18 @@ def read_document_text(src: Source, relpath: str, start: int = 1, end: int | Non
 mcp = FastMCP("rtfm")
 
 
-def _never_indexed(conn: sqlite3.Connection, sources: list[Source],
-                   only: str | None = None) -> list[str]:
-    return [s.name for s in sources
-            if (only is None or only == s.name)
-            and conn.execute("SELECT COUNT(*) FROM locations WHERE source=?",
-                             (s.name,)).fetchone()[0] == 0]
-
-
 @mcp.tool()
 def search(query: str, source: str | None = None, max_files: int = 20,
            max_locations: int = MAX_LOCATIONS) -> dict:
-    """Search the corpus (query-only — never rebuilds a pointed-to source). Returns dedup'd
-    hits, each listing up to `max_locations` paths its content lives at, plus total_locations.
+    """Search the corpus. Returns dedup'd hits, each listing up to `max_locations` paths its
+    content lives at, plus total_locations.
 
-    The mutable `default` drop-dir self-heals here via a cheap staleness check. Other sources
-    are built with reindex(); a query against an unindexed source returns [] and a WARNING.
+    Auto-reindex: before searching, every dir source touched by this query is checked for
+    staleness with a cheap (relpath, mtime) scan — no extraction. A source within the
+    auto-reindex budget (RTFM_AUTO_REINDEX_MAX, default 10 new/changed files) is reindexed
+    inline so newly-added/edited files just work; a larger delta is left to an explicit
+    reindex() and reported in WARNING rather than blocking the query on extraction. This
+    refreshes the search cache only — it never mutates the source files.
 
     Args:
         query: text to search for.
@@ -489,17 +536,29 @@ def search(query: str, source: str | None = None, max_files: int = 20,
         max_locations: cap on paths listed per hit (use find_duplicates for the full list).
     """
     sources, warnings = load_manifest()
+    warnings = list(warnings)
     conn = get_index_db()
+    budget = _auto_reindex_max()
     for s in sources:
-        if s.mutable and s.type == "dir" and _default_stale(conn, s):
-            reindex_source(conn, s)
+        if s.type != "dir" or (source is not None and s.name != source):
+            continue
+        try:                                         # one source's refresh never fails the query
+            changed, stale = _stale_delta(conn, s)
+            if not stale:
+                continue
+            if changed <= budget:
+                reindex_source(conn, s)              # inline: only `changed` files extract
+            else:
+                warnings.append(
+                    f"!!! STALE SOURCE '{s.name}' !!! {changed} new/changed files exceed the "
+                    f"auto-reindex budget ({budget}) — searching previously indexed content "
+                    f"only. Recover: run reindex('{s.name}').")
+        except Exception as e:
+            warnings.append(
+                f"!!! AUTO-REINDEX FAILED '{s.name}' !!! {type(e).__name__}: {e} — searching "
+                f"previously indexed content only. Recover: run reindex('{s.name}').")
     hits = search_index(conn, query, source=source, limit=max_files, max_locations=max_locations)
     resp: dict = {"results": hits, "sources_searched": [s.name for s in sources]}
-    never = _never_indexed(conn, sources, only=source)
-    if never:
-        warnings = list(warnings) + [
-            f"!!! NOT INDEXED !!! source(s) {never} have no index yet — "
-            f"run reindex('{never[0]}') to build it."]
     if warnings:
         resp["WARNING"] = warnings
     if not query.strip():

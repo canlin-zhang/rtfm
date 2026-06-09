@@ -16,7 +16,7 @@ Answer the user's question using **only** text found in the indexed corpus via r
 
 ### 1. Search
 
-Call `mcp__plugin_rtfm_rtfm__search(query)` with the key terms from the question. Note `sources_searched` to stay aware of the full corpus. If the response carries a `NOT INDEXED` warning for a source, build it yourself with `mcp__plugin_rtfm_rtfm__reindex('<source>')`, then continue.
+Call `mcp__plugin_rtfm_rtfm__search(query)` with the key terms from the question. Note `sources_searched` to stay aware of the full corpus. Small new or edited files are auto-indexed on search; if the response carries a `STALE SOURCE` warning (a source has more new/changed files than the auto-reindex budget), build it yourself with `mcp__plugin_rtfm_rtfm__reindex('<source>')`, then search again.
 
 If the first query returns nothing useful, try narrower or alternative terms — don't give up after one miss.
 
