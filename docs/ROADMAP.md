@@ -23,13 +23,10 @@ Deferred scope, each with the decision that parked it. Not yet implemented.
   searching even an exact document title can surface incidental mentions scattered across other
   documents rather than the doc that bears that title. Two tiers, by cost and by version:
 
-  - **Tier 1 — richer extraction within FTS5 (pre-1.0, a minor bump).** The cheap win that
-    stays inside the current SQLite FTS5 engine: extract *more from the corpus*, don't reinvent
-    ranking. Capture document **title** (PDF metadata + front-page heading), **outline/TOC**
-    (`doc.get_toc()`), and headings; index them as high-weight FTS5 columns (BM25F-style field
-    boosts) and surface the title in hits. First determine whether the titled doc's text is even
-    extracted (a front-page title may be an image) vs. merely out-ranked. Deferred from Plan 1's
-    page-text-only MVP; **sequenced after the skill work**, which rides on search relevance.
+  - **Tier 1 — richer extraction within FTS5. ✅ SHIPPED in 0.5.0 (ADR 0012).** Document
+    **title** (PDF metadata / first page-1 line) and **headings/outline** (`doc.get_toc()`,
+    markup headings) are indexed in a `doc_fts` table and ranked above body matches; the title is
+    surfaced in every hit. Stayed inside SQLite FTS5 — extract more, don't reinvent ranking.
 
   - **Tier 2 — search-engine rehaul (the 1.0.0 release).** A complete overhaul of the search and
     index mechanism, replacing the hand-rolled FTS5 index + ranking with an existing open-source
@@ -38,6 +35,18 @@ Deferred scope, each with the decision that parked it. Not yet implemented.
     on a bespoke index. Evaluate before committing: dependency weight vs. the FastMCP/`uv`
     launcher (ADR 0009), native field-boosting and phrase/proximity support, and a migration
     path off the content-addressed FTS5 schema.
+
+  - **Considered and deferred (FTS5 wins not taken in Tier 1).** Two classic FTS techniques,
+    parked with reasons rather than shipped blind:
+    - **`pdfgrep` / raw-PDF fallback** — grep the raw PDF when the FTS index finds nothing, as a
+      recall safety net. Deferred: it adds an external tool dependency and is a *different
+      mechanism* from FTS5; rtfm's content-addressed extraction is the source of truth. Revisit
+      only if extraction gaps prove to lose real hits.
+    - **Porter / stemming tokenizer** — `tokenize='porter'` would improve recall (e.g. `index`
+      matches `indexing`); rtfm doesn't use it. Deferred: genuine *precision* risk on a technical
+      corpus (opcodes, field names, `flit`/`flits`, version-like tokens) where over-stemming
+      surfaces noise. Evaluate against the real corpus as its own change, not bundled into the
+      Tier 1 doc-signal work.
 
 - **Mutation tools + the `audit` skill (Plan 4)** — `rename`/`delete` gated to `mutable`
   Sources (ADR 0001), plus the de-vendored `audit` skill (sha256 dedup via `find_duplicates`

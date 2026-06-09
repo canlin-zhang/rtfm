@@ -71,3 +71,10 @@ A *kind of document* — a protocol or tool reference PDF (e.g. a large protocol
 or a vendor product's manual set). The original and dominant PDF use case, but one flavor of
 content, not the product.
 _Avoid_: spec (as the name of the product or the server)
+
+**Doc-level signal**:
+The per-document ranking signal — its **title** and **headings/outline** — held in `doc_fts`
+(one row per content), as opposed to the per-chunk page/line **body** text in `content_fts`. A
+query matching a document's doc-level signal ranks that document above ones that merely mention
+the terms in body. See [ADR 0012](docs/adr/0012-doc-level-signal-ranking.md).
+_Avoid_: metadata (too broad — this is specifically title + headings used for ranking)
