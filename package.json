@@ -1,0 +1,11 @@
+{
+  "name": "rtfm",
+  "version": "0.6.0",
+  "description": "Read The Full Manual — search large technical documentation (PDF spec sets, doc repos) with grounded, cited answers.",
+  "type": "module",
+  "main": ".opencode/plugins/rtfm.js",
+  "private": true,
+  "author": "Canlin Zhang",
+  "license": "MIT",
+  "homepage": "https://github.com/canlin-zhang/rtfm"
+}
