@@ -50,16 +50,22 @@ given content lives at.
 
 ## Use
 
-Drop PDFs / `.md` / `.txt` into `~/.rtfm/default/`, then ask Claude to search them, or
+Drop PDFs / `.md` / `.rst` / `.txt` into `~/.rtfm/default/`, then ask Claude to search them, or
 add more sources by editing `~/.rtfm/manifest.toml` (see `manifest.example.toml`).
+
+Or invoke the bundled **`read-the-manual`** skill (`/read-the-manual`) to have a question
+answered strictly from the corpus — verbatim quotes with page/line citations, no
+model-knowledge fallback.
 
 ## Status
 
-Early but working. Today rtfm gives you zero-config search over a default drop-folder: PDF and
-Markdown/text files are indexed into one full-text index with page/line citations, exposed
-through the `search` / `read` / `list_sources` / `health_check` tools, with a uv-or-venv
-launcher and Claude Code plugin packaging. HTML with anchor citations, git-backed repo sources
-with auto-refresh, file-curation tools, and OCR are planned — see the [roadmap](docs/ROADMAP.md).
+Early but working. Today rtfm gives you zero-config search over a default drop-folder: PDF,
+Markdown, reStructuredText, and text files are indexed into one content-addressed full-text
+index with page/line citations, exposed through the `search` / `read` / `reindex` /
+`find_duplicates` / `list_sources` / `health_check` tools and the `read-the-manual` skill, with
+a uv-or-venv launcher and Claude Code plugin packaging. HTML with anchor citations, git-backed
+repo sources with auto-refresh, file-curation tools, and OCR are planned — see the
+[roadmap](docs/ROADMAP.md).
 
 Architecture decisions live in [docs/adr/](docs/adr/); domain language in
 [CONTEXT.md](CONTEXT.md).
