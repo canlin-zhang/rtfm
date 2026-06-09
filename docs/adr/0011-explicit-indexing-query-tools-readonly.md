@@ -33,8 +33,10 @@ freshness).
 Auto-index was originally removed because synchronous extraction blocked the server. With the
 0.2.1 ThreadPool fix the failure mode is *latency*, not a hang, so a small inline reindex is
 safe. The budget caps that latency: PDF extraction dominates cost, so a per-source new/changed
-file count is the cheap, honest proxy. `RTFM_AUTO_REINDEX_MAX=0` disables inline auto-reindex
-(warn-only) for users who want strictly explicit builds.
+file count is the cheap, honest proxy. `RTFM_AUTO_REINDEX_MAX=0` disables inline reindexing of
+new/changed files for strictly-explicit users (files that vanished on disk are still purged
+inline — that costs nothing). A source refresh that errors mid-query degrades to a warning and
+serves the previously indexed content; it never fails the query.
 
 ## Consequences
 

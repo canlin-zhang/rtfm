@@ -95,13 +95,14 @@ def _workers() -> int:
     return min(os.cpu_count() or 4, 8)
 
 
-AUTO_REINDEX_MAX_FILES = 10          # inline-reindex budget on query; 0 disables (warn-only)
+AUTO_REINDEX_MAX_FILES = 10          # inline new/changed-file budget on query (0 = none)
 
 
 def _auto_reindex_max() -> int:
     """Max new/changed files a source may have for `search` to reindex it inline. Bounds query
     latency (PDF extraction is the cost); larger deltas fall back to a 'run reindex' warning.
-    RTFM_AUTO_REINDEX_MAX overrides; 0 disables inline auto-reindex entirely."""
+    RTFM_AUTO_REINDEX_MAX overrides; 0 disables inline reindexing of new/changed files (files
+    that vanished on disk are still purged inline — that costs nothing)."""
     env = os.environ.get("RTFM_AUTO_REINDEX_MAX")
     if env and env.isdigit():
         return int(env)
@@ -541,16 +542,21 @@ def search(query: str, source: str | None = None, max_files: int = 20,
     for s in sources:
         if s.type != "dir" or (source is not None and s.name != source):
             continue
-        changed, stale = _stale_delta(conn, s)
-        if not stale:
-            continue
-        if changed <= budget:
-            reindex_source(conn, s)                 # inline: only `changed` files extract
-        else:
+        try:                                         # one source's refresh never fails the query
+            changed, stale = _stale_delta(conn, s)
+            if not stale:
+                continue
+            if changed <= budget:
+                reindex_source(conn, s)              # inline: only `changed` files extract
+            else:
+                warnings.append(
+                    f"!!! STALE SOURCE '{s.name}' !!! {changed} new/changed files exceed the "
+                    f"auto-reindex budget ({budget}) — searching previously indexed content "
+                    f"only. Recover: run reindex('{s.name}').")
+        except Exception as e:
             warnings.append(
-                f"!!! STALE SOURCE '{s.name}' !!! {changed} new/changed files exceed the "
-                f"auto-reindex budget ({budget}) — searching previously indexed content only. "
-                f"Recover: run reindex('{s.name}').")
+                f"!!! AUTO-REINDEX FAILED '{s.name}' !!! {type(e).__name__}: {e} — searching "
+                f"previously indexed content only. Recover: run reindex('{s.name}').")
     hits = search_index(conn, query, source=source, limit=max_files, max_locations=max_locations)
     resp: dict = {"results": hits, "sources_searched": [s.name for s in sources]}
     if warnings:

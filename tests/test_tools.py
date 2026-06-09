@@ -121,6 +121,63 @@ def test_search_auto_reindexes_changed_file(home, tmp_path):
     assert rtfm.search(query="gadget", source="manual")["results"] == []  # stale content gone
 
 
+def test_search_survives_inline_reindex_failure(home, tmp_path, monkeypatch):
+    """If an inline auto-reindex raises (file vanishes mid-rebuild, disk/lock error), search must
+    degrade to a WARNING and still serve prior content — one source's refresh never fails the
+    query, and never blocks it either."""
+    d = tmp_path / "manual"
+    d.mkdir()
+    (d / "m.md").write_text("the widget protocol defines flits\n")
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, rtfm.Source("manual", "dir", d))   # prior content indexed
+    rtfm.load_manifest()
+    _add_source("manual", d)
+    (d / "new.md").write_text("more widget content\n")            # make it look stale...
+
+    def boom(*a, **k):
+        raise OSError("simulated mid-rebuild failure")
+    monkeypatch.setattr(rtfm, "reindex_source", boom)             # ...then blow up the rebuild
+    out = rtfm.search(query="widget protocol", source="manual")
+    assert any("widget protocol" in h["snippet"] for h in out["results"])   # prior content served
+    assert "WARNING" in out and any("AUTO-REINDEX FAILED" in w and "manual" in w
+                                    for w in out["WARNING"])
+
+
+def test_search_auto_reindex_at_budget_boundary_indexes(home, tmp_path, monkeypatch):
+    """changed == budget is within budget (the <= boundary is inclusive): it reindexes inline.
+    The strictly-over case (changed == budget+1 warns) is covered by the large-source test."""
+    monkeypatch.setenv("RTFM_AUTO_REINDEX_MAX", "2")
+    d = tmp_path / "edge"
+    d.mkdir()
+    (d / "a.md").write_text("widget alpha\n")
+    (d / "b.md").write_text("widget bravo\n")                     # exactly 2 new == budget 2
+    rtfm.load_manifest()
+    _add_source("edge", d)
+    out = rtfm.search(query="widget", source="edge")
+    assert any("widget" in h["snippet"] for h in out["results"])
+    conn = rtfm.get_index_db()
+    assert conn.execute("SELECT COUNT(*) FROM locations WHERE source='edge'").fetchone()[0] == 2
+
+
+def test_search_purges_vanished_file_inline(home, tmp_path):
+    """A file deleted on disk is purged on the next search (changed=0 but stale) with no warning —
+    a free cleanup, never charged against the budget."""
+    d = tmp_path / "manual"
+    d.mkdir()
+    (d / "keep.md").write_text("widget keeper\n")
+    (d / "gone.md").write_text("widget goner\n")
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, rtfm.Source("manual", "dir", d))
+    rtfm.load_manifest()
+    _add_source("manual", d)
+    (d / "gone.md").unlink()                                      # vanish
+    out = rtfm.search(query="goner", source="manual")
+    assert out["results"] == []                                   # purged inline
+    assert "WARNING" not in out                                   # free purge, no stale warning
+    kept = rtfm.search(query="keeper", source="manual")
+    assert any("keeper" in h["snippet"] for h in kept["results"])
+
+
 def test_search_auto_reindex_disabled_with_zero_budget(home, tmp_path, monkeypatch):
     """RTFM_AUTO_REINDEX_MAX=0 disables inline auto-reindex entirely — even one new file only
     warns. The explicit, never-blocks escape hatch."""
