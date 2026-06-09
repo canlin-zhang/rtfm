@@ -22,7 +22,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 # --- config -----------------------------------------------------------------
-TEXT_EXTS = {".txt", ".md"}          # more text/markup formats (e.g. .html) added later
+TEXT_EXTS = {".txt", ".md", ".rst", ".rest"}   # plain text → line locators (.html later)
 CHUNK_LINES = 50
 SCHEMA_VERSION = 2                   # index DB is a cache; mismatch ⇒ drop & rebuild
 MAX_LOCATIONS = 5                    # default cap on locations listed per search hit
