@@ -1071,8 +1071,11 @@ def search(query: str, source: str | None = None, max_files: int = 20,
     staleness with a cheap (relpath, mtime) scan — no extraction. A source within the
     auto-reindex budget (RTFM_AUTO_REINDEX_MAX, default 10 new/changed files) is reindexed
     inline so newly-added/edited files just work; a larger delta is left to an explicit
-    reindex() and reported in WARNING rather than blocking the query on extraction. This
-    refreshes the search cache only — it never mutates the source files.
+    reindex() and reported in WARNING rather than blocking the query on extraction.
+    git_repo sources always auto-reindex when stale (a cheap commit comparison after fetch)
+    — the budget doesn't apply; a failed refresh is reported in WARNING and previously
+    indexed content is searched. This refreshes the search cache only — it never mutates
+    the source files.
 
     Args:
         query: text to search for.
@@ -1085,19 +1088,29 @@ def search(query: str, source: str | None = None, max_files: int = 20,
     conn = get_index_db()
     budget = _auto_reindex_max()
     for s in sources:
-        if s.type != "dir" or (source is not None and s.name != source):
+        if source is not None and s.name != source:
+            continue
+        if s.type not in ("dir", "git_repo"):
             continue
         try:                                         # one source's refresh never fails the query
             changed, stale = _stale_delta(conn, s)
             if not stale:
                 continue
-            if changed <= budget:
-                reindex_source(conn, s)              # inline: only `changed` files extract
-            else:
-                warnings.append(
-                    f"!!! STALE SOURCE '{s.name}' !!! {changed} new/changed files exceed the "
-                    f"auto-reindex budget ({budget}) — searching previously indexed content "
-                    f"only. Recover: run reindex('{s.name}').")
+            if s.type == "dir":
+                if changed <= budget:
+                    reindex_source(conn, s)          # inline: only `changed` files extract
+                else:
+                    warnings.append(
+                        f"!!! STALE SOURCE '{s.name}' !!! {changed} new/changed files exceed the "
+                        f"auto-reindex budget ({budget}) — searching previously indexed content "
+                        f"only. Recover: run reindex('{s.name}').")
+            else:  # git_repo — always auto-reindex, budget doesn't apply
+                result = reindex_source(conn, s)
+                if isinstance(result, dict) and result.get("error"):
+                    warnings.append(
+                        f"!!! AUTO-REINDEX FAILED '{s.name}' !!! {result['error']} — "
+                        f"searching previously indexed content only. "
+                        f"Recover: run reindex('{s.name}').")
         except Exception as e:
             warnings.append(
                 f"!!! AUTO-REINDEX FAILED '{s.name}' !!! {type(e).__name__}: {e} — searching "

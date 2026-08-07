@@ -281,3 +281,90 @@ def test_reindex_git_repo_managed_clones_and_indexes(home, tmp_path):
     # Verify content is searchable
     hits = rtfm.search_index(conn, "alpha bravo")
     assert any("alpha bravo" in h["snippet"] for h in hits)
+
+
+# --- search auto-reindex for git_repo ---
+
+def test_search_auto_reindexes_stale_git_repo(home, tmp_path):
+    """Search on a stale git_repo auto-reindexes and returns fresh results."""
+    import rtfm_server as rtfm
+
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
+    (seed / "guide.md").write_text("the widget protocol defines flits v1\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), "main", dest, timeout=30)
+
+    # First reindex
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+                      url=str(remote), ref="main")
+    rtfm.reindex_source(conn, src)
+
+    # Search finds v1
+    hits = rtfm.search_index(conn, "widget protocol")
+    assert any("v1" in h["snippet"] for h in hits)
+
+    # Push v2 to remote
+    (seed / "guide.md").write_text("the widget protocol defines flits v2\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "v2"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+
+    # Now search through the MCP tool — should auto-reindex and find v2
+    rtfm.load_manifest()  # bootstrap default
+    mp = rtfm.manifest_path()
+    mp.write_text(
+        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\n'
+    )
+    out = rtfm.search(query="widget protocol")
+    assert any("v2" in h["snippet"] for h in out["results"])
+
+
+def test_search_warns_when_git_repo_fetch_fails(home, tmp_path, monkeypatch):
+    """When git fetch fails, search warns and serves stale content."""
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
+    (seed / "guide.md").write_text("widget v1 content\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), "main", dest, timeout=30)
+
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+                      url=str(remote), ref="main")
+    rtfm.reindex_source(conn, src)
+
+    # Push v2
+    (seed / "guide.md").write_text("widget v2 content\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "v2"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+
+    # Break fetch
+    def broken_fetch(*a, **k):
+        raise RuntimeError("simulated network failure")
+    monkeypatch.setattr(rtfm, "_git_fetch", broken_fetch)
+
+    rtfm.load_manifest()
+    mp = rtfm.manifest_path()
+    mp.write_text(
+        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\n'
+    )
+    out = rtfm.search(query="widget")
+    # Should serve v1 (stale) with a warning
+    assert any("v1" in h["snippet"] for h in out["results"])
+    assert "WARNING" in out
+    assert any("specs" in w and ("fetch" in w.lower() or "auto-reindex" in w.lower())
+               for w in out["WARNING"])
