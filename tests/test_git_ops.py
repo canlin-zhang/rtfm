@@ -26,6 +26,14 @@ def test_git_non_zero_exit_raises(tmp_path):
         rtfm._git(["log"], cwd=tmp_path, timeout=10)  # not a git repo
 
 
+def test_git_missing_binary_raises_classified_error(tmp_path, monkeypatch):
+    """A missing git binary yields a classified RuntimeError, not a raw FileNotFoundError —
+    load_manifest ('Never raises') and every MCP tool must survive an absent git."""
+    monkeypatch.setenv("PATH", str(tmp_path))  # an empty dir: git is unreachable
+    with pytest.raises(RuntimeError, match="git executable not found"):
+        rtfm._git(["status"], cwd=tmp_path, timeout=10)
+
+
 # --- git repo identification ---
 
 def test_repo_root_returns_path_for_git_dir(tmp_path):

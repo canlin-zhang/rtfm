@@ -72,6 +72,9 @@ def _git(args: list[str], cwd: Path, timeout: int | None = None) -> subprocess.C
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"git {' '.join(args)} timed out after {t}s") from None
+    except FileNotFoundError:
+        raise RuntimeError(
+            "git executable not found — install git or remove the git_repo source.") from None
     if cp.returncode != 0:
         raise RuntimeError(
             f"git {' '.join(args)} exited {cp.returncode}: {(cp.stderr or '').strip()[:200]}")
