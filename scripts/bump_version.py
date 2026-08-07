@@ -120,10 +120,19 @@ def main() -> int:
         # has work to do — proceeding lets `uv lock` bring the lock up.
         try:
             lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
-            lock_version = next(
-                (p.get("version") for p in lock["package"] if p.get("name") == "rtfm"), None
-            )
-        except (OSError, tomllib.TOMLDecodeError):
+            packages = lock["package"]
+            if not isinstance(packages, list) or not all(
+                isinstance(p, dict) for p in packages
+            ):
+                lock_version = None  # wrong-shape lock: proceed, `uv lock` repairs it
+            else:
+                rtfm_entries = [p for p in packages if p.get("name") == "rtfm"]
+                # Mirror the check's count guard: a duplicate first-wins would
+                # refuse on a lock the check calls drift.
+                lock_version = (
+                    rtfm_entries[0].get("version") if len(rtfm_entries) == 1 else None
+                )
+        except (OSError, tomllib.TOMLDecodeError, KeyError, UnicodeDecodeError):
             lock_version = None
         if lock_version == new_version:
             sys.exit(f"ERROR: already at version {old_version} — nothing to bump")
@@ -309,8 +318,17 @@ def main() -> int:
             f"{RESTORE}"
         )
 
-    print(f"Bumped {old_version} -> {new_version}: pyproject.toml, plugin.json, uv.lock.")
-    print(f'Commit suggestion:  git add -u && git commit -m "release: bump to {new_version}"')
+    if old_version == new_version:
+        # The lock-only catch-up path: pyproject/plugin.json were already at
+        # the target and only uv.lock was regenerated — no release framing.
+        print(
+            f"uv.lock regenerated at {new_version}; pyproject.toml and plugin.json "
+            f"already at {new_version}."
+        )
+        print("Commit suggestion:  git add uv.lock && git commit -m \"chore: refresh lockfile\"")
+    else:
+        print(f"Bumped {old_version} -> {new_version}: pyproject.toml, plugin.json, uv.lock.")
+        print(f'Commit suggestion:  git add -u && git commit -m "release: bump to {new_version}"')
     return 0
 
 

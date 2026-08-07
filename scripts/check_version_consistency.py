@@ -127,7 +127,7 @@ def main() -> int:
         # would pass the isinstance guard and set-equality as 'OK', blessing a
         # wiped version field.
         return _fail(
-            "release version must be a non-empty string in every file"
+            "release version must be a non-blank string in every file"
             f" (offending: {', '.join(bad_versions)})"
         )
     if len(set(versions.values())) > 1:
