@@ -47,6 +47,19 @@ def default_source_dir() -> Path:
 def index_db_path() -> Path:
     return corpus_home() / "cache" / "index.db"
 
+
+def _managed_repo_path(name: str) -> Path:
+    """Path rtfm uses when a git_repo source omits `path`."""
+    return corpus_home() / "repos" / name
+
+
+def _git_timeout() -> int:
+    """Timeout in seconds for git subprocess calls. 0 = no timeout."""
+    env = os.environ.get("RTFM_GIT_TIMEOUT")
+    if env and env.isdigit():
+        return int(env)
+    return 60
+
 # --- index ------------------------------------------------------------------
 
 def get_index_db() -> sqlite3.Connection:
