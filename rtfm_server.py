@@ -734,6 +734,15 @@ name    = "default"   # the zero-config drop-dir; the only mutable source by def
 type    = "dir"
 path    = "{default}"
 mutable = true
+
+# Example: a git-tracked doc repo. rtfm clones and tracks the ref automatically
+# when `path` is omitted (managed mode), or links to an existing clone when
+# `path` is provided. `ref` defaults to the remote's HEAD branch.
+# [[source]]
+# name    = "specs"
+# type    = "git_repo"
+# url     = "https://github.com/org/specs.git"
+# ref     = "main"
 '''
 
 

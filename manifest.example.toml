@@ -24,3 +24,18 @@ mutable = true
 # type    = "dir"
 # path    = "/path/to/vendor/Documentation"
 # mutable = false
+
+# Example: a git-tracked doc repo — linked mode (user provides the clone).
+# [[source]]
+# name    = "specs"
+# type    = "git_repo"
+# url     = "https://github.com/org/specs.git"
+# ref     = "main"
+# path    = "/home/you/repos/specs"
+
+# Example: a git-tracked doc repo — managed mode (rtfm clones for you).
+# [[source]]
+# name    = "vendor-docs"
+# type    = "git_repo"
+# url     = "https://gitlab.com/vendor/docs.git"
+# ref     = "v2.1-stable"
