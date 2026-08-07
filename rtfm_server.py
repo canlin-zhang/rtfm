@@ -563,8 +563,39 @@ def _source_from_table(t: dict) -> Source:
 
 def _validate_source(s: Source) -> str | None:
     """Loud warning if a source is misconfigured, else None. A dir source needs an existing,
-    readable directory; a `path`-less dir source is unusable (the caller drops it). The point is
-    that one bad entry never silently disappears and never breaks the others."""
+    readable directory; a `path`-less dir source is unusable (the caller drops it). A git_repo
+    source needs a url; in linked mode (`path` set) the path must be a git working tree whose
+    origin remote matches the declared url. The point is that one bad entry never silently
+    disappears and never breaks the others."""
+    if s.type == "git_repo":
+        if not s.url:
+            return (f"!!! INVALID SOURCE '{s.name}' !!! git_repo source has no 'url' — "
+                    f"a remote URL is required. Recover: add url = \"...\" in "
+                    f"{manifest_path()}.")
+        if s.path is not None:
+            # Linked mode: verify the path exists and is a git repo with a matching remote
+            if not s.path.exists():
+                return (f"!!! SOURCE PATH MISSING '{s.name}' !!! {s.path} does not exist. "
+                        f"Recover: fix 'path' in {manifest_path()} or remove it to let rtfm "
+                        f"manage the clone.")
+            if not s.path.is_dir():
+                return (f"!!! SOURCE PATH NOT A DIRECTORY '{s.name}' !!! {s.path} is a file. "
+                        f"Recover: point 'path' at a git working tree.")
+            root = _git_repo_root(s.path)
+            if root is None:
+                return (f"!!! NOT A GIT REPO '{s.name}' !!! {s.path} is not a git repository. "
+                        f"Recover: clone the repo to that path, or remove 'path' to let rtfm "
+                        f"manage the clone.")
+            remote = _git_remote_url(root)
+            if not remote:
+                return (f"!!! NO REMOTE '{s.name}' !!! {s.path} has no 'origin' remote. "
+                        f"Recover: add a remote with 'git remote add origin <url>'.")
+            if remote != s.url:
+                return (f"!!! REMOTE URL MISMATCH '{s.name}' !!! {s.path} has origin "
+                        f"'{remote}', but manifest declares '{s.url}'. "
+                        f"Recover: fix 'url' in {manifest_path()} or update the clone's "
+                        f"origin with 'git remote set-url origin {s.url}'.")
+        return None
     if s.type != "dir":
         return None
     if s.path is None:

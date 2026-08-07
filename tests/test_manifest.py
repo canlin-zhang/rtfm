@@ -1,4 +1,6 @@
 # tests/test_manifest.py
+import subprocess
+
 import rtfm_server as rtfm
 
 
@@ -101,3 +103,112 @@ def test_search_tolerates_invalid_source(home, tmp_path):
     out = rtfm.search(query="widget protocol")
     assert any("widget protocol" in h["snippet"] for h in out["results"])
     assert "WARNING" in out and any("broken" in w for w in out["WARNING"])
+
+
+# --- git_repo sources ---
+
+def test_git_repo_source_parses_url_and_ref(home):
+    (home / "manifest.toml").write_text(
+        '[[source]]\nname="specs"\ntype="git_repo"\n'
+        'url="https://gitlab.com/org/specs.git"\nref="dev"\n'
+    )
+    sources, warnings = rtfm.load_manifest()
+    assert [s.name for s in sources] == ["specs"]
+    s = sources[0]
+    assert s.type == "git_repo"
+    assert s.url == "https://gitlab.com/org/specs.git"
+    assert s.ref == "dev"
+    assert s.path is None  # managed mode
+    assert s.mutable is False  # mutable not applicable
+
+
+def test_git_repo_source_with_path_is_linked(home, tmp_path):
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    (home / "manifest.toml").write_text(
+        f'[[source]]\nname="specs"\ntype="git_repo"\n'
+        f'url="https://example.com/repo.git"\nref="main"\npath="{repo}"\n'
+    )
+    sources, warnings = rtfm.load_manifest()
+    s = sources[0]
+    assert s.path == repo
+
+
+def test_git_repo_without_url_warns(home):
+    (home / "manifest.toml").write_text(
+        '[[source]]\nname="specs"\ntype="git_repo"\nref="main"\n'
+    )
+    sources, warnings = rtfm.load_manifest()
+    assert any("url" in w.lower() and "specs" in w for w in warnings)
+
+
+def test_git_repo_ref_defaults(home):
+    """When ref is omitted, it is None — resolved to remote HEAD at reindex time."""
+    (home / "manifest.toml").write_text(
+        '[[source]]\nname="specs"\ntype="git_repo"\n'
+        'url="https://example.com/repo.git"\n'
+    )
+    sources, warnings = rtfm.load_manifest()
+    assert sources[0].ref is None
+
+
+def test_git_repo_mutable_is_ignored(home):
+    """mutable=true on a git_repo is silently accepted but has no effect."""
+    (home / "manifest.toml").write_text(
+        '[[source]]\nname="specs"\ntype="git_repo"\n'
+        'url="https://example.com/repo.git"\nref="main"\nmutable=true\n'
+    )
+    sources, warnings = rtfm.load_manifest()
+    assert sources[0].mutable is True  # parsed but ignored at runtime
+
+
+def test_git_repo_linked_mode_not_a_repo_warns(home, tmp_path):
+    """A linked path that is not a git working tree is warned about, and the source is kept."""
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
+    (home / "manifest.toml").write_text(
+        f'[[source]]\nname="specs"\ntype="git_repo"\n'
+        f'url="https://example.com/repo.git"\npath="{repo}"\n'
+    )
+    sources, warnings = rtfm.load_manifest()
+    assert any("NOT A GIT REPO" in w and "specs" in w for w in warnings)
+    assert sources[0].name == "specs"
+
+
+def test_git_repo_linked_mode_no_remote_warns(home, tmp_path):
+    repo = tmp_path / "myrepo"
+    subprocess.run(["git", "init", str(repo)], capture_output=True)
+    (home / "manifest.toml").write_text(
+        f'[[source]]\nname="specs"\ntype="git_repo"\n'
+        f'url="https://example.com/repo.git"\npath="{repo}"\n'
+    )
+    sources, warnings = rtfm.load_manifest()
+    assert any("NO REMOTE" in w and "specs" in w for w in warnings)
+
+
+def test_git_repo_linked_mode_remote_mismatch_warns(home, tmp_path):
+    """URL mismatch is a hard error: the clone points at a different remote than declared."""
+    repo = tmp_path / "myrepo"
+    subprocess.run(["git", "init", str(repo)], capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin",
+                    "https://gitlab.com/org/real.git"], capture_output=True)
+    (home / "manifest.toml").write_text(
+        f'[[source]]\nname="specs"\ntype="git_repo"\n'
+        f'url="https://example.com/repo.git"\npath="{repo}"\n'
+    )
+    sources, warnings = rtfm.load_manifest()
+    assert any("MISMATCH" in w and "specs" in w for w in warnings)
+    assert any("https://gitlab.com/org/real.git" in w for w in warnings)
+
+
+def test_git_repo_linked_mode_matching_remote_is_clean(home, tmp_path):
+    repo = tmp_path / "myrepo"
+    subprocess.run(["git", "init", str(repo)], capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin",
+                    "https://example.com/repo.git"], capture_output=True)
+    (home / "manifest.toml").write_text(
+        f'[[source]]\nname="specs"\ntype="git_repo"\n'
+        f'url="https://example.com/repo.git"\npath="{repo}"\n'
+    )
+    sources, warnings = rtfm.load_manifest()
+    assert warnings == []
