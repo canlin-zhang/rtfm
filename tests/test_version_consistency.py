@@ -282,7 +282,7 @@ def make_runner(lock_ok=True, self_check_ok=0):
 
     def fake(args, **kwargs):
         calls.append((args, kwargs.get("cwd")))
-        if args and args[0] == "uv":
+        if args and args[:2] == ["uv", "lock"]:
             if not lock_ok:
                 raise subprocess.CalledProcessError(1, args)
             return subprocess.CompletedProcess(args, 0)
@@ -370,9 +370,9 @@ def test_bump_uv_missing_is_clean_error(tmp_path, monkeypatch):
 
 
 def test_bump_uv_unrunnable_is_clean_error(tmp_path, monkeypatch):
-    """uv present but not runnable: EACCES (noexec mount) raises
-    PermissionError; ENOEXEC (corrupt binary) raises plain OSError — both
-    OSErrors, not CalledProcessError — and the bump must exit with the
+    """uv present but not runnable: EACCES (missing +x bit, noexec mount)
+    raises PermissionError; ENOEXEC (corrupt binary) raises plain OSError —
+    both OSErrors, not CalledProcessError — and the bump must exit with the
     restore hint, never traceback."""
     make_tree(tmp_path)
 
@@ -384,6 +384,74 @@ def test_bump_uv_unrunnable_is_clean_error(tmp_path, monkeypatch):
     msg = str(exc.value.code)
     assert "git checkout" in msg
     assert "uv.lock" in msg  # RESTORE covers the regenerated lock too
+
+
+def test_bump_uv_enexec_is_clean_error(tmp_path, monkeypatch):
+    """ENOEXEC (corrupt binary) raises plain OSError, not PermissionError —
+    same branch, same restore hint."""
+    make_tree(tmp_path)
+
+    def enexec_uv(args, **kwargs):
+        raise OSError(8, "Exec format error", args[0])
+
+    with pytest.raises(SystemExit) as exc:
+        run_bump(tmp_path, monkeypatch, runner=enexec_uv)
+    msg = str(exc.value.code)
+    assert "git checkout" in msg
+    assert "uv.lock" in msg
+
+
+def test_bump_interrupt_during_uv_lock_prints_restore_hint(tmp_path, monkeypatch):
+    """Ctrl-C during `uv lock` (KeyboardInterrupt, not an OSError) leaves the
+    hand-edited files at the new version with a stale lock — the exit must
+    carry the restore hint, never a bare traceback."""
+    make_tree(tmp_path)
+
+    def interrupting_uv(args, **kwargs):
+        raise KeyboardInterrupt()
+
+    with pytest.raises(SystemExit) as exc:
+        run_bump(tmp_path, monkeypatch, runner=interrupting_uv)
+    msg = str(exc.value.code)
+    assert "interrupted" in msg
+    assert "git checkout" in msg
+
+
+def test_bump_malformed_pyproject_is_clean_error(tmp_path, monkeypatch):
+    """Garbage TOML in pyproject must exit cleanly from _toml_version, never
+    traceback — the check script's twin is pinned, the bump's wasn't."""
+    make_tree(tmp_path)
+    (tmp_path / "pyproject.toml").write_text("this is not [ toml")
+    with pytest.raises(SystemExit, match=r"cannot read \[project\]\.version"):
+        run_bump(tmp_path, monkeypatch)
+
+
+def test_bump_malformed_plugin_json_is_clean_error(tmp_path, monkeypatch):
+    """Invalid JSON in plugin.json (e.g. a hand-edit trailing comma) must exit
+    cleanly from _json_version, never traceback."""
+    make_tree(tmp_path)
+    (tmp_path / ".claude-plugin" / "plugin.json").write_text('{"name": "rtfm",')
+    with pytest.raises(SystemExit, match=r'cannot read "version"'):
+        run_bump(tmp_path, monkeypatch)
+
+
+def test_bump_plugin_json_missing_version_key_is_clean_error(tmp_path, monkeypatch):
+    make_tree(tmp_path)
+    (tmp_path / ".claude-plugin" / "plugin.json").write_text('{"name": "rtfm"}')
+    with pytest.raises(SystemExit, match=r'cannot read "version"'):
+        run_bump(tmp_path, monkeypatch)
+
+
+def test_bump_plugin_json_version_must_be_string(tmp_path, monkeypatch):
+    """pyproject version stays "0.5.1"; plugin.json's int version must be
+    refused by the JSON-side str guard (if pyproject also had 5, the TOML
+    guard would fire first — this fixture isolates the JSON side)."""
+    make_tree(tmp_path)
+    (tmp_path / ".claude-plugin" / "plugin.json").write_text(
+        '{\n  "name": "rtfm",\n  "version": 5\n}\n'
+    )
+    with pytest.raises(SystemExit, match="must be a string"):
+        run_bump(tmp_path, monkeypatch)
 
 
 def test_bump_self_check_failure_aborts(tmp_path, monkeypatch):
@@ -402,7 +470,7 @@ def test_bump_self_check_unrunnable_is_clean_error(tmp_path, monkeypatch):
     make_tree(tmp_path)
 
     def noexec_self_check(args, **kwargs):
-        if args[0] == "uv":
+        if args[:2] == ["uv", "lock"]:
             return subprocess.CompletedProcess(args, 0)
         raise PermissionError(args[0])
 

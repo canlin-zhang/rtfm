@@ -114,41 +114,49 @@ def main() -> int:
         plugin_json, plugin_text, re.compile(r'^(\s*"version": ")[^"]+(",?)$', re.M), new_version
     )
     try:
-        pyproject.write_text(new_pyproject)  # both plans succeeded — commit both writes
-        plugin_json.write_text(new_plugin)
-    except OSError as e:
-        sys.exit(
-            f"ERROR: write failed: {e}; pyproject.toml and plugin.json may be half-edited. "
-            f"Fix the file state, then restore and retry: {RESTORE} && "
-            f"python3 scripts/bump_version.py {new_version}"
-        )
+        try:
+            pyproject.write_text(new_pyproject)  # both plans succeeded — commit both writes
+            plugin_json.write_text(new_plugin)
+        except OSError as e:
+            sys.exit(
+                f"ERROR: write failed: {e}; pyproject.toml and plugin.json may be half-edited. "
+                f"Fix the file state, then restore and retry: {RESTORE} && "
+                f"python3 scripts/bump_version.py {new_version}"
+            )
 
-    try:
-        subprocess.run(["uv", "lock"], cwd=ROOT, check=True)
-    except subprocess.CalledProcessError as e:
+        try:
+            subprocess.run(["uv", "lock"], cwd=ROOT, check=True)
+        except subprocess.CalledProcessError as e:
+            sys.exit(
+                f"ERROR: `uv lock` failed (exit {e.returncode}); pyproject.toml and plugin.json "
+                f"are already edited. Fix the resolution error, then restore and retry: "
+                f"{RESTORE} && python3 scripts/bump_version.py {new_version}"
+            )
+        except FileNotFoundError as e:
+            # uv missing from PATH — or a wrapper script whose shebang interpreter
+            # is gone (execve then fails with ENOENT, same as an absent binary).
+            sys.exit(
+                f"ERROR: could not run `uv lock`: {e}; uv is missing from PATH or its "
+                "wrapper script's interpreter is missing — needed to regenerate uv.lock. "
+                "pyproject.toml and plugin.json are already edited. Fix the issue, then "
+                f"restore and retry: {RESTORE} && python3 scripts/bump_version.py {new_version}"
+            )
+        except OSError as e:
+            # uv present but not runnable: ENOEXEC (corrupt binary, missing shebang)
+            # and EACCES (missing +x bit, noexec mount) are both OSErrors, not
+            # CalledProcessError; a wrapper whose shebang interpreter is gone raises
+            # FileNotFoundError (ENOENT) and is handled by the branch above.
+            sys.exit(
+                f"ERROR: could not run `uv lock`: {e}; pyproject.toml and plugin.json are "
+                f"already edited. Fix the issue, then restore and retry: "
+                f"{RESTORE} && python3 scripts/bump_version.py {new_version}"
+            )
+    except KeyboardInterrupt:
+        # A Ctrl-C mid-bump can leave pyproject/plugin.json bumped while uv.lock
+        # still resolves the old version — say how to restore, then re-raise.
         sys.exit(
-            f"ERROR: `uv lock` failed (exit {e.returncode}); pyproject.toml and plugin.json "
-            f"are already edited. Fix the resolution error, then restore and retry: "
-            f"{RESTORE} && python3 scripts/bump_version.py {new_version}"
-        )
-    except FileNotFoundError as e:
-        # uv missing from PATH — or a wrapper script whose shebang interpreter
-        # is gone (execve then fails with ENOENT, same as an absent binary).
-        sys.exit(
-            f"ERROR: could not run `uv lock` ({e}); uv is missing from PATH or its "
-            "wrapper/interpreter is broken — needed to regenerate uv.lock. "
-            "pyproject.toml and plugin.json are already edited; restore with: "
-            f"{RESTORE}"
-        )
-    except OSError as e:
-        # uv present but not runnable: ENOEXEC (corrupt binary, missing shebang)
-        # and EACCES (noexec mount) are both OSErrors, not CalledProcessError; a
-        # wrapper whose shebang interpreter is gone raises FileNotFoundError
-        # (ENOENT) and is handled by the branch above.
-        sys.exit(
-            f"ERROR: could not run `uv lock`: {e}; pyproject.toml and plugin.json are "
-            f"already edited. Fix the issue, then restore and retry: "
-            f"{RESTORE} && python3 scripts/bump_version.py {new_version}"
+            f"ERROR: interrupted; pyproject.toml and plugin.json may be edited and uv.lock "
+            f"stale. Restore and retry: {RESTORE} && python3 scripts/bump_version.py {new_version}"
         )
 
     if not check_script.exists():
