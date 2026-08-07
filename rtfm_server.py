@@ -28,7 +28,7 @@ _log = logging.getLogger("rtfm")
 
 TEXT_EXTS = {".txt", ".md", ".rst", ".rest"}   # plain text → line locators (.html later)
 CHUNK_LINES = 50
-SCHEMA_VERSION = 3                   # index DB is a cache; mismatch ⇒ drop & rebuild
+SCHEMA_VERSION = 4                   # index DB is a cache; mismatch ⇒ drop & rebuild
 MAX_LOCATIONS = 5                    # default cap on locations listed per search hit
 
 
@@ -68,6 +68,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         DROP TABLE IF EXISTS contents;
         DROP TABLE IF EXISTS locations;
         DROP TABLE IF EXISTS content_fts;
+        DROP TABLE IF EXISTS source_meta;
         CREATE VIRTUAL TABLE doc_fts USING fts5(sha256 UNINDEXED, title, headings);
         CREATE TABLE contents (
             sha256       TEXT PRIMARY KEY,
@@ -86,6 +87,11 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX idx_locations_sha ON locations(sha256);
         CREATE VIRTUAL TABLE content_fts USING fts5(
             sha256 UNINDEXED, locator_kind UNINDEXED, locator_value UNINDEXED, text
+        );
+        CREATE TABLE source_meta (
+            source          TEXT PRIMARY KEY,
+            git_commit      TEXT NOT NULL,
+            git_commit_date TEXT NOT NULL
         );
         """
     )
