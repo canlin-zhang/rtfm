@@ -1,9 +1,7 @@
 # tests/test_tools.py
-import subprocess
-
-import pytest
-import rtfm_server as rtfm
 from conftest import make_git_repo
+
+import rtfm_server as rtfm
 
 
 def _seed(home, tmp_path, name="docs"):
@@ -334,9 +332,6 @@ def test_source_filter_restricts_search(home, tmp_path):
     assert hits_docs == []
 
 
-def test_reindex_tool_handles_git_repo(home, tmp_path):
-    """The reindex() MCP tool includes git_repo sources."""
-    # The machine's git may default new repos to master; pin the initial branch to
 def test_reindex_tool_handles_git_repo(home, tmp_path, git_branch):
     """The reindex() MCP tool includes git_repo sources."""
     remote, seed, branch = make_git_repo(tmp_path, git_branch,

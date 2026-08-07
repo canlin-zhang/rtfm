@@ -400,8 +400,8 @@ def test_search_then_read_managed_git_repo(home, tmp_path):
     out = rtfm.search(query="alpha bravo")
     assert out["results"]
     hit = out["results"][0]
-    assert any(l["source"] == "specs" and l["relpath"] == "ref.md"
-               for l in hit["locations"])
+    assert any(loc["source"] == "specs" and loc["relpath"] == "ref.md"
+               for loc in hit["locations"])
 
     # read the hit's file through the MCP tool — must resolve the managed clone
     text = rtfm.read(source="specs", relpath="ref.md", start=1, end=2)

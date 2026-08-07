@@ -3,9 +3,9 @@ import os
 import sqlite3
 import subprocess
 
-import pytest
-import rtfm_server as rtfm
 from conftest import make_git_repo
+
+import rtfm_server as rtfm
 
 
 def test_schema_is_content_addressed(home):
