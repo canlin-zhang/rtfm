@@ -186,6 +186,17 @@ def _git_checkout(path: Path, ref: str) -> None:
             _git_fetch(path)
             _git(["checkout", ref], cwd=path, timeout=_git_timeout())
 
+
+def _git_ahead_count(path: Path, ref: str) -> int:
+    """Commits on local `ref` that are not on origin/<ref>. 0 when the remote ref doesn't
+    exist — then `_git_checkout` treats `ref` as a tag/SHA and never resets, so there is
+    no reset-to-remote to protect against."""
+    try:
+        cp = _git(["rev-list", "--count", f"origin/{ref}..{ref}"], cwd=path, timeout=10)
+        return int(cp.stdout.strip())
+    except RuntimeError:
+        return 0
+
 # --- index ------------------------------------------------------------------
 
 def get_index_db() -> sqlite3.Connection:
@@ -462,6 +473,18 @@ def _ensure_git_repo_ready(src: Source) -> tuple[Path, str | None]:
         return repo_path, (
             f"ERROR:FETCH_FAILED: {e}. "
             f"Recover: check network connectivity and try again.")
+
+    # Linked mode only: `git checkout -B` would orphan unpushed local commits — refuse
+    # (rtfm never mutates the user's repo). Managed clones are rtfm's own, so resetting
+    # them is fine and needs no guard.
+    if src.path is not None:
+        ahead = _git_ahead_count(repo_path, ref)
+        if ahead > 0:
+            return repo_path, (
+                f"ERROR:BRANCH_AHEAD: local branch '{ref}' is {ahead} commit(s) ahead of "
+                f"origin/{ref} — resetting it would discard unpushed work. "
+                f"Recover: push the commits ('git push origin {ref}'), or point 'ref' at "
+                f"a different branch in {manifest_path()}.")
 
     try:
         _git_checkout(repo_path, ref)

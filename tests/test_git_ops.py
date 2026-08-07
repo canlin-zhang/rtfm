@@ -203,6 +203,27 @@ def test_checkout_branch_resets_to_remote(tmp_path):
     assert (dest / "a.md").read_text() == "v2\n"
 
 
+def test_ahead_count_counts_unpushed_commits(tmp_path):
+    """_git_ahead_count is 0 for a repo at origin, N for one with unpushed commits."""
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
+    (seed / "a.md").write_text("v1\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), "main", dest, timeout=30)
+    assert rtfm._git_ahead_count(dest, "main") == 0
+
+    (dest / "local.md").write_text("unpushed work\n")
+    subprocess.run(["git", "-C", str(dest), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(dest), "commit", "-m", "local"], capture_output=True)
+    assert rtfm._git_ahead_count(dest, "main") == 1
+
+
 # --- reindex_source for git_repo ---
 
 def test_reindex_git_repo_linked_clean_indexes_files(home, tmp_path):
@@ -262,6 +283,45 @@ def test_reindex_git_repo_dirty_refuses(home, tmp_path):
     assert "error" in summary
     assert "dirty" in summary.get("error", "").lower()
     assert "guide.md" in summary.get("error", "")
+
+
+def test_reindex_git_repo_linked_ahead_refuses_and_preserves(home, tmp_path):
+    """A linked git_repo whose local branch has unpushed commits refuses to reset
+    ('checkout -B' would orphan them) and leaves the repo untouched."""
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
+    (seed / "guide.md").write_text("published v1\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), "main", dest, timeout=30)
+
+    # Remote moves on AND the linked clone has its own unpushed commit
+    (seed / "guide.md").write_text("published v2\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "v2"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+
+    (dest / "local.md").write_text("unpushed local work\n")
+    subprocess.run(["git", "-C", str(dest), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(dest), "commit", "-m", "local work"], capture_output=True)
+    local_sha = rtfm._git_current_commit(dest)
+
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+                      url=str(remote), ref="main")
+    summary = rtfm.reindex_source(conn, src)
+    assert "error" in summary
+    assert "BRANCH_AHEAD" in summary["error"]
+    assert "push" in summary["error"].lower()
+
+    # rtfm never mutates the linked repo: commit and working tree survive
+    assert rtfm._git_current_commit(dest) == local_sha
+    assert (dest / "local.md").exists()
 
 
 def test_reindex_git_repo_managed_clones_and_indexes(home, tmp_path):
