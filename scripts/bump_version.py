@@ -162,22 +162,27 @@ def main() -> int:
         if lock_only
         else f"Restore with: {RESTORE}"
     )
-    # The gate fires for two indistinguishable classes: the check ran and
-    # reported drift (its output is echoed above), or the check script was
-    # replaced and silently exited 0 without the OK verdict (nothing above).
-    # The advice must hedge both — and RESTORE never covers the check script,
-    # so 'restore and retry' alone is a dead end for either class.
+    # The gate fires for two classes it can't reliably tell apart: the check
+    # ran and reported drift (its report is echoed above), or the check script
+    # was replaced and exited 0 without the OK verdict — a replaced script can
+    # still print garbage instead of a drift report, so output presence is not
+    # the signal; the verdict is. The advice must hedge both — and RESTORE
+    # never covers the check script, so 'restore and retry' alone is a dead
+    # end for either class.
     gate_advice = (
-        "The bump's writes and `uv lock` completed, but the tree still fails the "
-        "consistency check (output above, if any). Fix the drift shown above, then "
-        "verify with: python3 scripts/check_version_consistency.py. If the check "
-        "script itself was replaced (no output above), restore it first with: "
-        "git checkout scripts/check_version_consistency.py"
+        "The bump's writes and `uv lock` completed, but the consistency check did "
+        "not pass (output above, if any). Fix the drift shown above, then verify "
+        "with: python3 scripts/check_version_consistency.py. If the check script "
+        "itself was replaced — it exits 0 without its OK verdict — restore it "
+        "first with: git checkout scripts/check_version_consistency.py (discards "
+        "any uncommitted edits to that file), then verify with: python3 "
+        "scripts/check_version_consistency.py"
         if lock_only
-        else f"Restore the bump's edits with: {RESTORE}. Fix the drift shown above "
-        f"— if the check script itself was replaced (no output above), restore it "
-        f"first with: git checkout scripts/check_version_consistency.py — then "
-        f"retry: python3 scripts/bump_version.py {new_version}"
+        else f"Restore the bump's edits with: {RESTORE}. If the check script "
+        f"itself was replaced — it exits 0 without its OK verdict — restore it "
+        f"first with: git checkout scripts/check_version_consistency.py "
+        f"(discards any uncommitted edits to that file). Then fix the drift "
+        f"reported above, and retry: python3 scripts/bump_version.py {new_version}"
     )
 
     # `,?` in the plugin.json pattern echoes the original trailing comma, so the
