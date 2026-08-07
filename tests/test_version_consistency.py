@@ -115,10 +115,12 @@ def test_check_dep_specifier_drift_names_both_sides(tmp_path, monkeypatch, capsy
     assert check.main() == 1
     out = capsys.readouterr()
     combined = out.out + out.err  # differing specifiers print to stdout, ERROR to stderr
-    # Full-line messages, not substrings: "mcp[cli]" alone would match the pinned
-    # specifier too, so each side must be named on its own "only in ..." line.
-    assert "only in rtfm_server.py PEP-723 block: mcp[cli]" in combined
-    assert "only in pyproject.toml: mcp[cli]>=1.28.1,<2" in combined
+    # Exact-line membership, not substrings: a swapped print loop would emit the
+    # other side's specifier on each line, and substring matching can't tell —
+    # "block: mcp[cli]" is a prefix of "block: mcp[cli]>=1.28.1,<2".
+    lines = [line.strip() for line in combined.splitlines()]
+    assert "only in rtfm_server.py PEP-723 block: mcp[cli]" in lines
+    assert "only in pyproject.toml: mcp[cli]>=1.28.1,<2" in lines
 
 
 def test_check_missing_rtfm_lock_entry_exits_1(tmp_path, monkeypatch):
@@ -146,9 +148,11 @@ def test_check_pyproject_missing_version_key_is_clean_error(tmp_path, monkeypatc
 
 
 def test_check_deps_must_be_lists(tmp_path, monkeypatch):
-    """A bare-string dependencies declaration would make set() compare character
-    sets, so the guard must refuse it (uv itself rejects the shape anyway)."""
-    make_tree(tmp_path)
+    """Bare-string dependencies on BOTH sides is the discriminating fixture: with
+    equal strings, set() compares character sets and reports OK — a false pass
+    the guard must refuse. (Bare string on one side only is not discriminating;
+    it drifts anyway and exits 1 regardless of the guard.)"""
+    make_tree(tmp_path, script_deps='# /// script\n# dependencies = "mcp[cli]>=1.28.1,<2"\n# ///\n')
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nname = "rtfm"\nversion = "0.5.1"\ndependencies = "mcp[cli]>=1.28.1,<2"\n'
     )
@@ -277,14 +281,17 @@ def test_bump_uv_lock_failure_is_clean_error_with_revert_instructions(tmp_path, 
 
 def test_bump_uv_missing_is_clean_error(tmp_path, monkeypatch):
     """`uv` not on PATH raises FileNotFoundError from subprocess.run; the bump
-    must exit cleanly, not traceback."""
+    must exit cleanly (with the restore hint — the file writes precede uv) and
+    never traceback."""
     make_tree(tmp_path)
 
     def no_uv(args, **kwargs):
         raise FileNotFoundError("uv")
 
-    with pytest.raises(SystemExit, match="uv.*not found"):
+    with pytest.raises(SystemExit) as exc:
         run_bump(tmp_path, monkeypatch, runner=no_uv)
+    assert "not found" in str(exc.value.code)
+    assert "git checkout" in str(exc.value.code)
 
 
 def test_bump_self_check_failure_aborts(tmp_path, monkeypatch):
@@ -292,6 +299,36 @@ def test_bump_self_check_failure_aborts(tmp_path, monkeypatch):
     fake, _ = make_runner(self_check_ok=1)
     with pytest.raises(SystemExit, match="post-bump consistency check failed"):
         run_bump(tmp_path, monkeypatch, runner=fake)
+
+
+def test_bump_check_script_missing_is_clean_error(tmp_path, monkeypatch):
+    """The self-check's existence guard: without the check script next to the
+    bump script, exit with the restore hint instead of a FileNotFoundError."""
+    make_tree(tmp_path)
+    (tmp_path / "scripts" / "check_version_consistency.py").unlink()
+    with pytest.raises(SystemExit) as exc:
+        run_bump(tmp_path, monkeypatch)
+    assert "can't self-check" in str(exc.value.code)
+    assert "git checkout" in str(exc.value.code)
+
+
+def test_bump_write_failure_is_clean_error_with_revert_instructions(tmp_path, monkeypatch):
+    """A write failure (read-only file, disk full) after the first file was
+    written must exit with a message that owns the half-edited tree — the
+    plan-before-write guarantee covers refusals, not OS write errors."""
+    make_tree(tmp_path)
+    plugin_json = tmp_path / ".claude-plugin" / "plugin.json"
+    plugin_json.chmod(0o444)
+    try:
+        with pytest.raises(SystemExit) as exc:
+            run_bump(tmp_path, monkeypatch)
+        msg = str(exc.value.code)
+        assert "write failed" in msg and "git checkout" in msg
+        # The failure happened on the second write: pyproject is already at the
+        # new version — the message must say so, or a retry dead-ends on drift.
+        assert 'version = "0.5.2"' in (tmp_path / "pyproject.toml").read_text()
+    finally:
+        plugin_json.chmod(0o644)  # let pytest clean up the tmp dir
 
 
 def test_bump_refuses_ambiguous_version_lines(tmp_path, monkeypatch):
