@@ -1136,12 +1136,14 @@ def search(query: str, source: str | None = None, max_files: int = 20,
 @mcp.tool()
 def reindex(source: str | None = None) -> dict:
     """Build/refresh the index. The ONLY tool that extracts. Pass a source name to rebuild
-    just that source, or omit to rebuild all dir sources. Returns a per-source summary."""
+    just that source, or omit to rebuild all dir and git_repo sources. Returns a per-source
+    summary."""
     sources, warnings = load_manifest()
     conn = get_index_db()
-    targets = [s for s in sources if s.type == "dir" and (source is None or s.name == source)]
+    targets = [s for s in sources if s.type in ("dir", "git_repo")
+               and (source is None or s.name == source)]
     if source is not None and not targets:
-        return {"error": f"source '{source}' not found or not a dir source. Call list_sources()."}
+        return {"error": f"source '{source}' not found. Call list_sources()."}
     resp: dict = {"reindexed": [reindex_source(conn, s) for s in targets]}
     if warnings:
         resp["WARNING"] = warnings
@@ -1282,7 +1284,9 @@ def health_check() -> dict:
         conn = get_index_db()
         status["schema_version"] = conn.execute("PRAGMA user_version").fetchone()[0]
         sources, warnings = load_manifest()
-        status["sources"] = [{"name": s.name, "type": s.type} for s in sources]
+        status["sources"] = [{"name": s.name, "type": s.type,
+                              **( {"url": s.url, "ref": s.ref} if s.type == "git_repo" else {})}
+                             for s in sources]
         if warnings:
             status["issues"].extend(warnings)
             status["ok"] = False

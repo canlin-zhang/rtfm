@@ -346,3 +346,48 @@ def test_source_filter_restricts_search(home, tmp_path):
 
     hits_docs = rtfm.search_index(conn, "unique_two", source="docs")
     assert hits_docs == []
+
+
+def test_reindex_tool_handles_git_repo(home, tmp_path):
+    """The reindex() MCP tool includes git_repo sources."""
+    # The machine's git may default new repos to master; pin the initial branch to
+    # main so the seed clone and the push below are deterministic (same mechanism
+    # test_git_ops.py and test_list_sources_reports_git_status use).
+    os.environ["GIT_CONFIG_COUNT"] = "1"
+    os.environ["GIT_CONFIG_KEY_0"] = "init.defaultBranch"
+    os.environ["GIT_CONFIG_VALUE_0"] = "main"
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
+    (seed / "a.md").write_text("hello world content\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "init"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), "main", dest, timeout=30)
+
+    rtfm.load_manifest()
+    mp = rtfm.manifest_path()
+    mp.write_text(
+        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\n'
+    )
+    out = rtfm.reindex(source="specs")
+    assert len(out["reindexed"]) == 1
+    assert out["reindexed"][0]["source"] == "specs"
+    assert out["reindexed"][0]["files_seen"] >= 1
+
+
+def test_health_check_reports_git_repo_sources(home, tmp_path):
+    """health_check includes git_repo sources."""
+    rtfm.load_manifest()
+    mp = rtfm.manifest_path()
+    mp.write_text(
+        '[[source]]\nname="specs"\ntype="git_repo"\n'
+        'url="https://example.com/repo.git"\nref="main"\n'
+    )
+    out = rtfm.health_check()
+    names = [s["name"] for s in out["sources"]]
+    assert "specs" in names
+    assert any(s["type"] == "git_repo" for s in out["sources"])
