@@ -379,11 +379,11 @@ def iter_source_files(src: Source) -> list[Path]:
 @dataclass
 class Source:
     name: str
-    type: str                       # "dir" (a "repo" type is added later)
+    type: str                       # "dir" or "git_repo"
     path: Path | None = None
     url: str | None = None
+    ref: str | None = None          # git refspec (branch, tag, SHA); None for dir
     mutable: bool = False
-    refresh: bool = True            # repo-only; ignored for dir
 
 
 _BOOTSTRAP_MANIFEST = '''\
@@ -420,8 +420,8 @@ def _source_from_table(t: dict) -> Source:
         type=t.get("type", "dir"),
         path=Path(path).expanduser() if path else None,
         url=url,
+        ref=t.get("ref"),                        # None if absent → default to remote HEAD later
         mutable=bool(t.get("mutable", False)),
-        refresh=bool(t.get("refresh", True)),
     )
 
 
