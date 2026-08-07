@@ -616,6 +616,33 @@ def test_bump_interrupt_during_uv_lock_prints_restore_hint(tmp_path, monkeypatch
     msg = str(exc.value.code)
     assert "interrupted" in msg
     assert "git checkout" in msg
+    # The normal path keeps the hedge — these three asserts pin the KI
+    # condition's lock_only conjunct (a dropped conjunct would advise the
+    # lock-only message here, where the files genuinely were edited).
+    assert "may be edited" in msg
+    assert "were NOT modified" not in msg
+    assert "git checkout pyproject.toml" in msg
+
+
+def test_bump_interrupt_mid_write_lock_only_hedge(tmp_path, monkeypatch):
+    """A Ctrl-C between the two byte-identical writes in the lock-only path
+    is a real truncation hazard — the handler must keep the hedge, not claim
+    the files were NOT modified (pins the KI condition's writes_completed
+    conjunct)."""
+    make_tree(tmp_path, version="0.5.2", lock_version="0.5.1")
+    real_write_text = Path.write_text
+
+    def interrupt_on_first_write(self, *args, **kwargs):
+        real_write_text(self, *args, **kwargs)
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(bump.Path, "write_text", interrupt_on_first_write)
+    with pytest.raises(SystemExit) as exc:
+        run_bump(tmp_path, monkeypatch, new_version="0.5.2")
+    msg = str(exc.value.code)
+    assert "may be edited" in msg
+    assert "were NOT modified" not in msg
+    assert "git checkout pyproject.toml" in msg
 
 
 def test_bump_malformed_pyproject_is_clean_error(tmp_path, monkeypatch):
@@ -931,14 +958,18 @@ def test_bump_uv_lock_timeout_lock_only(tmp_path, monkeypatch):
 
 def test_bump_self_check_failure_lock_only_advice(tmp_path, monkeypatch):
     """The self-check branches fire after the writes, so in the lock-only
-    path their restore advice must cover only uv.lock."""
+    path the lock regeneration was the bump's whole point — the advice must
+    name the check script and never suggest reverting uv.lock or the
+    unmodified files."""
     make_tree(tmp_path, version="0.5.2", lock_version="0.5.1")
     fake, _ = make_runner(self_check_ok=1)
     with pytest.raises(SystemExit) as exc:
         run_bump(tmp_path, monkeypatch, new_version="0.5.2", runner=fake)
     msg = str(exc.value.code)
-    assert "git checkout uv.lock" in msg
+    assert "restore the check script" in msg
+    assert "git checkout scripts/check_version_consistency.py" in msg
     assert "git checkout pyproject.toml" not in msg
+    assert "git checkout uv.lock" not in msg  # reverting the lock undoes the bump's work
 
 
 def test_bump_interrupt_lock_only_advice(tmp_path, monkeypatch):

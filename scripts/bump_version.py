@@ -150,9 +150,17 @@ def main() -> int:
         else "pyproject.toml and plugin.json are already edited"
     )
     lock_restore = "git checkout uv.lock" if lock_only else RESTORE
-    # The self-check branches fire after the writes and uv lock completed, so
-    # in the lock-only path the only changed file is uv.lock.
-    post_write_restore = lock_restore if lock_only else RESTORE
+    # The self-check branches fire after the writes and uv lock completed. In
+    # the lock-only path the lock regeneration was the bump's whole point —
+    # reverting uv.lock would undo it — so the advice names the check script
+    # (the actual problem) and points at verification instead.
+    post_write_advice = (
+        "The bump completed (uv.lock was regenerated); restore the check script "
+        "with: git checkout scripts/check_version_consistency.py, then verify with: "
+        "python3 scripts/check_version_consistency.py"
+        if lock_only
+        else f"Restore with: {RESTORE}"
+    )
 
     # `,?` in the plugin.json pattern echoes the original trailing comma, so the
     # output stays valid JSON whether "version" is the last key in the object
@@ -248,33 +256,33 @@ def main() -> int:
         st = check_script.stat()
     except FileNotFoundError:
         sys.exit(
-            f"ERROR: {check_script} not found — can't self-check. Restore with: "
-            f"{post_write_restore}"
+            f"ERROR: {check_script} not found — can't self-check. "
+            f"{post_write_advice}"
         )
     except OSError as e:  # e.g. an unreadable scripts/ parent directory
         sys.exit(
             f"ERROR: {check_script} cannot be accessed ({e}) — can't self-check. "
-            f"Restore with: {post_write_restore}"
+            f"{post_write_advice}"
         )
     except KeyboardInterrupt:  # tiny window; the tree is consistent here
         sys.exit("ERROR: interrupted; verify with: python3 scripts/check_version_consistency.py")
     if not stat.S_ISREG(st.st_mode):
         sys.exit(
-            f"ERROR: {check_script} is not a regular file — can't self-check. Restore with: "
-            f"{post_write_restore}"
+            f"ERROR: {check_script} is not a regular file — can't self-check. "
+            f"{post_write_advice}"
         )
     try:
         with check_script.open("rb") as f:
             f.read(1)  # probe readability — stat() succeeds on chmod-0 files
     except FileNotFoundError:  # race-only now: deleted between stat() and open()
         sys.exit(
-            f"ERROR: {check_script} not found — can't self-check. Restore with: "
-            f"{post_write_restore}"
+            f"ERROR: {check_script} not found — can't self-check. "
+            f"{post_write_advice}"
         )
     except OSError as e:
         sys.exit(
-            f"ERROR: {check_script} unreadable ({e}) — can't self-check. Restore with: "
-            f"{post_write_restore}"
+            f"ERROR: {check_script} unreadable ({e}) — can't self-check. "
+            f"{post_write_advice}"
         )
     except KeyboardInterrupt:  # tiny window; the tree is consistent here
         sys.exit("ERROR: interrupted; verify with: python3 scripts/check_version_consistency.py")
@@ -318,7 +326,7 @@ def main() -> int:
         )
     except OSError as e:
         sys.exit(
-            f"ERROR: could not run the self-check: {e}. Restore with: {post_write_restore}"
+            f"ERROR: could not run the self-check: {e}. {post_write_advice}"
         )
     except KeyboardInterrupt:
         # The bump itself completed; only the verification was cut short. Do not
@@ -345,7 +353,7 @@ def main() -> int:
             print(check.stdout, end="" if check.stdout.endswith("\n") else "\n")
         sys.exit(
             "ERROR: post-bump consistency check did not pass or could not run "
-            f"(output above, if any); restore with: {post_write_restore}"
+            f"(output above, if any); {post_write_advice}"
         )
 
     if old_version == new_version:
