@@ -137,8 +137,9 @@ def main() -> int:
             f"and plugin.json are already edited; restore with: {RESTORE}"
         )
     except OSError as e:
-        # uv present but not runnable (corrupt binary, noexec mount) raises
-        # PermissionError — an OSError, not a CalledProcessError.
+        # uv present but not runnable: ENOEXEC (corrupt binary, missing shebang)
+        # and EACCES (noexec mount) are both OSErrors, not CalledProcessError.
+        # (FileNotFoundError is only raised when the binary is not on PATH.)
         sys.exit(
             f"ERROR: could not run `uv lock`: {e}; pyproject.toml and plugin.json are "
             f"already edited. Fix the issue, then restore and retry: "

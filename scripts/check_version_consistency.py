@@ -97,10 +97,12 @@ def main() -> int:
     # guard turns a would-be AttributeError/TypeError into a clean drift error.
     if not isinstance(lock_packages, list) or not all(isinstance(p, dict) for p in lock_packages):
         return _fail("uv.lock: [[package]] must be an array of tables")
-    lock_entry = next((p for p in lock_packages if p.get("name") == "rtfm"), None)
-    if lock_entry is None:
+    rtfm_entries = [p for p in lock_packages if p.get("name") == "rtfm"]
+    if not rtfm_entries:
         return _fail("uv.lock has no [[package]] entry named 'rtfm'")
-    lock_version = lock_entry.get("version")
+    if len(rtfm_entries) > 1:
+        return _fail(f"uv.lock has {len(rtfm_entries)} [[package]] entries named 'rtfm'")
+    lock_version = rtfm_entries[0].get("version")
     if lock_version is None:
         return _fail("uv.lock: [[package]] entry named 'rtfm' has no version key")
 
