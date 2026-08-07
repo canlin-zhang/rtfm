@@ -1,0 +1,195 @@
+import os
+import subprocess
+
+import pytest
+
+import rtfm_server as rtfm
+
+# Fresh `git init` repos must get a `main` branch — the tests assume main, but the
+# machine default may be `master`. Pass init.defaultBranch=main to every git
+# subprocess these tests spawn via git's GIT_CONFIG_* environment mechanism.
+os.environ.setdefault("GIT_CONFIG_COUNT", "1")
+os.environ.setdefault("GIT_CONFIG_KEY_0", "init.defaultBranch")
+os.environ.setdefault("GIT_CONFIG_VALUE_0", "main")
+
+
+# --- _git helper ---
+
+def test_git_runs_and_returns_completed_process(tmp_path):
+    cp = rtfm._git(["init", str(tmp_path)], cwd=tmp_path, timeout=10)
+    assert cp.returncode == 0
+    assert (tmp_path / ".git").is_dir()
+
+
+def test_git_non_zero_exit_raises(tmp_path):
+    with pytest.raises(RuntimeError, match="exit"):
+        rtfm._git(["log"], cwd=tmp_path, timeout=10)  # not a git repo
+
+
+# --- git repo identification ---
+
+def test_repo_root_returns_path_for_git_dir(tmp_path):
+    subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
+    assert rtfm._git_repo_root(tmp_path) == tmp_path
+
+
+def test_repo_root_returns_none_for_non_repo(tmp_path):
+    assert rtfm._git_repo_root(tmp_path) is None
+
+
+# --- remote URL ---
+
+def test_remote_url_returns_origin_url(tmp_path):
+    subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "remote", "add", "origin",
+                    "https://example.com/repo.git"], capture_output=True)
+    assert rtfm._git_remote_url(tmp_path) == "https://example.com/repo.git"
+
+
+def test_remote_url_no_origin_is_empty(tmp_path):
+    subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
+    assert rtfm._git_remote_url(tmp_path) == ""
+
+
+# --- clean / dirty ---
+
+def test_clean_tree_is_clean(tmp_path):
+    subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "--allow-empty",
+                    "-m", "init"], capture_output=True)
+    clean, dirty_files = rtfm._git_is_clean(tmp_path)
+    assert clean is True
+    assert dirty_files == []
+
+
+def test_modified_file_is_dirty(tmp_path):
+    subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
+    f = tmp_path / "a.txt"
+    f.write_text("hello")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-m", "init"], capture_output=True)
+    f.write_text("modified")
+    clean, dirty_files = rtfm._git_is_clean(tmp_path)
+    assert clean is False
+    assert "a.txt" in dirty_files
+
+
+def test_untracked_file_is_dirty(tmp_path):
+    subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "--allow-empty",
+                    "-m", "init"], capture_output=True)
+    (tmp_path / "new.txt").write_text("untracked")
+    clean, dirty_files = rtfm._git_is_clean(tmp_path)
+    assert clean is False
+    assert "new.txt" in dirty_files
+
+
+# --- commit ---
+
+def test_current_commit_returns_sha(tmp_path):
+    subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "--allow-empty",
+                    "-m", "init"], capture_output=True)
+    sha = rtfm._git_current_commit(tmp_path)
+    assert len(sha) == 40 and all(c in "0123456789abcdef" for c in sha)
+
+
+def test_commit_date_returns_iso8601(tmp_path):
+    subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "--allow-empty",
+                    "-m", "init"], capture_output=True)
+    date = rtfm._git_commit_date(tmp_path, "HEAD")
+    assert "T" in date  # ISO 8601
+
+
+# --- resolve ref ---
+
+def test_resolve_ref_returns_sha_for_branch(tmp_path):
+    subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "--allow-empty",
+                    "-m", "init"], capture_output=True)
+    sha = rtfm._git_resolve_ref(tmp_path, "main")
+    assert len(sha) == 40
+
+
+def test_resolve_ref_returns_sha_for_head(tmp_path):
+    subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "--allow-empty",
+                    "-m", "init"], capture_output=True)
+    sha = rtfm._git_resolve_ref(tmp_path, "HEAD")
+    assert len(sha) == 40
+
+
+# --- clone ---
+
+def test_clone_creates_repo_at_dest(tmp_path):
+    # Create a bare "remote" repo
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
+    # Seed it with a commit on main
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
+    (seed / "f.md").write_text("hello\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "init"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), "main", dest, timeout=30)
+    assert (dest / ".git").is_dir()
+    assert (dest / "f.md").read_text() == "hello\n"
+
+
+# --- fetch ---
+
+def test_fetch_updates_remote_refs(tmp_path):
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
+    # initial clone
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
+    (seed / "a.md").write_text("v1\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), "main", dest, timeout=30)
+
+    # push a new commit to remote
+    (seed / "a.md").write_text("v2\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "v2"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+
+    rtfm._git_fetch(dest, timeout=30)
+    # After fetch, origin/main should be at the new commit
+    subprocess.run(["git", "-C", str(dest), "checkout", "origin/main"], capture_output=True)
+    assert (dest / "a.md").read_text() == "v2\n"
+
+
+# --- checkout ---
+
+def test_checkout_branch_resets_to_remote(tmp_path):
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
+    (seed / "a.md").write_text("v1\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), "main", dest, timeout=30)
+
+    # push v2 to remote
+    (seed / "a.md").write_text("v2\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "v2"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+
+    # fetch then checkout
+    rtfm._git_fetch(dest, timeout=30)
+    rtfm._git_checkout(dest, "main")
+    assert (dest / "a.md").read_text() == "v2\n"

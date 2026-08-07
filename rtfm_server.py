@@ -60,6 +60,123 @@ def _git_timeout() -> int:
         return int(env)
     return 60
 
+# --- git operations ----------------------------------------------------------
+
+def _git(args: list[str], cwd: Path, timeout: int | None = None) -> subprocess.CompletedProcess:
+    """Run a git command. Raises RuntimeError on non-zero exit or timeout."""
+    t = timeout if timeout is not None else _git_timeout()
+    try:
+        cp = subprocess.run(
+            ["git"] + args, cwd=str(cwd), capture_output=True, text=True,
+            timeout=t if t > 0 else None,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"git {' '.join(args)} timed out after {t}s") from None
+    if cp.returncode != 0:
+        raise RuntimeError(
+            f"git {' '.join(args)} exited {cp.returncode}: {(cp.stderr or '').strip()[:200]}")
+    return cp
+
+
+def _git_repo_root(path: Path) -> Path | None:
+    """Return the git repo root, or None if `path` is not in a git repo."""
+    try:
+        cp = _git(["rev-parse", "--show-toplevel"], cwd=path, timeout=10)
+        return Path(cp.stdout.strip())
+    except RuntimeError:
+        return None
+
+
+def _git_remote_url(path: Path) -> str:
+    """Return the origin remote URL, or '' if no origin."""
+    try:
+        cp = _git(["remote", "get-url", "origin"], cwd=path, timeout=10)
+        return cp.stdout.strip()
+    except RuntimeError:
+        return ""
+
+
+def _git_is_clean(path: Path) -> tuple[bool, list[str]]:
+    """(is_clean, list_of_dirty_files). A clean tree has no modified or untracked files."""
+    cp = _git(["status", "--porcelain"], cwd=path, timeout=10)
+    if not cp.stdout.strip():
+        return True, []
+    # Parse dirty file paths: `git status --porcelain` gives "XY filename". splitlines(),
+    # not strip+split: an unstaged edit is " M file" and strip() eats the leading status
+    # space, shifting the path one column left.
+    dirty = [line[3:].strip() for line in cp.stdout.splitlines() if len(line) >= 4]
+    return False, dirty
+
+
+def _git_current_commit(path: Path) -> str:
+    """Return the SHA of HEAD."""
+    cp = _git(["rev-parse", "HEAD"], cwd=path, timeout=10)
+    return cp.stdout.strip()
+
+
+def _git_commit_date(path: Path, ref: str) -> str:
+    """Return ISO 8601 commit date for `ref`."""
+    cp = _git(["log", "-1", "--format=%cI", ref], cwd=path, timeout=10)
+    return cp.stdout.strip()
+
+
+def _git_resolve_ref(path: Path, ref: str) -> str:
+    """Resolve a ref to a commit SHA. For branches, tries origin/<ref> first.
+    For tags and SHAs, resolves directly. Raises RuntimeError if ref doesn't exist."""
+    # Try resolving as-is first (works for SHAs, tags, local branches)
+    try:
+        cp = _git(["rev-parse", "--verify", ref], cwd=path, timeout=10)
+        return cp.stdout.strip()
+    except RuntimeError:
+        pass
+    # For branches: try origin/<ref>
+    try:
+        cp = _git(["rev-parse", "--verify", f"origin/{ref}"], cwd=path, timeout=10)
+        return cp.stdout.strip()
+    except RuntimeError:
+        raise RuntimeError(
+            f"ref '{ref}' not found locally or as origin/{ref} in {path}. "
+            f"Recover: verify the ref name, or run 'git fetch' in the repo.") from None
+
+
+def _git_fetch(path: Path, timeout: int | None = None) -> None:
+    """git fetch origin. Timeout-guarded; raises RuntimeError on failure."""
+    t = timeout if timeout is not None else _git_timeout()
+    _git(["fetch", "origin"], cwd=path, timeout=t)
+
+
+def _git_clone(url: str, ref: str, dest: Path, timeout: int | None = None) -> None:
+    """Clone a repo. Full clone (no --depth), checks out `ref`. Raises RuntimeError on failure."""
+    t = timeout if timeout is not None else _git_timeout()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    _git(["clone", "--branch", ref, url, str(dest)], cwd=dest.parent, timeout=t)
+
+
+def _git_checkout(path: Path, ref: str) -> None:
+    """Check out `ref`. For branches: reset to match origin/<ref>. For tags/SHAs: direct checkout.
+    Raises RuntimeError on failure."""
+    # Determine if `ref` is a branch by checking if origin/<ref> exists
+    is_branch = False
+    try:
+        _git(["rev-parse", "--verify", f"origin/{ref}"], cwd=path, timeout=10)
+        is_branch = True
+    except RuntimeError:
+        pass
+
+    if is_branch:
+        # Fetch then reset to match remote
+        _git_fetch(path)
+        _git(["checkout", "-B", ref, f"origin/{ref}"], cwd=path,
+             timeout=_git_timeout())
+    else:
+        # Tag or SHA: direct checkout (may need fetch first for tags)
+        try:
+            _git(["checkout", ref], cwd=path, timeout=_git_timeout())
+        except RuntimeError:
+            # Maybe it's a tag we haven't fetched; try fetch then checkout
+            _git_fetch(path)
+            _git(["checkout", ref], cwd=path, timeout=_git_timeout())
+
 # --- index ------------------------------------------------------------------
 
 def get_index_db() -> sqlite3.Connection:
