@@ -504,118 +504,22 @@ def _ensure_git_repo_ready(src: Source) -> tuple[Path, str | None]:
     return repo_path, None
 
 
-def _reindex_git_repo(conn: sqlite3.Connection, src: Source) -> dict:
-    """Rebuild a git_repo source."""
-    repo_path, error = _ensure_git_repo_ready(src)
-    if error:
-        return {"source": src.name, "error": error}
-
-    # Record commit before indexing
-    commit = _git_current_commit(repo_path)
-    commit_date = _git_commit_date(repo_path, "HEAD")
-    conn.execute(
-        "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?) "
-        "ON CONFLICT(source) DO UPDATE SET "
-        "git_commit=excluded.git_commit, git_commit_date=excluded.git_commit_date",
-        (src.name, commit, commit_date))
-    conn.commit()
-
-    # Now run the file-level indexing (same logic as dir, but from repo_path)
-    summary: dict = {"source": src.name, "files_seen": 0, "unique_contents": 0,
-                     "newly_extracted": 0, "extraction_skips": 0, "purged": 0,
-                     "errors": 0, "commit": commit, "commit_date": commit_date}
-
-    files = iter_source_files(Source(name=src.name, type="dir", path=repo_path))
+def _index_files(conn: sqlite3.Connection, source_name: str, root: Path) -> dict:
+    """Scan `root` for supported files and sync the index for `source_name`: hash new or
+    mtime-changed files, purge vanished ones, extract new contents, GC orphaned rows.
+    Returns a summary of the shared counters. Shared by the dir and git_repo reindex
+    paths so the two can never drift apart."""
+    summary = {"files_seen": 0, "unique_contents": 0, "newly_extracted": 0,
+               "extraction_skips": 0, "purged": 0, "errors": 0}
+    files = iter_source_files(Source(name=source_name, type="dir", path=root))
     summary["files_seen"] = len(files)
 
     existing = {r[0]: (r[1], r[2]) for r in conn.execute(
-        "SELECT relpath, sha256, mtime FROM locations WHERE source=?", (src.name,))}
+        "SELECT relpath, sha256, mtime FROM locations WHERE source=?", (source_name,))}
 
     present: dict[str, tuple[str, float]] = {}
     for f in files:
-        rel = str(f.relative_to(repo_path))
-        mtime = f.stat().st_mtime
-        prev = existing.get(rel)
-        if prev and prev[1] == mtime:
-            sha = prev[0]
-        else:
-            sha = hashlib.sha256(f.read_bytes()).hexdigest()
-        present[rel] = (sha, mtime)
-
-    vanished = set(existing) - set(present)
-    for rel in vanished:
-        conn.execute("DELETE FROM locations WHERE source=? AND relpath=?", (src.name, rel))
-    summary["purged"] = len(vanished)
-
-    for rel, (sha, mtime) in present.items():
-        conn.execute(
-            "INSERT INTO locations(source, relpath, sha256, mtime) VALUES(?,?,?,?) "
-            "ON CONFLICT(source, relpath) DO UPDATE SET "
-            "sha256=excluded.sha256, mtime=excluded.mtime",
-            (src.name, rel, sha, mtime))
-    conn.commit()
-
-    shas_here = {sha for (sha, _) in present.values()}
-    summary["unique_contents"] = len(shas_here)
-    already = {r[0] for r in conn.execute("SELECT sha256 FROM contents")}
-    need = shas_here - already
-    summary["extraction_skips"] = summary["files_seen"] - len(need)
-
-    jobs: dict[str, str] = {}
-    for rel in sorted(present):
-        sha = present[rel][0]
-        if sha in need and sha not in jobs:
-            jobs[sha] = str(repo_path / rel)
-
-    for ex in _extract_many(list(jobs.items())):
-        kind = ex.rows[0][0] if ex.rows else "line"
-        conn.execute("DELETE FROM content_fts WHERE sha256=?", (ex.sha,))
-        conn.executemany(
-            "INSERT INTO content_fts(sha256, locator_kind, locator_value, text) VALUES(?,?,?,?)",
-            [(ex.sha, k, v, t) for (k, v, t) in ex.rows])
-        conn.execute("DELETE FROM doc_fts WHERE sha256=?", (ex.sha,))
-        conn.execute("INSERT INTO doc_fts(sha256, title, headings) VALUES(?,?,?)",
-                     (ex.sha, ex.title, ex.headings))
-        conn.execute(
-            "INSERT INTO contents(sha256, locator_kind, n_chunks, extracted_ok, error) "
-            "VALUES(?,?,?,?,?) ON CONFLICT(sha256) DO UPDATE SET "
-            "locator_kind=excluded.locator_kind, n_chunks=excluded.n_chunks, "
-            "extracted_ok=excluded.extracted_ok, error=excluded.error",
-            (ex.sha, kind, len(ex.rows), 0 if ex.error else 1, ex.error))
-        summary["errors" if ex.error else "newly_extracted"] += 1
-    conn.commit()
-
-    for tbl in ("content_fts", "doc_fts", "contents"):
-        conn.execute(
-            f"DELETE FROM {tbl} WHERE sha256 NOT IN (SELECT DISTINCT sha256 FROM locations)")
-    conn.commit()
-    return summary
-
-
-def reindex_source(conn: sqlite3.Connection, src: Source) -> dict:
-    """Rebuild one source. Dispatches on type: git_repo sources go through the
-    fetch/checkout/dirty-check flow; dir sources index in place (unchanged). Returns a summary.
-
-    extraction_skips = files_seen - unique contents that required fresh extraction this run.
-    Covers two cases: byte-identical duplicates within the same run (same sha, only one job
-    submitted) and contents already extracted in a prior run (cache hits in `contents`).
-    Value: files_seen - len(need), where need = unique shas not yet in contents.
-    """
-    if src.type == "git_repo":
-        return _reindex_git_repo(conn, src)
-    summary = {"source": src.name, "files_seen": 0, "unique_contents": 0,
-               "newly_extracted": 0, "extraction_skips": 0, "purged": 0, "errors": 0}
-    if src.path is None or not src.path.exists():
-        return summary
-    files = iter_source_files(src)
-    summary["files_seen"] = len(files)
-
-    existing = {r[0]: (r[1], r[2]) for r in conn.execute(
-        "SELECT relpath, sha256, mtime FROM locations WHERE source=?", (src.name,))}
-
-    present: dict[str, tuple[str, float]] = {}
-    for f in files:
-        rel = str(f.relative_to(src.path))
+        rel = str(f.relative_to(root))
         mtime = f.stat().st_mtime
         prev = existing.get(rel)
         if prev and prev[1] == mtime:
@@ -626,7 +530,7 @@ def reindex_source(conn: sqlite3.Connection, src: Source) -> dict:
 
     vanished = set(existing) - set(present)
     for rel in vanished:
-        conn.execute("DELETE FROM locations WHERE source=? AND relpath=?", (src.name, rel))
+        conn.execute("DELETE FROM locations WHERE source=? AND relpath=?", (source_name, rel))
     summary["purged"] = len(vanished)
 
     for rel, (sha, mtime) in present.items():
@@ -634,7 +538,7 @@ def reindex_source(conn: sqlite3.Connection, src: Source) -> dict:
             "INSERT INTO locations(source, relpath, sha256, mtime) VALUES(?,?,?,?) "
             "ON CONFLICT(source, relpath) DO UPDATE SET "
             "sha256=excluded.sha256, mtime=excluded.mtime",
-            (src.name, rel, sha, mtime))
+            (source_name, rel, sha, mtime))
     conn.commit()
 
     shas_here = {sha for (sha, _) in present.values()}
@@ -647,7 +551,7 @@ def reindex_source(conn: sqlite3.Connection, src: Source) -> dict:
     for rel in sorted(present):                             # deterministic representative path
         sha = present[rel][0]
         if sha in need and sha not in jobs:
-            jobs[sha] = str(src.path / rel)
+            jobs[sha] = str(root / rel)
 
     for ex in _extract_many(list(jobs.items())):
         kind = ex.rows[0][0] if ex.rows else "line"
@@ -671,6 +575,47 @@ def reindex_source(conn: sqlite3.Connection, src: Source) -> dict:
         conn.execute(
             f"DELETE FROM {tbl} WHERE sha256 NOT IN (SELECT DISTINCT sha256 FROM locations)")
     conn.commit()
+    return summary
+
+
+def _reindex_git_repo(conn: sqlite3.Connection, src: Source) -> dict:
+    """Rebuild a git_repo source."""
+    repo_path, error = _ensure_git_repo_ready(src)
+    if error:
+        return {"source": src.name, "error": error}
+
+    # Record commit before indexing
+    commit = _git_current_commit(repo_path)
+    commit_date = _git_commit_date(repo_path, "HEAD")
+    conn.execute(
+        "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?) "
+        "ON CONFLICT(source) DO UPDATE SET "
+        "git_commit=excluded.git_commit, git_commit_date=excluded.git_commit_date",
+        (src.name, commit, commit_date))
+    conn.commit()
+
+    # Now run the file-level indexing (shared core with dir sources)
+    summary = {"source": src.name, "commit": commit, "commit_date": commit_date}
+    summary.update(_index_files(conn, src.name, repo_path))
+    return summary
+
+
+def reindex_source(conn: sqlite3.Connection, src: Source) -> dict:
+    """Rebuild one source. Dispatches on type: git_repo sources go through the
+    fetch/checkout/dirty-check flow; dir sources index in place (unchanged). Returns a summary.
+
+    extraction_skips = files_seen - unique contents that required fresh extraction this run.
+    Covers two cases: byte-identical duplicates within the same run (same sha, only one job
+    submitted) and contents already extracted in a prior run (cache hits in `contents`).
+    Value: files_seen - len(need), where need = unique shas not yet in contents.
+    """
+    if src.type == "git_repo":
+        return _reindex_git_repo(conn, src)
+    summary = {"source": src.name, "files_seen": 0, "unique_contents": 0,
+               "newly_extracted": 0, "extraction_skips": 0, "purged": 0, "errors": 0}
+    if src.path is None or not src.path.exists():
+        return summary
+    summary.update(_index_files(conn, src.name, src.path))
     return summary
 
 
