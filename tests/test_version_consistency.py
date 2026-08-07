@@ -807,7 +807,7 @@ def test_check_prints_drift_under_ascii_locale(tmp_path):
     """A non-ASCII version value must not crash the check's drift listing
     under an ASCII locale — the check's stdout reconfigure (the bump got the
     same guard in an earlier round) must keep the report readable."""
-    make_tree(tmp_path, version="0.5.1—β")
+    make_tree(tmp_path, version="0.5.2—β")
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nname = "rtfm"\nversion = "0.5.1"\ndependencies = [\n'
         '    "mcp[cli]>=1.28.1,<2",\n    "pymupdf",\n    "pypdf",\n]\n',
@@ -820,16 +820,39 @@ def test_check_prints_drift_under_ascii_locale(tmp_path):
     )
     combined = proc.stdout + proc.stderr
     assert "UnicodeEncodeError" not in combined  # this assert rules the crash out
+    assert "Traceback" not in combined  # belt-and-braces: any other crash class too
     assert "pyproject.toml: 0.5.1" in proc.stdout  # the drift listing itself printed
-    # All three listing lines are pinned by their ASCII-safe prefixes (the
-    # non-ASCII tails render as '??' on the reconfigured stdout — unpinned).
-    assert "uv.lock (rtfm entry): 0.5.1" in proc.stdout
-    assert ".claude-plugin/plugin.json: 0.5.1" in proc.stdout
+    # All three listing lines are pinned by their ASCII-safe prefixes, with
+    # DISTINCT prefixes per file (0.5.1 vs 0.5.2) so a mis-associated value
+    # (e.g. the loop printing pyproject's version on every line) fails the
+    # pins. The non-ASCII tails render as '??' on the reconfigured stdout —
+    # unpinned.
+    assert "uv.lock (rtfm entry): 0.5.2" in proc.stdout
+    assert ".claude-plugin/plugin.json: 0.5.2" in proc.stdout
     # The verdict is stderr and the data lines stdout — placement is part of
     # the pin, matching the suite's documented convention.
     assert "differs across files" in proc.stderr
     assert "run scripts/bump_version.py" in proc.stderr  # the actionable half
     assert proc.returncode == 1
+
+
+def test_check_pep723_block_without_deps_key_is_clean_error(tmp_path, monkeypatch):
+    """A PEP-723 block that parses but lacks 'dependencies' hits _key's
+    missing-key exit — clean, never a traceback."""
+    make_tree(tmp_path, script_deps='# /// script\n# requires-python = ">=3.11"\n# ///\n')
+    monkeypatch.setattr(check, "ROOT", tmp_path)
+    with pytest.raises(SystemExit, match="missing key"):
+        check.main()
+
+
+def test_bump_usage_wrong_arg_count_is_clean_error(tmp_path, monkeypatch):
+    """A wrong argument count exits with the usage message, never a
+    traceback."""
+    make_tree(tmp_path)
+    monkeypatch.setattr(bump, "ROOT", tmp_path)
+    monkeypatch.setattr(sys, "argv", ["bump_version.py"])  # no version argument
+    with pytest.raises(SystemExit, match="usage"):
+        bump.main()
 
 
 def test_check_reads_utf8_under_ascii_locale(tmp_path):
