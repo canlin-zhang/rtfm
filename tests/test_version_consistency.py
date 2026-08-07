@@ -775,7 +775,7 @@ def test_bump_self_check_timeout_is_clean_error(tmp_path, monkeypatch):
         run_bump(tmp_path, monkeypatch, runner=hanging_self_check)
     msg = str(exc.value.code)
     assert "timed out" in msg
-    assert "verify" in msg
+    assert "Verify with" in msg
 
 
 def test_bump_self_check_exit0_without_ok_line_exits_1(tmp_path, monkeypatch):
