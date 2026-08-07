@@ -23,6 +23,22 @@ jobs:
       - name: Run tests (Python ${{ matrix.python-version }})
         run: uv run --python ${{ matrix.python-version }} pytest -q
 
+  # The contract suite is ASCII-hermetic (explicit UTF-8 reads/writes, the
+  # require_ascii pins) — prove it under a POSIX locale, where the launch and
+  # check reads' explicit encoding is load-bearing. The 3 require_ascii tests
+  # skip here (vacuous on an ASCII host) and run on the UTF-8 legs.
+  test-ascii:
+    runs-on: ubuntu-latest
+    env:
+      LC_ALL: C
+      PYTHONUTF8: "0"
+      PYTHONCOERCECLOCALE: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Contract suite under the ASCII locale
+        run: uv run pytest tests/test_version_consistency.py -q
+
   lint:
     runs-on: ubuntu-latest
     steps:

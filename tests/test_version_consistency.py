@@ -417,10 +417,14 @@ def run_bump_in_subprocess(
     fake_uv = bin_dir / "uv"
     fake_uv.write_text("#!/bin/sh\nexit 0\n")
     fake_uv.chmod(0o755)
-    if require_ascii and sys.getfilesystemencoding() != "utf-8":
+    if require_ascii and (
+        sys.platform != "linux" or sys.getfilesystemencoding() != "utf-8"
+    ):
         # On an ASCII host the child inherits ASCII anyway and the child-side
-        # assert passes vacuously — the pin would be undetectable. Skip loudly.
-        pytest.skip("require_ascii pins are vacuous on non-UTF-8 hosts")
+        # assert passes vacuously — the pin would be undetectable. On macOS/
+        # Windows the fs encoding stays utf-8 under LC_ALL=C and the child
+        # assert can never fire. Either way the pin is meaningless: skip loudly.
+        pytest.skip("require_ascii pins need a Linux UTF-8 host")
     loader = (
         "import importlib.util, sys; from pathlib import Path; "
         "assert sys.argv[4] == '0' or sys.getfilesystemencoding() == 'ascii', "
@@ -458,8 +462,10 @@ def run_bump_in_subprocess(
 def run_check_in_subprocess(tmp_path, env_extra=None, timeout=10, require_ascii=False):
     """Run the real check script against a fixture tree in a child process
     (ROOT redirected), optionally under a hostile locale."""
-    if require_ascii and sys.getfilesystemencoding() != "utf-8":
-        pytest.skip("require_ascii pins are vacuous on non-UTF-8 hosts")
+    if require_ascii and (
+        sys.platform != "linux" or sys.getfilesystemencoding() != "utf-8"
+    ):
+        pytest.skip("require_ascii pins need a Linux UTF-8 host")
     loader = (
         "import importlib.util, sys; from pathlib import Path; "
         "assert sys.argv[3] == '0' or sys.getfilesystemencoding() == 'ascii', "
@@ -796,6 +802,26 @@ def test_bump_timeout_silent_child_prints_no_none(tmp_path):
     assert "None" not in combined
 
 
+def test_check_prints_drift_under_ascii_locale(tmp_path):
+    """A non-ASCII version value must not crash the check's drift listing
+    under an ASCII locale — the check's stdout reconfigure (the bump got the
+    same guard in an earlier round) must keep the report readable."""
+    make_tree(tmp_path, version="0.5.1—β")
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "rtfm"\nversion = "0.5.1"\ndependencies = [\n'
+        '    "mcp[cli]>=1.28.1,<2",\n    "pymupdf",\n    "pypdf",\n]\n',
+        encoding="utf-8",
+    )
+    proc = run_check_in_subprocess(
+        tmp_path,
+        env_extra={"LC_ALL": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0"},
+        require_ascii=True,
+    )
+    combined = proc.stdout + proc.stderr
+    assert "UnicodeEncodeError" not in combined
+    assert proc.returncode == 1  # the version drift was reported, not crashed
+
+
 def test_check_reads_utf8_under_ascii_locale(tmp_path):
     """The explicit UTF-8 reads must keep working under an ASCII locale: the
     repo files carry em-dashes, and locale read_text would mislabel a valid
@@ -854,10 +880,10 @@ def test_bump_writes_utf8_under_ascii_locale(tmp_path):
     # File state, not just output: both writes landed intact under ASCII.
     pyproject = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
     assert 'version = "0.5.2"' in pyproject
-    assert "em dash" in pyproject
+    assert "test — em dash" in pyproject  # the U+2014 glyph survived the write
     plugin_text = (tmp_path / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
     assert '"version": "0.5.2"' in plugin_text
-    assert "em dash" in plugin_text  # the em-dash survived the write, not mangled
+    assert "test — em dash" in plugin_text  # the U+2014 glyph survived, not mangled
     plugin = json.loads(plugin_text)
     assert plugin["version"] == "0.5.2"
 
@@ -873,7 +899,7 @@ def test_bump_check_script_as_fifo_is_clean_error(tmp_path):
     proc = run_bump_in_subprocess(tmp_path)
     combined = proc.stdout + proc.stderr
     assert "is not a regular file" in combined
-    assert proc.returncode == 1  # the loader's sys.exit(m.main()) contract
+    assert proc.returncode == 1  # the FIFO error exits 1 end to end
 
 
 def test_bump_check_script_garbage_stdout_exits_1(tmp_path):
@@ -896,9 +922,10 @@ def test_bump_check_script_garbage_stdout_exits_1(tmp_path):
     assert "UnicodeDecodeError" not in combined
     assert "did not pass" in combined
     # The gate echoed the decoded garbage, on its own line — pins the echo and
-    # the append-newline half of its newline handling. Under the ASCII locale
-    # the U+FFFD renders as '?'; under a UTF-8 locale as the replacement char.
-    assert "��\n" in proc.stdout or "??\n" in proc.stdout
+    # the append-newline half of its newline handling. The child's pipe decode
+    # is UTF-8 regardless of locale (io.text_encoding) and its own stdout is
+    # ASCII-forced, so the U+FFFD renders as '?' here on every host.
+    assert "??\n" in proc.stdout
 
 
 def test_bump_check_script_trailing_newline_stdout_no_double_newline(tmp_path):

@@ -85,6 +85,10 @@ def _read_pep723_deps(server: Path) -> list[str]:
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        # The drift listing can print non-ASCII version values; an ASCII
+        # stdout must not kill the report (the bump has the same guard).
+        sys.stdout.reconfigure(errors="replace")
     pyproject = _read("pyproject.toml", tomllib.loads)
     lock = _read("uv.lock", tomllib.loads)
     plugin = _read(".claude-plugin/plugin.json", json.loads)
