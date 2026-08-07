@@ -968,7 +968,7 @@ def test_bump_self_check_failure_lock_only_advice(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         run_bump(tmp_path, monkeypatch, new_version="0.5.2", runner=fake)
     msg = str(exc.value.code)
-    assert "fix the drift shown above" in msg
+    assert "Fix the drift shown above" in msg  # sentence-initial in the message
     assert "restore it first" in msg  # the replaced-script hedge
     assert "git checkout scripts/check_version_consistency.py" in msg
     assert "git checkout pyproject.toml" not in msg
