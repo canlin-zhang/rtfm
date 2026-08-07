@@ -26,3 +26,17 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - name: Lint
         run: uvx ruff check .
+
+  consistency:
+    # The release version lives in pyproject.toml, uv.lock, and plugin.json; the
+    # dependency list is mirrored in pyproject.toml and the PEP-723 block. Nothing
+    # mechanical links them — drift broke the 0.5.1 launch fix (lock resolved mcp
+    # below the pin). Guard both directions on every push.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Version and pin consistency
+        run: python3 scripts/check_version_consistency.py
+      - name: Lockfile freshness
+        run: uv lock --check
