@@ -188,7 +188,7 @@ def main() -> int:
             f"ERROR: {check_script} cannot be accessed ({e}) — can't self-check. "
             f"Restore the edited files with: {RESTORE}"
         )
-    except KeyboardInterrupt:  # microsecond window; the tree is consistent here
+    except KeyboardInterrupt:  # tiny window; the tree is consistent here
         sys.exit("ERROR: interrupted; verify with: python3 scripts/check_version_consistency.py")
     if not stat.S_ISREG(st.st_mode):
         sys.exit(
@@ -198,7 +198,7 @@ def main() -> int:
     try:
         with check_script.open("rb") as f:
             f.read(1)  # probe readability — stat() succeeds on chmod-0 files
-    except FileNotFoundError:  # race-only now: deleted between exists() and open()
+    except FileNotFoundError:  # race-only now: deleted between stat() and open()
         sys.exit(
             f"ERROR: {check_script} not found — can't self-check. Restore the edited "
             f"files with: {RESTORE}"
@@ -208,7 +208,7 @@ def main() -> int:
             f"ERROR: {check_script} unreadable ({e}) — can't self-check. Restore the "
             f"edited files with: {RESTORE}"
         )
-    except KeyboardInterrupt:  # sub-millisecond window; the tree is consistent here
+    except KeyboardInterrupt:  # tiny window; the tree is consistent here
         sys.exit("ERROR: interrupted; verify with: python3 scripts/check_version_consistency.py")
     try:
         # stderr stays inherited so a failing check's diagnostics are visible
@@ -241,7 +241,7 @@ def main() -> int:
     ):
         # Requiring the OK verdict (the check script's exact success line — keep
         # the two in sync), not just exit 0, catches a replaced check script
-        # (empty file — a /dev/null symlink is already rejected by the is_file()
+        # (empty file — a /dev/null symlink is already rejected by the S_ISREG
         # guard above) that 'succeeds' without running. Echo the captured
         # stdout: the check's actionable details (per-file versions, per-dep
         # diffs) are on stdout and would otherwise stay invisible.

@@ -648,11 +648,11 @@ def test_bump_check_script_missing_is_clean_error(tmp_path, monkeypatch):
         run_bump(tmp_path, monkeypatch)
     assert "can't self-check" in str(exc.value.code)
     assert "git checkout" in str(exc.value.code)
-    assert "not found" in str(exc.value.code)  # exists() fires before is_file()
+    assert "not found" in str(exc.value.code)  # the stat() FileNotFoundError fires first
 
 
 def test_bump_check_script_as_directory_is_clean_error(tmp_path, monkeypatch):
-    """A directory where the check script belongs: the is_file() guard rejects
+    """A directory where the check script belongs: the S_ISREG guard rejects
     it and the bump exits with the restore hint — it must not blame a
     consistency failure the check never ran."""
     make_tree(tmp_path)
@@ -667,8 +667,8 @@ def test_bump_check_script_as_directory_is_clean_error(tmp_path, monkeypatch):
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
 def test_bump_check_script_parent_unreadable_is_clean_error(tmp_path, monkeypatch):
-    """An unreadable scripts/ directory makes exists()/is_file() raise
-    PermissionError — the guard must exit cleanly, never traceback."""
+    """An unreadable scripts/ directory makes stat() raise PermissionError —
+    the guard must exit cleanly, never traceback."""
     make_tree(tmp_path)
     scripts_dir = tmp_path / "scripts"
     scripts_dir.chmod(0o000)
@@ -701,9 +701,9 @@ def test_bump_check_script_unreadable_is_clean_error(tmp_path, monkeypatch):
 
 
 def test_bump_check_script_as_fifo_is_clean_error(tmp_path):
-    """A FIFO at the check-script path must exit cleanly — a regressed guard
-    (is_file() → exists()) hangs the child's open() forever, which the timeout
-    fails loudly instead of hanging the suite."""
+    """A FIFO at the check-script path must exit cleanly — a type check
+    regressed to a plain existence check hangs the child's open() forever,
+    which the timeout fails loudly instead of hanging the suite."""
     make_tree(tmp_path)
     fifo = tmp_path / "scripts" / "check_version_consistency.py"
     fifo.unlink()
@@ -724,9 +724,22 @@ def test_bump_check_script_garbage_stdout_exits_1(tmp_path):
     combined = proc.stdout + proc.stderr
     assert "UnicodeDecodeError" not in combined
     assert "did not pass" in combined
-    # The gate echoed the decoded garbage (U+FFFD), on its own line — pins both
-    # the echo and its trailing-newline handling.
+    # The gate echoed the decoded garbage (U+FFFD), on its own line — pins the
+    # echo and the append-newline half of its newline handling.
     assert "��\n" in proc.stdout
+
+
+def test_bump_check_script_trailing_newline_stdout_no_double_newline(tmp_path):
+    """A check script whose stdout ends with a newline (the real check's
+    shape): the echo must not add a second one — pins the end='' half of the
+    newline handling, which the no-trailing-newline fixture cannot reach."""
+    make_tree(tmp_path)
+    (tmp_path / "scripts" / "check_version_consistency.py").write_text(
+        "import sys\nsys.stdout.buffer.write(b'\\xff\\xfe\\n')\n"
+    )
+    proc = run_bump_in_subprocess(tmp_path)
+    assert "��\n" in proc.stdout  # echoed once, on its own line
+    assert "��\n\n" not in proc.stdout  # no double newline
 
 
 def test_bump_interrupt_during_self_check_is_clean_error(tmp_path, monkeypatch):
@@ -750,7 +763,7 @@ def test_bump_interrupt_during_self_check_is_clean_error(tmp_path, monkeypatch):
 
 def test_bump_self_check_exit0_without_ok_line_exits_1(tmp_path, monkeypatch):
     """A check script that exits 0 without the OK verdict (e.g. replaced by an
-    empty file — a /dev/null symlink is already rejected by the is_file()
+    empty file — a /dev/null symlink is already rejected by the S_ISREG
     guard) must not count as a pass — the gate requires the OK line, not just
     exit 0."""
     make_tree(tmp_path)
