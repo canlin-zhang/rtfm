@@ -116,7 +116,7 @@ def test_resolve_ref_returns_sha_for_branch(tmp_path):
     subprocess.run(["git", "init", str(tmp_path)], capture_output=True)
     subprocess.run(["git", "-C", str(tmp_path), "commit", "--allow-empty",
                     "-m", "init"], capture_output=True)
-    sha = rtfm._git_resolve_ref(tmp_path, "main")
+    sha = rtfm._git_resolve_ref(tmp_path, "HEAD")
     assert len(sha) == 40
 
 
@@ -140,10 +140,10 @@ def test_clone_creates_repo_at_dest(tmp_path):
     (seed / "f.md").write_text("hello\n")
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "init"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
 
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), "main", dest, timeout=30)
+    rtfm._git_clone(str(remote), None, dest, timeout=30)
     assert (dest / ".git").is_dir()
     assert (dest / "f.md").read_text() == "hello\n"
 
@@ -159,16 +159,16 @@ def test_fetch_updates_remote_refs(tmp_path):
     (seed / "a.md").write_text("v1\n")
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
 
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), "main", dest, timeout=30)
+    rtfm._git_clone(str(remote), None, dest, timeout=30)
 
     # push a new commit to remote
     (seed / "a.md").write_text("v2\n")
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v2"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
 
     rtfm._git_fetch(dest, timeout=30)
     # After fetch, origin/main should be at the new commit
@@ -186,20 +186,23 @@ def test_checkout_branch_resets_to_remote(tmp_path):
     (seed / "a.md").write_text("v1\n")
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
 
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), "main", dest, timeout=30)
+    rtfm._git_clone(str(remote), None, dest, timeout=30)
+    branch = subprocess.run(
+        ["git", "-C", str(dest), "symbolic-ref", "--short", "HEAD"],
+        capture_output=True, text=True).stdout.strip()
 
     # push v2 to remote
     (seed / "a.md").write_text("v2\n")
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v2"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
 
     # fetch then checkout
     rtfm._git_fetch(dest, timeout=30)
-    rtfm._git_checkout(dest, "main")
+    rtfm._git_checkout(dest, branch)
     assert (dest / "a.md").read_text() == "v2\n"
 
 
@@ -212,16 +215,19 @@ def test_ahead_count_counts_unpushed_commits(tmp_path):
     (seed / "a.md").write_text("v1\n")
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
 
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), "main", dest, timeout=30)
-    assert rtfm._git_ahead_count(dest, "main") == 0
+    rtfm._git_clone(str(remote), None, dest, timeout=30)
+    branch = subprocess.run(
+        ["git", "-C", str(dest), "symbolic-ref", "--short", "HEAD"],
+        capture_output=True, text=True).stdout.strip()
+    assert rtfm._git_ahead_count(dest, branch) == 0
 
     (dest / "local.md").write_text("unpushed work\n")
     subprocess.run(["git", "-C", str(dest), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(dest), "commit", "-m", "local"], capture_output=True)
-    assert rtfm._git_ahead_count(dest, "main") == 1
+    assert rtfm._git_ahead_count(dest, branch) == 1
 
 
 # --- reindex_source for git_repo ---
@@ -235,10 +241,10 @@ def test_reindex_git_repo_linked_clean_indexes_files(home, tmp_path):
     (seed / "guide.md").write_text("the widget protocol defines flits\n")
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "init"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
 
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), "main", dest, timeout=30)
+    rtfm._git_clone(str(remote), None, dest, timeout=30)
 
     conn = rtfm.get_index_db()
     src = rtfm.Source(name="specs", type="git_repo", path=dest,
@@ -269,10 +275,10 @@ def test_reindex_git_repo_dirty_refuses(home, tmp_path):
     (seed / "guide.md").write_text("clean content\n")
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "init"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
 
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), "main", dest, timeout=30)
+    rtfm._git_clone(str(remote), None, dest, timeout=30)
     # Dirty the tree
     (dest / "guide.md").write_text("locally modified content\n")
 
@@ -295,16 +301,16 @@ def test_reindex_git_repo_linked_ahead_refuses_and_preserves(home, tmp_path):
     (seed / "guide.md").write_text("published v1\n")
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
 
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), "main", dest, timeout=30)
+    rtfm._git_clone(str(remote), None, dest, timeout=30)
 
     # Remote moves on AND the linked clone has its own unpushed commit
     (seed / "guide.md").write_text("published v2\n")
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v2"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
 
     (dest / "local.md").write_text("unpushed local work\n")
     subprocess.run(["git", "-C", str(dest), "add", "."], capture_output=True)
@@ -333,7 +339,7 @@ def test_reindex_git_repo_managed_clones_and_indexes(home, tmp_path):
     (seed / "ref.md").write_text("alpha bravo charlie content\n")
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "init"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
 
     conn = rtfm.get_index_db()
     src = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref="main")
@@ -360,7 +366,7 @@ def test_read_document_text_managed_git_repo_resolves_clone(home, tmp_path):
     (seed / "ref.md").write_text("line one\nline two\nline three\n")
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "init"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
 
     conn = rtfm.get_index_db()
     src = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref="main")
@@ -388,7 +394,7 @@ def test_search_then_read_managed_git_repo(home, tmp_path):
     (seed / "ref.md").write_text("alpha bravo charlie\nline two\nline three\n")
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "init"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
 
     rtfm.load_manifest()
     mp = rtfm.manifest_path()
@@ -400,8 +406,8 @@ def test_search_then_read_managed_git_repo(home, tmp_path):
     out = rtfm.search(query="alpha bravo")
     assert out["results"]
     hit = out["results"][0]
-    assert any(l["source"] == "specs" and l["relpath"] == "ref.md"
-               for l in hit["locations"])
+    assert any(loc["source"] == "specs" and loc["relpath"] == "ref.md"
+               for loc in hit["locations"])
 
     # read the hit's file through the MCP tool — must resolve the managed clone
     text = rtfm.read(source="specs", relpath="ref.md", start=1, end=2)
@@ -422,10 +428,10 @@ def test_search_auto_reindexes_stale_git_repo(home, tmp_path):
     (seed / "guide.md").write_text("the widget protocol defines flits v1\n")
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
 
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), "main", dest, timeout=30)
+    rtfm._git_clone(str(remote), None, dest, timeout=30)
 
     # First reindex
     conn = rtfm.get_index_db()
@@ -441,7 +447,7 @@ def test_search_auto_reindexes_stale_git_repo(home, tmp_path):
     (seed / "guide.md").write_text("the widget protocol defines flits v2\n")
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v2"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
 
     # Now search through the MCP tool — should auto-reindex and find v2
     rtfm.load_manifest()  # bootstrap default
@@ -462,10 +468,10 @@ def test_search_warns_when_git_repo_fetch_fails(home, tmp_path, monkeypatch):
     (seed / "guide.md").write_text("widget v1 content\n")
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
 
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), "main", dest, timeout=30)
+    rtfm._git_clone(str(remote), None, dest, timeout=30)
 
     conn = rtfm.get_index_db()
     src = rtfm.Source(name="specs", type="git_repo", path=dest,
@@ -476,7 +482,7 @@ def test_search_warns_when_git_repo_fetch_fails(home, tmp_path, monkeypatch):
     (seed / "guide.md").write_text("widget v2 content\n")
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v2"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
 
     # Break fetch
     def broken_fetch(*a, **k):

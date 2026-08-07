@@ -306,11 +306,11 @@ def test_stale_delta_git_repo_current_is_not_stale(home, tmp_path):
     (seed / "a.md").write_text("hello\n")
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "init"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
 
     # Clone to managed path
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), "main", dest, timeout=30)
+    rtfm._git_clone(str(remote), None, dest, timeout=30)
     commit = rtfm._git_current_commit(dest)
     commit_date = rtfm._git_commit_date(dest, "HEAD")
 
@@ -337,17 +337,17 @@ def test_stale_delta_git_repo_behind_is_stale(home, tmp_path):
     (seed / "a.md").write_text("v1\n")
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
 
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), "main", dest, timeout=30)
+    rtfm._git_clone(str(remote), None, dest, timeout=30)
     old_commit = rtfm._git_current_commit(dest)
 
     # Push a new commit
     (seed / "a.md").write_text("v2\n")
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v2"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
 
     # Record OLD commit in source_meta
     conn = rtfm.get_index_db()
@@ -371,10 +371,10 @@ def test_stale_delta_git_repo_no_source_meta_is_stale(home, tmp_path):
     (seed / "a.md").write_text("hello\n")
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "init"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
 
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), "main", dest, timeout=30)
+    rtfm._git_clone(str(remote), None, dest, timeout=30)
 
     conn = rtfm.get_index_db()
     src = rtfm.Source(name="specs", type="git_repo", path=dest,
@@ -392,8 +392,8 @@ def test_default_branch_parses_remote_head(home, tmp_path):
     (seed / "a.md").write_text("hello\n")
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "init"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
 
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), "main", dest, timeout=30)
-    assert rtfm._default_branch(dest) == "main"
+    rtfm._git_clone(str(remote), None, dest, timeout=30)
+    assert rtfm._default_branch(dest) is not None

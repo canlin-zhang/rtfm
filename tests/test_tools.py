@@ -234,10 +234,10 @@ def test_list_sources_reports_git_status(home, tmp_path):
     (seed / "a.md").write_text("hello\n")
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "init"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
 
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), "main", dest, timeout=30)
+    rtfm._git_clone(str(remote), None, dest, timeout=30)
 
     conn = rtfm.get_index_db()
     src = rtfm.Source(name="specs", type="git_repo", path=dest,
@@ -363,10 +363,10 @@ def test_reindex_tool_handles_git_repo(home, tmp_path):
     (seed / "a.md").write_text("hello world content\n")
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "init"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
 
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), "main", dest, timeout=30)
+    rtfm._git_clone(str(remote), None, dest, timeout=30)
 
     rtfm.load_manifest()
     mp = rtfm.manifest_path()
