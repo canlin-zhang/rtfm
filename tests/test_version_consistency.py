@@ -399,8 +399,9 @@ def run_bump(tmp_path, monkeypatch, new_version="0.5.2", runner=None):
 
 def run_bump_in_subprocess(tmp_path, timeout=10):
     """Run the real bump script in a child process with a fake `uv` on PATH —
-    for fixtures where the bump would otherwise hang (a FIFO) or where its
-    stdio must be observed raw (a garbage-emitting check script)."""
+    for fixtures where the bump would otherwise hang (a FIFO) or where only a
+    real subprocess exercises the decode path (a garbage-emitting check
+    script — a mocked runner returns a CompletedProcess without decoding)."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     fake_uv = bin_dir / "uv"
@@ -418,6 +419,7 @@ def run_bump_in_subprocess(tmp_path, timeout=10):
         timeout=timeout,
         capture_output=True,
         text=True,
+        errors="replace",
         env=env,
     )
 
@@ -645,6 +647,7 @@ def test_bump_check_script_missing_is_clean_error(tmp_path, monkeypatch):
         run_bump(tmp_path, monkeypatch)
     assert "can't self-check" in str(exc.value.code)
     assert "git checkout" in str(exc.value.code)
+    assert "not found" in str(exc.value.code)  # exists() fires before is_file()
 
 
 def test_bump_check_script_as_directory_is_clean_error(tmp_path, monkeypatch):
@@ -659,6 +662,23 @@ def test_bump_check_script_as_directory_is_clean_error(tmp_path, monkeypatch):
     msg = str(exc.value.code)
     assert "self-check" in msg
     assert "git checkout" in msg
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
+def test_bump_check_script_parent_unreadable_is_clean_error(tmp_path, monkeypatch):
+    """An unreadable scripts/ directory makes exists()/is_file() raise
+    PermissionError — the guard must exit cleanly, never traceback."""
+    make_tree(tmp_path)
+    scripts_dir = tmp_path / "scripts"
+    scripts_dir.chmod(0o000)
+    try:
+        with pytest.raises(SystemExit) as exc:
+            run_bump(tmp_path, monkeypatch)
+        msg = str(exc.value.code)
+        assert "cannot be accessed" in msg
+        assert "git checkout" in msg
+    finally:
+        scripts_dir.chmod(0o755)  # let pytest clean up the tmp dir
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
@@ -703,6 +723,7 @@ def test_bump_check_script_garbage_stdout_exits_1(tmp_path):
     combined = proc.stdout + proc.stderr
     assert "UnicodeDecodeError" not in combined
     assert "did not pass" in combined
+    assert "�" in combined  # the gate echoed the decoded garbage (U+FFFD)
 
 
 def test_bump_interrupt_during_self_check_is_clean_error(tmp_path, monkeypatch):
@@ -720,6 +741,8 @@ def test_bump_interrupt_during_self_check_is_clean_error(tmp_path, monkeypatch):
     msg = str(exc.value.code)
     assert "self-check" in msg
     assert "check_version_consistency.py" in msg
+    assert "uv.lock was regenerated" in msg  # the honest claim, not an agreement one
+    assert "agree" not in msg  # the check was interrupted before it could verify
 
 
 def test_bump_self_check_exit0_without_ok_line_exits_1(tmp_path, monkeypatch):

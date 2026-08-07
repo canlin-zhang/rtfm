@@ -173,12 +173,20 @@ def main() -> int:
     # a writer appears — a bare stat() can't flag it (stat() succeeds on FIFOs)
     # and the probe can't (it blocks before returning). Directories land here
     # too; missing paths are caught by exists() first.
-    if not check_script.exists():
+    try:
+        missing = not check_script.exists()
+        non_regular = not check_script.is_file()
+    except OSError as e:  # e.g. an unreadable scripts/ parent directory
+        sys.exit(
+            f"ERROR: {check_script} cannot be accessed ({e}) — can't self-check. "
+            f"Restore the edited files with: {RESTORE}"
+        )
+    if missing:
         sys.exit(
             f"ERROR: {check_script} not found — can't self-check. Restore the edited "
             f"files with: {RESTORE}"
         )
-    if not check_script.is_file():
+    if non_regular:
         sys.exit(
             f"ERROR: {check_script} is not a regular file — can't self-check. Restore the "
             f"edited files with: {RESTORE}"
@@ -233,10 +241,11 @@ def main() -> int:
         # guard above) that 'succeeds' without running. Echo the captured
         # stdout: the check's actionable details (per-file versions, per-dep
         # diffs) are on stdout and would otherwise stay invisible.
-        print(check.stdout, end="")
+        if check.stdout:
+            print(check.stdout, end="" if check.stdout.endswith("\n") else "\n")
         sys.exit(
             "ERROR: post-bump consistency check did not pass or could not run "
-            "(output above); restore the edited files with: "
+            "(output above, if any); restore the edited files with: "
             f"{RESTORE}"
         )
 
