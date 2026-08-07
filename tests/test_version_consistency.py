@@ -10,6 +10,7 @@ for the repo via monkeypatched module ROOT.
 import importlib.machinery
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -108,8 +109,9 @@ def test_check_consistent_tree_exits_0(tmp_path, monkeypatch):
 
 
 def test_check_dep_specifier_drift_names_both_sides(tmp_path, monkeypatch, capsys):
-    """Unpinned mcp in the PEP-723 block vs pinned in pyproject (the 0.5.1 class):
-    exit 1, and the message shows the exact differing specifier from each file."""
+    """Unpinned mcp in the PEP-723 block vs pinned in pyproject (the mirror
+    direction of 0.5.1, where the block was the pinned side and pyproject
+    lagged): exit 1, and the message shows the exact specifier from each file."""
     make_tree(tmp_path, script_deps=PEP723.replace('"mcp[cli]>=1.28.1,<2"', '"mcp[cli]"'))
     monkeypatch.setattr(check, "ROOT", tmp_path)
     assert check.main() == 1
@@ -137,6 +139,42 @@ def test_check_lock_missing_package_array_is_clean_error(tmp_path, monkeypatch):
     monkeypatch.setattr(check, "ROOT", tmp_path)
     with pytest.raises(SystemExit, match="missing key 'package'"):
         check.main()
+
+
+def test_check_lock_package_wrong_shape_is_clean_error(tmp_path, monkeypatch):
+    """`package = "rtfm"` parses as valid TOML; without the shape guard the
+    entry lookup AttributeError-tracebacks on it. CI always runs against the
+    well-formed real lock, so only a fixture can pin this."""
+    make_tree(tmp_path)
+    (tmp_path / "uv.lock").write_text('package = "rtfm"\n')
+    monkeypatch.setattr(check, "ROOT", tmp_path)
+    assert check.main() == 1
+
+
+def test_check_rtfm_entry_without_version_key_is_clean_error(tmp_path, monkeypatch):
+    """An rtfm entry that exists but carries no version is a different failure
+    than a missing entry — the message must distinguish the two."""
+    make_tree(tmp_path)
+    (tmp_path / "uv.lock").write_text('[[package]]\nname = "rtfm"\nsource = { virtual = "." }\n')
+    monkeypatch.setattr(check, "ROOT", tmp_path)
+    assert check.main() == 1
+
+
+def test_check_versions_must_be_strings(tmp_path, monkeypatch):
+    """All three versions as equal ints: guard-less code compares equal and
+    reports OK — precisely the false-pass class this suite exists to catch."""
+    make_tree(tmp_path)
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "rtfm"\nversion = 5\ndependencies = []\n'
+    )
+    (tmp_path / "uv.lock").write_text(
+        '[[package]]\nname = "rtfm"\nversion = 5\nsource = { virtual = "." }\n'
+    )
+    (tmp_path / ".claude-plugin" / "plugin.json").write_text(
+        '{\n  "name": "rtfm",\n  "version": 5\n}\n'
+    )
+    monkeypatch.setattr(check, "ROOT", tmp_path)
+    assert check.main() == 1
 
 
 def test_check_pyproject_missing_version_key_is_clean_error(tmp_path, monkeypatch):
@@ -175,6 +213,16 @@ def test_check_malformed_pyproject_is_clean_error_not_traceback(tmp_path, monkey
     (tmp_path / "pyproject.toml").write_text("this is not [ toml")
     monkeypatch.setattr(check, "ROOT", tmp_path)
     with pytest.raises(SystemExit, match="unparseable"):
+        check.main()
+
+
+def test_check_non_utf8_file_is_clean_error(tmp_path, monkeypatch):
+    """A non-UTF-8 file raises UnicodeDecodeError — a ValueError subclass, not
+    OSError — and must exit cleanly with its own message, never traceback."""
+    make_tree(tmp_path)
+    (tmp_path / ".claude-plugin" / "plugin.json").write_bytes(b"\xff\xfe\x00")
+    monkeypatch.setattr(check, "ROOT", tmp_path)
+    with pytest.raises(SystemExit, match="not UTF-8"):
         check.main()
 
 
@@ -250,6 +298,15 @@ def test_bump_updates_all_declarations_and_self_checks(tmp_path, monkeypatch):
     assert self_check[0] == sys.executable
     assert self_check[1].endswith("check_version_consistency.py")
 
+    # The fake `uv lock` cannot regenerate uv.lock; simulate what the real
+    # command does, then run the REAL check against the bumped tree — the
+    # whole pipeline must agree.
+    (tmp_path / "uv.lock").write_text(
+        (tmp_path / "uv.lock").read_text().replace('version = "0.5.1"', 'version = "0.5.2"')
+    )
+    monkeypatch.setattr(check, "ROOT", tmp_path)
+    assert check.main() == 0
+
 
 def test_bump_refuses_on_pre_existing_drift(tmp_path, monkeypatch):
     make_tree(tmp_path, plugin_version="0.5.0")
@@ -294,11 +351,30 @@ def test_bump_uv_missing_is_clean_error(tmp_path, monkeypatch):
     assert "git checkout" in str(exc.value.code)
 
 
+def test_bump_uv_unrunnable_is_clean_error(tmp_path, monkeypatch):
+    """uv present but not executable (corrupt binary, noexec mount) raises
+    PermissionError — an OSError, not a CalledProcessError — and must exit
+    with the restore hint, never traceback."""
+    make_tree(tmp_path)
+
+    def noexec_uv(args, **kwargs):
+        raise PermissionError(args[0])
+
+    with pytest.raises(SystemExit) as exc:
+        run_bump(tmp_path, monkeypatch, runner=noexec_uv)
+    msg = str(exc.value.code)
+    assert "git checkout" in msg
+    assert "uv.lock" in msg  # RESTORE covers the regenerated lock too
+
+
 def test_bump_self_check_failure_aborts(tmp_path, monkeypatch):
     make_tree(tmp_path)
     fake, _ = make_runner(self_check_ok=1)
-    with pytest.raises(SystemExit, match="post-bump consistency check failed"):
+    with pytest.raises(SystemExit) as exc:
         run_bump(tmp_path, monkeypatch, runner=fake)
+    msg = str(exc.value.code)
+    assert "post-bump consistency check failed" in msg
+    assert "git checkout" in msg  # restore hint: uv.lock is regenerated by now
 
 
 def test_bump_check_script_missing_is_clean_error(tmp_path, monkeypatch):
@@ -312,6 +388,7 @@ def test_bump_check_script_missing_is_clean_error(tmp_path, monkeypatch):
     assert "git checkout" in str(exc.value.code)
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
 def test_bump_write_failure_is_clean_error_with_revert_instructions(tmp_path, monkeypatch):
     """A write failure (read-only file, disk full) after the first file was
     written must exit with a message that owns the half-edited tree — the
@@ -324,6 +401,7 @@ def test_bump_write_failure_is_clean_error_with_revert_instructions(tmp_path, mo
             run_bump(tmp_path, monkeypatch)
         msg = str(exc.value.code)
         assert "write failed" in msg and "git checkout" in msg
+        assert "uv.lock" in msg  # RESTORE covers the regenerated lock too
         # The failure happened on the second write: pyproject is already at the
         # new version — the message must say so, or a retry dead-ends on drift.
         assert 'version = "0.5.2"' in (tmp_path / "pyproject.toml").read_text()
@@ -375,4 +453,31 @@ def test_bump_missing_version_key_is_clean_error(tmp_path, monkeypatch):
     make_tree(tmp_path)
     (tmp_path / "pyproject.toml").write_text('[project]\nname = "rtfm"\n')
     with pytest.raises(SystemExit, match="version"):
+        run_bump(tmp_path, monkeypatch)
+
+
+def test_bump_missing_pyproject_is_clean_error(tmp_path, monkeypatch):
+    make_tree(tmp_path)
+    (tmp_path / "pyproject.toml").unlink()
+    with pytest.raises(SystemExit, match="pyproject.toml not found"):
+        run_bump(tmp_path, monkeypatch)
+
+
+def test_bump_version_must_be_string(tmp_path, monkeypatch):
+    """An unquoted `version = 5` would flow a list/int repr into the drift
+    message; the reader must refuse the shape instead."""
+    make_tree(tmp_path)
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "rtfm"\nversion = 5\ndependencies = []\n'
+    )
+    with pytest.raises(SystemExit, match="must be a string"):
+        run_bump(tmp_path, monkeypatch)
+
+
+def test_bump_non_utf8_file_is_clean_error(tmp_path, monkeypatch):
+    """UnicodeDecodeError is a ValueError subclass, not OSError — the read
+    guard must name it explicitly."""
+    make_tree(tmp_path)
+    (tmp_path / "pyproject.toml").write_bytes(b"\xff\xfe\x00")
+    with pytest.raises(SystemExit, match="not UTF-8"):
         run_bump(tmp_path, monkeypatch)

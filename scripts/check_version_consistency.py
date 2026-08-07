@@ -44,15 +44,19 @@ def _read(name: str, loader: Callable[[str], dict]) -> dict:
         sys.exit(f"ERROR: {name} not found")
     except OSError as e:
         sys.exit(f"ERROR: {name}: {e}")
-    except (tomllib.TOMLDecodeError, json.JSONDecodeError, UnicodeDecodeError) as e:
+    except (tomllib.TOMLDecodeError, json.JSONDecodeError) as e:
         sys.exit(f"ERROR: {name} unparseable: {e}")
+    except UnicodeDecodeError as e:
+        sys.exit(f"ERROR: {name} not UTF-8 text: {e}")
 
 
 def _key(name: str, container: object, *keys: str):
-    """Descend into a parsed config, or exit cleanly if any key is missing."""
+    """Descend into a parsed config, or exit cleanly on a missing key or a
+    non-table value (a wrong-typed container parses fine — `project = "x"` is
+    valid TOML — so the message names both failure shapes)."""
     for k in keys:
         if not isinstance(container, dict) or k not in container:
-            sys.exit(f"ERROR: {name}: missing key '{'.'.join(keys)}'")
+            sys.exit(f"ERROR: {name}: missing key '{'.'.join(keys)}' or non-table value")
         container = container[k]
     return container
 
@@ -93,9 +97,12 @@ def main() -> int:
     # guard turns a would-be AttributeError/TypeError into a clean drift error.
     if not isinstance(lock_packages, list) or not all(isinstance(p, dict) for p in lock_packages):
         return _fail("uv.lock: [[package]] must be an array of tables")
-    lock_version = next((p.get("version") for p in lock_packages if p.get("name") == "rtfm"), None)
-    if lock_version is None:
+    lock_entry = next((p for p in lock_packages if p.get("name") == "rtfm"), None)
+    if lock_entry is None:
         return _fail("uv.lock has no [[package]] entry named 'rtfm'")
+    lock_version = lock_entry.get("version")
+    if lock_version is None:
+        return _fail("uv.lock: [[package]] entry named 'rtfm' has no version key")
 
     versions = {
         "pyproject.toml": pkg_version,
