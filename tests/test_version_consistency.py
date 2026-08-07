@@ -423,7 +423,8 @@ def run_bump_in_subprocess(
         # On an ASCII host the child inherits ASCII anyway and the child-side
         # assert passes vacuously — the pin would be undetectable. On macOS/
         # Windows the fs encoding stays utf-8 under LC_ALL=C and the child
-        # assert can never fire. Either way the pin is meaningless: skip loudly.
+        # assert can never pass (it always raises). Either way the pin is
+        # meaningless: skip loudly.
         pytest.skip("require_ascii pins need a Linux UTF-8 host")
     loader = (
         "import importlib.util, sys; from pathlib import Path; "
@@ -818,8 +819,10 @@ def test_check_prints_drift_under_ascii_locale(tmp_path):
         require_ascii=True,
     )
     combined = proc.stdout + proc.stderr
-    assert "UnicodeEncodeError" not in combined
-    assert proc.returncode == 1  # the version drift was reported, not crashed
+    assert "UnicodeEncodeError" not in combined  # this assert rules the crash out
+    assert "pyproject.toml: 0.5.1" in proc.stdout  # the drift listing itself printed
+    assert "differs across files" in proc.stderr
+    assert proc.returncode == 1
 
 
 def test_check_reads_utf8_under_ascii_locale(tmp_path):
@@ -922,9 +925,10 @@ def test_bump_check_script_garbage_stdout_exits_1(tmp_path):
     assert "UnicodeDecodeError" not in combined
     assert "did not pass" in combined
     # The gate echoed the decoded garbage, on its own line — pins the echo and
-    # the append-newline half of its newline handling. The child's pipe decode
-    # is UTF-8 regardless of locale (io.text_encoding) and its own stdout is
-    # ASCII-forced, so the U+FFFD renders as '?' here on every host.
+    # the append-newline half of its newline handling. The pipe decode is
+    # locale-based, but ASCII and UTF-8 decoding of \xff\xfe with
+    # errors="replace" both yield two U+FFFD; the child's ASCII-forced stdout
+    # then renders them as '?' here on every host.
     assert "??\n" in proc.stdout
 
 
