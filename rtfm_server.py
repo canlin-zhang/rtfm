@@ -2,7 +2,7 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#   "mcp[cli]",
+#   "mcp[cli]>=1.28.1,<2",
 #   "pymupdf",
 #   "pypdf",
 # ]
