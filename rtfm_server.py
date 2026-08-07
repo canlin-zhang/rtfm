@@ -123,19 +123,20 @@ def _git_commit_date(path: Path, ref: str) -> str:
 def _git_resolve_ref(path: Path, ref: str) -> str:
     """Resolve a ref to a commit SHA. For branches, tries origin/<ref> first.
     For tags and SHAs, resolves directly. Raises RuntimeError if ref doesn't exist."""
-    # Try resolving as-is first (works for SHAs, tags, local branches)
-    try:
-        cp = _git(["rev-parse", "--verify", ref], cwd=path, timeout=10)
-        return cp.stdout.strip()
-    except RuntimeError:
-        pass
-    # For branches: try origin/<ref>
+    # Branches: origin/<ref> first — after a fetch, origin/<ref> is the remote's current
+    # commit while the local branch may be behind, so local-first would hide remote updates.
     try:
         cp = _git(["rev-parse", "--verify", f"origin/{ref}"], cwd=path, timeout=10)
         return cp.stdout.strip()
     except RuntimeError:
+        pass
+    # Fall back to local (works for SHAs, tags, local-only branches, HEAD)
+    try:
+        cp = _git(["rev-parse", "--verify", ref], cwd=path, timeout=10)
+        return cp.stdout.strip()
+    except RuntimeError:
         raise RuntimeError(
-            f"ref '{ref}' not found locally or as origin/{ref} in {path}. "
+            f"ref '{ref}' not found as origin/{ref} or locally in {path}. "
             f"Recover: verify the ref name, or run 'git fetch' in the repo.") from None
 
 
@@ -477,14 +478,17 @@ def reindex_source(conn: sqlite3.Connection, src: Source) -> dict:
 
 
 def _stale_delta(conn: sqlite3.Connection, src: Source) -> tuple[int, bool]:
-    """Cheap staleness check for any dir source — stat + (relpath, mtime) compare, no hashing
-    or extraction. Returns (changed, stale):
-
-      changed  count of new or mtime-changed files — the ones that would need fresh extraction.
-               Bounds the cost of an inline auto-reindex (see _auto_reindex_max).
-      stale    whether the index differs from disk at all, including files that vanished on
-               disk (which a reindex purges essentially for free, so they don't inflate `changed`).
+    """Cheap staleness check. Dispatches on source type.
+    Returns (changed, stale):
+      changed  count of new/changed items (files for dir, always 0 for git_repo)
+      stale    whether the index differs from reality
     """
+    if src.type == "git_repo":
+        return _stale_delta_git_repo(conn, src)
+    # dir sources: stat + (relpath, mtime) compare — no hashing or extraction.
+    # `changed` counts files that would need fresh extraction and bounds the cost of an
+    # inline auto-reindex (see _auto_reindex_max); `stale` also catches files that vanished
+    # on disk (a reindex purges them essentially for free, so they don't inflate `changed`).
     if src.path is None or not src.path.exists():
         return 0, False
     indexed = {r[0]: r[1] for r in conn.execute(
@@ -493,6 +497,34 @@ def _stale_delta(conn: sqlite3.Connection, src: Source) -> tuple[int, bool]:
     changed = sum(1 for rel, mtime in on_disk.items() if indexed.get(rel) != mtime)
     stale = changed > 0 or set(indexed) != set(on_disk)   # latter catches vanished files
     return changed, stale
+
+
+def _stale_delta_git_repo(conn: sqlite3.Connection, src: Source) -> tuple[int, bool]:
+    """Commit-based staleness for git_repo: compare the indexed commit to origin/<ref>.
+    Fetches first so the remote state is current. Returns (0, stale)."""
+    try:
+        row = conn.execute(
+            "SELECT git_commit FROM source_meta WHERE source=?", (src.name,)).fetchone()
+        if row is None:
+            return 0, True  # never indexed — always stale
+        repo_path = src.path if src.path is not None else _managed_repo_path(src.name)
+        if not repo_path.exists():
+            return 0, True  # clone vanished
+        _git_fetch(repo_path)
+        ref = src.ref or _default_branch(repo_path)
+        current = _git_resolve_ref(repo_path, ref)
+    except Exception:
+        return 0, True  # graceful degradation: any failure means stale (will warn)
+    return 0, (row[0] != current)
+
+
+def _default_branch(path: Path) -> str:
+    """Return the remote's default branch name (origin's HEAD branch), 'main' as fallback."""
+    cp = _git(["remote", "show", "origin"], cwd=path, timeout=_git_timeout())
+    for line in cp.stdout.splitlines():
+        if "HEAD branch:" in line:
+            return line.split("HEAD branch:")[1].strip()
+    return "main"  # sensible fallback
 
 
 def iter_source_files(src: Source) -> list[Path]:
