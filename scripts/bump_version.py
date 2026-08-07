@@ -232,15 +232,21 @@ def main() -> int:
             timeout=SELF_CHECK_TIMEOUT,
         )
     except subprocess.TimeoutExpired as e:
-        if e.output:
+        out = e.output
+        if isinstance(out, bytes):
+            # text=True does not decode TimeoutExpired.output — CPython raises
+            # with the raw pipe bytes, before the text decode that runs on the
+            # success path. Decode with the same errors="replace" the run uses.
+            out = out.decode(errors="replace")
+        if out:
             # Same newline handling as the gate's echo: the check's partial
             # output can hold the clue that it was replaced.
-            print(e.output, end="" if e.output.endswith("\n") else "\n")
+            print(out, end="" if out.endswith("\n") else "\n")
         sys.exit(
             f"ERROR: self-check timed out ({SELF_CHECK_TIMEOUT}s); the check script "
-            "may be stuck or replaced. Verify with: python3 "
-            "scripts/check_version_consistency.py — if the check script was replaced, "
-            "restore it first with: git checkout scripts/check_version_consistency.py"
+            "may be stuck or replaced. Restore it first with: git checkout "
+            "scripts/check_version_consistency.py — a no-op on an unmodified script — "
+            "then verify with: python3 scripts/check_version_consistency.py"
         )
     except OSError as e:
         sys.exit(

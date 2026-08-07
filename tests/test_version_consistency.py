@@ -761,23 +761,44 @@ def test_bump_interrupt_during_self_check_is_clean_error(tmp_path, monkeypatch):
     assert "agree" not in msg  # the check was interrupted before it could verify
 
 
-def test_bump_self_check_timeout_is_clean_error(tmp_path, monkeypatch):
+def test_bump_self_check_timeout_is_clean_error(tmp_path, monkeypatch, capsys):
     """A check script that hangs (e.g. replaced by a loop) must hit the 60s
-    bound as a clean timeout error, never a silent hang."""
+    bound as a clean timeout error, never a silent hang — and its partial
+    output must be echoed (TimeoutExpired.output is bytes even with
+    text=True; the handler must decode before printing)."""
     make_tree(tmp_path)
 
     def hanging_self_check(args, **kwargs):
         if args[:2] == ["uv", "lock"]:
             return subprocess.CompletedProcess(args, 0, stdout="")
         assert kwargs.get("timeout") == 60, "self-check must be bounded"
-        raise subprocess.TimeoutExpired(args, 60)
+        raise subprocess.TimeoutExpired(args, 60, output=b"PARTIAL-OUTPUT-LINE\n")
 
     with pytest.raises(SystemExit) as exc:
         run_bump(tmp_path, monkeypatch, runner=hanging_self_check)
     msg = str(exc.value.code)
     assert "timed out" in msg
-    assert "Verify with" in msg
-    assert "restore it first" in msg  # a replaced script must be restored, not re-run
+    assert "Restore it first" in msg  # a replaced script must be restored, not re-run
+    assert "verify with" in msg
+    out = capsys.readouterr().out
+    assert "PARTIAL-OUTPUT-LINE\n" in out  # the partial output was echoed
+    assert "PARTIAL-OUTPUT-LINE\n\n" not in out  # no double newline
+
+
+def test_bump_self_check_timeout_partial_output_no_newline(tmp_path, monkeypatch, capsys):
+    """The append-newline half of the timeout echo: partial output without a
+    trailing newline must get one, mirroring the gate echo's two fixtures."""
+    make_tree(tmp_path)
+
+    def hanging_self_check(args, **kwargs):
+        if args[:2] == ["uv", "lock"]:
+            return subprocess.CompletedProcess(args, 0, stdout="")
+        raise subprocess.TimeoutExpired(args, 60, output=b"PARTIAL")
+
+    with pytest.raises(SystemExit):
+        run_bump(tmp_path, monkeypatch, runner=hanging_self_check)
+    out = capsys.readouterr().out
+    assert "PARTIAL\n" in out
 
 
 def test_bump_self_check_exit0_without_ok_line_exits_1(tmp_path, monkeypatch):
