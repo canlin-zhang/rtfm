@@ -127,9 +127,14 @@ def main() -> int:
         try:
             subprocess.run(["uv", "lock"], cwd=ROOT, check=True)
         except subprocess.CalledProcessError as e:
+            why = (
+                f"terminated by signal {-e.returncode}"
+                if e.returncode < 0
+                else f"failed (exit {e.returncode})"
+            )
             sys.exit(
-                f"ERROR: `uv lock` failed (exit {e.returncode}); pyproject.toml and plugin.json "
-                f"are already edited. Fix the resolution error, then restore and retry: "
+                f"ERROR: `uv lock` {why}; pyproject.toml and plugin.json "
+                f"are already edited. Fix the issue, then restore and retry: "
                 f"{RESTORE} && python3 scripts/bump_version.py {new_version}"
             )
         except FileNotFoundError as e:
@@ -153,16 +158,24 @@ def main() -> int:
             )
     except KeyboardInterrupt:
         # A Ctrl-C mid-bump can leave pyproject/plugin.json bumped while uv.lock
-        # still resolves the old version — say how to restore, then re-raise.
+        # still resolves the old version — say how to restore, then exit with the
+        # hint (SystemExit, no traceback).
         sys.exit(
             f"ERROR: interrupted; pyproject.toml and plugin.json may be edited and uv.lock "
             f"stale. Restore and retry: {RESTORE} && python3 scripts/bump_version.py {new_version}"
         )
 
-    if not check_script.exists():
+    try:
+        check_script.stat()
+    except FileNotFoundError:
         sys.exit(
             f"ERROR: {check_script} not found — can't self-check. Restore the edited "
             f"files with: {RESTORE}"
+        )
+    except OSError as e:
+        sys.exit(
+            f"ERROR: {check_script} unreadable ({e}) — can't self-check. Restore the "
+            f"edited files with: {RESTORE}"
         )
     try:
         check = subprocess.run([sys.executable, str(check_script)], cwd=ROOT)

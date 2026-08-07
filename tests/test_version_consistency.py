@@ -216,6 +216,41 @@ def test_check_deps_must_be_lists(tmp_path, monkeypatch):
     assert check.main() == 1
 
 
+def test_check_script_side_deps_guard_is_discriminating(tmp_path, monkeypatch):
+    """Pyproject deps ["a"] (list) and a bare-string block "a": guard-less code
+    compares set("a") == set(["a"]) and reports OK — only the script-side
+    guard refuses. Pairs with test_check_deps_must_be_lists to pin each side
+    of the two-list guard individually."""
+    make_tree(tmp_path, script_deps='# /// script\n# dependencies = "a"\n# ///\n')
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "rtfm"\nversion = "0.5.1"\ndependencies = ["a"]\n'
+    )
+    monkeypatch.setattr(check, "ROOT", tmp_path)
+    assert check.main() == 1
+
+
+def test_check_non_table_project_is_clean_error(tmp_path, monkeypatch):
+    """`project = 5` is valid TOML; without the isinstance guard the descent
+    into it TypeErrors. The guard must exit cleanly."""
+    make_tree(tmp_path)
+    (tmp_path / "pyproject.toml").write_text("project = 5\n")
+    monkeypatch.setattr(check, "ROOT", tmp_path)
+    with pytest.raises(SystemExit, match="missing key"):
+        check.main()
+
+
+def test_check_pyproject_as_directory_is_clean_error(tmp_path, monkeypatch):
+    """A directory where pyproject.toml belongs raises IsADirectoryError (an
+    OSError) from read_text — the catch must exit cleanly. Directory fixtures
+    work as root, so no skipif is needed."""
+    make_tree(tmp_path)
+    (tmp_path / "pyproject.toml").unlink()
+    (tmp_path / "pyproject.toml").mkdir()
+    monkeypatch.setattr(check, "ROOT", tmp_path)
+    with pytest.raises(SystemExit, match="pyproject.toml"):
+        check.main()
+
+
 def test_check_missing_file_is_clean_error_not_traceback(tmp_path, monkeypatch):
     """A missing file is a clean SystemExit with a message, never a FileNotFoundError
     traceback — pytest.raises(SystemExit) would fail the test on the latter."""
@@ -386,7 +421,7 @@ def test_bump_uv_unrunnable_is_clean_error(tmp_path, monkeypatch):
     assert "uv.lock" in msg  # RESTORE covers the regenerated lock too
 
 
-def test_bump_uv_enexec_is_clean_error(tmp_path, monkeypatch):
+def test_bump_uv_enoexec_is_clean_error(tmp_path, monkeypatch):
     """ENOEXEC (corrupt binary) raises plain OSError, not PermissionError —
     same branch, same restore hint."""
     make_tree(tmp_path)
@@ -451,6 +486,33 @@ def test_bump_plugin_json_version_must_be_string(tmp_path, monkeypatch):
         '{\n  "name": "rtfm",\n  "version": 5\n}\n'
     )
     with pytest.raises(SystemExit, match="must be a string"):
+        run_bump(tmp_path, monkeypatch)
+
+
+def test_bump_uv_lock_signal_death_is_clean_error(tmp_path, monkeypatch):
+    """uv killed by a signal reports a negative returncode (e.g. -SIGINT) —
+    that is not a resolution failure, and the message must say so instead of
+    'Fix the resolution error'."""
+    make_tree(tmp_path)
+
+    def signaled(args, **kwargs):
+        raise subprocess.CalledProcessError(-2, args)
+
+    with pytest.raises(SystemExit) as exc:
+        run_bump(tmp_path, monkeypatch, runner=signaled)
+    msg = str(exc.value.code)
+    assert "signal" in msg
+    assert "git checkout" in msg
+
+
+def test_bump_pyproject_as_directory_is_clean_error(tmp_path, monkeypatch):
+    """The bump's read of pyproject.toml hits the same OSError class (a
+    directory where the file belongs); the check script's twin is pinned
+    above, this pins the bump's _read_text branch."""
+    make_tree(tmp_path)
+    (tmp_path / "pyproject.toml").unlink()
+    (tmp_path / "pyproject.toml").mkdir()
+    with pytest.raises(SystemExit, match="pyproject.toml"):
         run_bump(tmp_path, monkeypatch)
 
 
