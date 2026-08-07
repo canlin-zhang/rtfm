@@ -38,7 +38,10 @@ SELF_CHECK_TIMEOUT = 60  # the real check runs in ms; this bounds a replaced loo
 
 def _read_text(path: Path) -> str:
     try:
-        return path.read_text()
+        # The repo files are UTF-8 by contract; reading with an explicit
+        # encoding keeps the failure message honest under ASCII locales
+        # (locale read_text would mislabel a valid UTF-8 file 'not UTF-8').
+        return path.read_text(encoding="utf-8")
     except FileNotFoundError:
         sys.exit(f"ERROR: {path} not found")
     except OSError as e:
@@ -221,7 +224,10 @@ def main() -> int:
         # (errors="replace": a replaced script emitting raw bytes must not
         # traceback the bump with a decode error).
         check = subprocess.run(
-            [sys.executable, str(check_script)],
+            # -u: a replaced script that prints a clue then hangs must not lose
+            # it to block-buffering (stdout to a pipe is 8K-buffered; without
+            # -u, TimeoutExpired.output comes back None and the echo is silent).
+            [sys.executable, "-u", str(check_script)],
             cwd=ROOT,
             stdout=subprocess.PIPE,
             text=True,
@@ -236,7 +242,7 @@ def main() -> int:
         if isinstance(out, bytes):
             # text=True does not decode TimeoutExpired.output — CPython raises
             # with the raw pipe bytes, before the text decode that runs on the
-            # success path. Decode with the same errors="replace" the run uses.
+            # success path. Decode with errors="replace", as the run does.
             out = out.decode(errors="replace")
         if out:
             # Same newline handling as the gate's echo: the check's partial
@@ -245,8 +251,9 @@ def main() -> int:
         sys.exit(
             f"ERROR: self-check timed out ({SELF_CHECK_TIMEOUT}s); the check script "
             "may be stuck or replaced. Restore it first with: git checkout "
-            "scripts/check_version_consistency.py — a no-op on an unmodified script — "
-            "then verify with: python3 scripts/check_version_consistency.py"
+            "scripts/check_version_consistency.py (discards any uncommitted edits "
+            "to that file; a no-op on an unmodified script), then verify with: "
+            "python3 scripts/check_version_consistency.py"
         )
     except OSError as e:
         sys.exit(

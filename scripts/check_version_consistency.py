@@ -39,7 +39,9 @@ def _read(name: str, loader: Callable[[str], dict]) -> dict:
     """Read + parse a config file, or exit with a clean error instead of a traceback."""
     path = ROOT / name
     try:
-        return loader(path.read_text())
+        # The repo files are UTF-8 by contract; an explicit encoding keeps the
+        # failure message honest under ASCII locales.
+        return loader(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         sys.exit(f"ERROR: {name} not found")
     except OSError as e:
@@ -63,7 +65,7 @@ def _key(name: str, container: object, *keys: str):
 
 def _read_pep723_deps(server: Path) -> list[str]:
     try:
-        lines = server.read_text().splitlines()
+        lines = server.read_text(encoding="utf-8").splitlines()
     except FileNotFoundError:
         sys.exit(f"ERROR: {server} not found")
     except OSError as e:

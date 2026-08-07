@@ -397,12 +397,13 @@ def run_bump(tmp_path, monkeypatch, new_version="0.5.2", runner=None):
     return bump.main()
 
 
-def run_bump_in_subprocess(tmp_path, timeout=10):
+def run_bump_in_subprocess(tmp_path, timeout=10, self_check_timeout=None):
     """Run the real bump script in a child process with a fake `uv` on PATH —
     for fixtures where the bump would otherwise hang (a regressed guard against
     a FIFO) or where only a real subprocess exercises the decode path (a
     garbage-emitting check script — a mocked runner returns a CompletedProcess
-    without decoding)."""
+    without decoding). self_check_timeout overrides the bump's 60s bound so a
+    real hanging child times out in test time."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     fake_uv = bin_dir / "uv"
@@ -412,11 +413,20 @@ def run_bump_in_subprocess(tmp_path, timeout=10):
         "import importlib.util, sys; from pathlib import Path; "
         "s = importlib.util.spec_from_file_location('bump', sys.argv[1]); "
         "m = importlib.util.module_from_spec(s); s.loader.exec_module(m); "
-        "m.ROOT = Path(sys.argv[2]); sys.argv = ['bump_version.py', '0.5.2']; m.main()"
+        "m.ROOT = Path(sys.argv[2]); "
+        "m.SELF_CHECK_TIMEOUT = int(sys.argv[3]); "
+        "sys.argv = ['bump_version.py', '0.5.2']; m.main()"
     )
     env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
     return subprocess.run(
-        [sys.executable, "-c", loader, str(ROOT / "scripts/bump_version.py"), str(tmp_path)],
+        [
+            sys.executable,
+            "-c",
+            loader,
+            str(ROOT / "scripts/bump_version.py"),
+            str(tmp_path),
+            str(self_check_timeout if self_check_timeout is not None else 60),
+        ],
         timeout=timeout,
         capture_output=True,
         text=True,
@@ -441,7 +451,8 @@ def test_bump_updates_all_declarations_and_self_checks(tmp_path, monkeypatch):
     # The last subprocess call must be the self-check, run via the same Python.
     self_check = calls[-1][0]
     assert self_check[0] == sys.executable
-    assert self_check[1].endswith("check_version_consistency.py")
+    assert self_check[1] == "-u"  # unbuffered: a replaced script's clue must arrive
+    assert self_check[2].endswith("check_version_consistency.py")
 
     # The fake `uv lock` cannot regenerate uv.lock; simulate what the real
     # command does, then run the REAL check against the bumped tree — the
@@ -700,6 +711,20 @@ def test_bump_check_script_unreadable_is_clean_error(tmp_path, monkeypatch):
         check_script.chmod(0o644)  # let pytest clean up the tmp dir
 
 
+def test_bump_timeout_echoes_unflushed_child_output(tmp_path):
+    """A replaced check script that prints a clue then hangs without flushing
+    (stdout to a pipe is block-buffered) must still have its clue echoed: the
+    child runs with -u. Without it, TimeoutExpired.output comes back None and
+    the echo is silent."""
+    make_tree(tmp_path)
+    (tmp_path / "scripts" / "check_version_consistency.py").write_text(
+        "import time\nprint('CLUE')\ntime.sleep(1000)\n"
+    )
+    proc = run_bump_in_subprocess(tmp_path, self_check_timeout=1)
+    assert "CLUE" in proc.stdout  # the clue survived the pipe, unflushed
+    assert "timed out" in proc.stdout + proc.stderr
+
+
 def test_bump_check_script_as_fifo_is_clean_error(tmp_path):
     """A FIFO at the check-script path must exit cleanly — a type check
     regressed to a plain existence check hangs the child's open() forever,
@@ -779,6 +804,7 @@ def test_bump_self_check_timeout_is_clean_error(tmp_path, monkeypatch, capsys):
     msg = str(exc.value.code)
     assert "timed out" in msg
     assert "Restore it first" in msg  # a replaced script must be restored, not re-run
+    assert "uncommitted edits" in msg  # the destructive side of git checkout is named
     assert "verify with" in msg
     out = capsys.readouterr().out
     assert "PARTIAL-OUTPUT-LINE\n" in out  # the partial output was echoed
