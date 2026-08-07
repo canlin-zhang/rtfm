@@ -821,12 +821,14 @@ def test_check_prints_drift_under_ascii_locale(tmp_path):
     combined = proc.stdout + proc.stderr
     assert "UnicodeEncodeError" not in combined  # this assert rules the crash out
     assert "pyproject.toml: 0.5.1" in proc.stdout  # the drift listing itself printed
-    # The second line's ASCII-safe prefix proves the full listing ran (its
-    # non-ASCII tail renders as '?' on the reconfigured stdout — unpinned).
+    # All three listing lines are pinned by their ASCII-safe prefixes (the
+    # non-ASCII tails render as '??' on the reconfigured stdout — unpinned).
     assert "uv.lock (rtfm entry): 0.5.1" in proc.stdout
+    assert ".claude-plugin/plugin.json: 0.5.1" in proc.stdout
     # The verdict is stderr and the data lines stdout — placement is part of
     # the pin, matching the suite's documented convention.
     assert "differs across files" in proc.stderr
+    assert "run scripts/bump_version.py" in proc.stderr  # the actionable half
     assert proc.returncode == 1
 
 
