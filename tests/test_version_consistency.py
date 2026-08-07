@@ -399,9 +399,10 @@ def run_bump(tmp_path, monkeypatch, new_version="0.5.2", runner=None):
 
 def run_bump_in_subprocess(tmp_path, timeout=10):
     """Run the real bump script in a child process with a fake `uv` on PATH —
-    for fixtures where the bump would otherwise hang (a FIFO) or where only a
-    real subprocess exercises the decode path (a garbage-emitting check
-    script — a mocked runner returns a CompletedProcess without decoding)."""
+    for fixtures where the bump would otherwise hang (a regressed guard against
+    a FIFO) or where only a real subprocess exercises the decode path (a
+    garbage-emitting check script — a mocked runner returns a CompletedProcess
+    without decoding)."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     fake_uv = bin_dir / "uv"
@@ -723,7 +724,9 @@ def test_bump_check_script_garbage_stdout_exits_1(tmp_path):
     combined = proc.stdout + proc.stderr
     assert "UnicodeDecodeError" not in combined
     assert "did not pass" in combined
-    assert "�" in combined  # the gate echoed the decoded garbage (U+FFFD)
+    # The gate echoed the decoded garbage (U+FFFD), on its own line — pins both
+    # the echo and its trailing-newline handling.
+    assert "��\n" in proc.stdout
 
 
 def test_bump_interrupt_during_self_check_is_clean_error(tmp_path, monkeypatch):

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import re
+import stat
 import subprocess
 import sys
 import tomllib
@@ -172,21 +173,24 @@ def main() -> int:
     # Reject non-regular files before the probe: open() on a FIFO blocks until
     # a writer appears — a bare stat() can't flag it (stat() succeeds on FIFOs)
     # and the probe can't (it blocks before returning). Directories land here
-    # too; missing paths are caught by exists() first.
+    # too. Use stat() + S_ISREG rather than exists()/is_file(): pathlib's
+    # softened variants return False instead of raising on unreadable paths in
+    # Python 3.14+, where the 'cannot be accessed' branch would go dead.
     try:
-        missing = not check_script.exists()
-        non_regular = not check_script.is_file()
+        st = check_script.stat()
+    except FileNotFoundError:
+        sys.exit(
+            f"ERROR: {check_script} not found — can't self-check. Restore the edited "
+            f"files with: {RESTORE}"
+        )
     except OSError as e:  # e.g. an unreadable scripts/ parent directory
         sys.exit(
             f"ERROR: {check_script} cannot be accessed ({e}) — can't self-check. "
             f"Restore the edited files with: {RESTORE}"
         )
-    if missing:
-        sys.exit(
-            f"ERROR: {check_script} not found — can't self-check. Restore the edited "
-            f"files with: {RESTORE}"
-        )
-    if non_regular:
+    except KeyboardInterrupt:  # microsecond window; the tree is consistent here
+        sys.exit("ERROR: interrupted; verify with: python3 scripts/check_version_consistency.py")
+    if not stat.S_ISREG(st.st_mode):
         sys.exit(
             f"ERROR: {check_script} is not a regular file — can't self-check. Restore the "
             f"edited files with: {RESTORE}"
@@ -242,6 +246,8 @@ def main() -> int:
         # stdout: the check's actionable details (per-file versions, per-dep
         # diffs) are on stdout and would otherwise stay invisible.
         if check.stdout:
+            # Avoid a double newline after trailing-newline output; keep the
+            # ERROR line on its own line.
             print(check.stdout, end="" if check.stdout.endswith("\n") else "\n")
         sys.exit(
             "ERROR: post-bump consistency check did not pass or could not run "
