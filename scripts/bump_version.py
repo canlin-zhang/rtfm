@@ -162,18 +162,22 @@ def main() -> int:
         if lock_only
         else f"Restore with: {RESTORE}"
     )
-    # The gate is the one self-check site where the check actually ran and
-    # reported: in the lock-only path 'restore the check script' would
-    # misdiagnose genuine drift (deps drift between pyproject and the PEP-723
-    # block is pre-existing — the bump only pre-checks versions — and is the
-    # exact 0.5.1 class). Point at the check's own output instead.
+    # The gate fires for two indistinguishable classes: the check ran and
+    # reported drift (its output is echoed above), or the check script was
+    # replaced and silently exited 0 without the OK verdict (nothing above).
+    # The advice must hedge both — and RESTORE never covers the check script,
+    # so 'restore and retry' alone is a dead end for either class.
     gate_advice = (
         "The bump's writes and `uv lock` completed, but the tree still fails the "
-        "consistency check; fix the drift, then verify with: "
-        "python3 scripts/check_version_consistency.py"
+        "consistency check (output above, if any). Fix the drift shown above, then "
+        "verify with: python3 scripts/check_version_consistency.py. If the check "
+        "script itself was replaced (no output above), restore it first with: "
+        "git checkout scripts/check_version_consistency.py"
         if lock_only
-        else f"Restore with: {RESTORE}, then retry: "
-        f"python3 scripts/bump_version.py {new_version}"
+        else f"Restore the bump's edits with: {RESTORE}. Fix the drift shown above "
+        f"— if the check script itself was replaced (no output above), restore it "
+        f"first with: git checkout scripts/check_version_consistency.py — then "
+        f"retry: python3 scripts/bump_version.py {new_version}"
     )
 
     # `,?` in the plugin.json pattern echoes the original trailing comma, so the
@@ -366,8 +370,8 @@ def main() -> int:
             # ERROR line on its own line.
             print(check.stdout, end="" if check.stdout.endswith("\n") else "\n")
         sys.exit(
-            "ERROR: post-bump consistency check did not pass or could not run "
-            f"(output above, if any). {gate_advice}"
+            "ERROR: post-bump consistency check did not pass. "
+            f"{gate_advice}"
         )
 
     if old_version == new_version:
