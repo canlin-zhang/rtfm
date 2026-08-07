@@ -625,10 +625,11 @@ def test_bump_interrupt_during_uv_lock_prints_restore_hint(tmp_path, monkeypatch
 
 
 def test_bump_interrupt_mid_write_lock_only_hedge(tmp_path, monkeypatch):
-    """A Ctrl-C between the two byte-identical writes in the lock-only path
-    is a real truncation hazard — the handler must keep the hedge, not claim
-    the files were NOT modified (pins the KI condition's writes_completed
-    conjunct)."""
+    """A Ctrl-C during the writes in the lock-only path is a real truncation
+    hazard — the handler cannot distinguish mid-write from between the two
+    byte-identical writes (as simulated here, the interrupt fires after the
+    real first write) — so it must keep the hedge, not claim the files were
+    NOT modified (pins the KI condition's writes_completed conjunct)."""
     make_tree(tmp_path, version="0.5.2", lock_version="0.5.1")
     real_write_text = Path.write_text
 
@@ -957,19 +958,83 @@ def test_bump_uv_lock_timeout_lock_only(tmp_path, monkeypatch):
 
 
 def test_bump_self_check_failure_lock_only_advice(tmp_path, monkeypatch):
-    """The self-check branches fire after the writes, so in the lock-only
-    path the lock regeneration was the bump's whole point — the advice must
-    name the check script and never suggest reverting uv.lock or the
-    unmodified files."""
+    """In the lock-only path the check actually RAN at the gate and reported —
+    the advice must point at the drift, never suggest checking out files the
+    bump never modified."""
     make_tree(tmp_path, version="0.5.2", lock_version="0.5.1")
     fake, _ = make_runner(self_check_ok=1)
+    with pytest.raises(SystemExit) as exc:
+        run_bump(tmp_path, monkeypatch, new_version="0.5.2", runner=fake)
+    msg = str(exc.value.code)
+    assert "fix the drift" in msg
+    assert "git checkout pyproject.toml" not in msg
+    assert "git checkout uv.lock" not in msg
+    assert "restore the check script" not in msg  # the script is not the problem here
+
+
+@pytest.mark.parametrize(
+    "break_check_script",
+    [
+        pytest.param(
+            lambda t: (t / "scripts" / "check_version_consistency.py").unlink(),
+            id="missing",
+        ),
+        pytest.param(
+            lambda t: (t / "scripts" / "check_version_consistency.py").unlink()
+            or (t / "scripts" / "check_version_consistency.py").mkdir(),
+            id="directory",
+        ),
+        pytest.param(
+            lambda t: (t / "scripts" / "check_version_consistency.py").chmod(0o000),
+            id="unreadable-file",
+            marks=pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions"),
+        ),
+        pytest.param(
+            lambda t: (t / "scripts" / "check_version_consistency.py").unlink()
+            or os.mkfifo(t / "scripts" / "check_version_consistency.py"),
+            id="fifo",
+        ),
+        pytest.param(
+            lambda t: (t / "scripts").chmod(0o000),
+            id="unreadable-parent",
+            marks=pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions"),
+        ),
+    ],
+)
+def test_bump_self_check_script_problem_lock_only_advice(
+    tmp_path, monkeypatch, break_check_script
+):
+    """Every post-write self-check branch in the lock-only path (missing,
+    directory, unreadable, FIFO, unreadable parent) must name the check
+    script as the problem and never suggest reverting uv.lock or the
+    unmodified files."""
+    make_tree(tmp_path, version="0.5.2", lock_version="0.5.1")
+    break_check_script(tmp_path)
+    fake, _ = make_runner()
     with pytest.raises(SystemExit) as exc:
         run_bump(tmp_path, monkeypatch, new_version="0.5.2", runner=fake)
     msg = str(exc.value.code)
     assert "restore the check script" in msg
     assert "git checkout scripts/check_version_consistency.py" in msg
     assert "git checkout pyproject.toml" not in msg
-    assert "git checkout uv.lock" not in msg  # reverting the lock undoes the bump's work
+    assert "git checkout uv.lock" not in msg
+
+
+def test_bump_self_check_unrunnable_lock_only_advice(tmp_path, monkeypatch):
+    """The run-OSError self-check branch in the lock-only path follows the
+    same check-script advice."""
+    make_tree(tmp_path, version="0.5.2", lock_version="0.5.1")
+
+    def noexec_self_check(args, **kwargs):
+        if args[:2] == ["uv", "lock"]:
+            return subprocess.CompletedProcess(args, 0, stdout="")
+        raise PermissionError(args[0])
+
+    with pytest.raises(SystemExit) as exc:
+        run_bump(tmp_path, monkeypatch, new_version="0.5.2", runner=noexec_self_check)
+    msg = str(exc.value.code)
+    assert "restore the check script" in msg
+    assert "git checkout pyproject.toml" not in msg
 
 
 def test_bump_interrupt_lock_only_advice(tmp_path, monkeypatch):

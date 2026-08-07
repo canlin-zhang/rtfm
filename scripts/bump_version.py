@@ -140,9 +140,10 @@ def main() -> int:
             sys.exit(f"ERROR: already at version {old_version} — nothing to bump")
 
     # In the lock-only path (old == new) pyproject/plugin.json are rewritten
-    # byte-identically and never actually change — failure messages must not
-    # claim they were edited, and the restore advice covers only uv.lock
-    # (checking out unchanged files would destroy uncommitted edits).
+    # byte-identically and never actually change — the uv-failure branches'
+    # restore advice covers only uv.lock (checking out unchanged files would
+    # destroy uncommitted edits), and the self-check branches name the check
+    # script instead (post_write_advice below).
     lock_only = new_version == old_version
     edited_clause = (
         "uv.lock is stale; pyproject.toml and plugin.json were NOT modified"
@@ -160,6 +161,19 @@ def main() -> int:
         "python3 scripts/check_version_consistency.py"
         if lock_only
         else f"Restore with: {RESTORE}"
+    )
+    # The gate is the one self-check site where the check actually ran and
+    # reported: in the lock-only path 'restore the check script' would
+    # misdiagnose genuine drift (deps drift between pyproject and the PEP-723
+    # block is pre-existing — the bump only pre-checks versions — and is the
+    # exact 0.5.1 class). Point at the check's own output instead.
+    gate_advice = (
+        "The bump's writes and `uv lock` completed, but the tree still fails the "
+        "consistency check; fix the drift, then verify with: "
+        "python3 scripts/check_version_consistency.py"
+        if lock_only
+        else f"Restore with: {RESTORE}, then retry: "
+        f"python3 scripts/bump_version.py {new_version}"
     )
 
     # `,?` in the plugin.json pattern echoes the original trailing comma, so the
@@ -353,7 +367,7 @@ def main() -> int:
             print(check.stdout, end="" if check.stdout.endswith("\n") else "\n")
         sys.exit(
             "ERROR: post-bump consistency check did not pass or could not run "
-            f"(output above, if any); {post_write_advice}"
+            f"(output above, if any). {gate_advice}"
         )
 
     if old_version == new_version:
