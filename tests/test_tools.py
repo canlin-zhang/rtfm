@@ -1,4 +1,7 @@
 # tests/test_tools.py
+import os
+import subprocess
+
 import rtfm_server as rtfm
 
 
@@ -214,6 +217,46 @@ def test_list_sources_reports_counts(home):
     out = rtfm.list_sources()
     assert any(s["name"] == "default" for s in out["sources"])
     assert all("unique_contents" in s for s in out["sources"])
+
+
+def test_list_sources_reports_git_status(home, tmp_path):
+    """list_sources reports git status for git_repo sources."""
+    # The machine's git may default new repos to master; pin the initial branch to
+    # main so the seed clone and the push below are deterministic (same mechanism
+    # test_git_ops.py uses for every git subprocess it spawns).
+    os.environ["GIT_CONFIG_COUNT"] = "1"
+    os.environ["GIT_CONFIG_KEY_0"] = "init.defaultBranch"
+    os.environ["GIT_CONFIG_VALUE_0"] = "main"
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
+    (seed / "a.md").write_text("hello\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "init"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), "main", dest, timeout=30)
+
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+                      url=str(remote), ref="main")
+    rtfm.reindex_source(conn, src)
+
+    rtfm.load_manifest()
+    mp = rtfm.manifest_path()
+    mp.write_text(
+        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\n'
+    )
+    out = rtfm.list_sources()
+    specs = next(s for s in out["sources"] if s["name"] == "specs")
+    assert specs["type"] == "git_repo"
+    assert specs["url"] == str(remote)
+    assert specs["ref"] == "main"
+    assert "git_status" in specs
+    # Should be "up to date" since we just cloned and reindexed
+    assert specs["git_status"] in ("up to date", "behind", "detached", "dirty")
 
 
 def test_health_check_reports_schema_version(home):

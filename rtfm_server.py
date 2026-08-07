@@ -1197,18 +1197,65 @@ def read(source: str, relpath: str, start: int = 1, end: int | None = None) -> s
 
 @mcp.tool()
 def list_sources() -> dict:
-    """List configured sources with indexed-file and unique-content counts (query-only)."""
+    """List configured sources with indexed-file and unique-content counts (query-only).
+
+    git_repo sources also report their url, the ref being tracked (declared ref or the
+    remote's default branch), and a git_status in git's own terms: "up to date" (indexed
+    commit == origin/ref after fetch), "behind" (origin/ref moved on), "dirty" (uncommitted
+    changes in the working tree), "detached" (tracking a ref that doesn't resolve after
+    fetch), "never indexed", or "unknown" (fetch/ref-resolution trouble). One bad source
+    never breaks the rest: git failures degrade to a status string, never an exception.
+    """
     sources, warnings = load_manifest()
     conn = get_index_db()
     out = []
     for s in sources:
-        files = conn.execute("SELECT COUNT(*) FROM locations WHERE source=?",
-                             (s.name,)).fetchone()[0]
-        uniq = conn.execute("SELECT COUNT(DISTINCT sha256) FROM locations WHERE source=?",
-                            (s.name,)).fetchone()[0]
-        out.append({"name": s.name, "type": s.type,
-                    "path": str(s.path) if s.path else s.url,
-                    "mutable": s.mutable, "indexed_files": files, "unique_contents": uniq})
+        item: dict = {"name": s.name, "type": s.type,
+                      "path": str(s.path) if s.path else str(_managed_repo_path(s.name)),
+                      "mutable": s.mutable,
+                      "indexed_files": conn.execute(
+                          "SELECT COUNT(*) FROM locations WHERE source=?",
+                          (s.name,)).fetchone()[0],
+                      "unique_contents": conn.execute(
+                          "SELECT COUNT(DISTINCT sha256) FROM locations WHERE source=?",
+                          (s.name,)).fetchone()[0]}
+        if s.type == "git_repo":
+            item["url"] = s.url
+            repo_path = s.path if s.path else _managed_repo_path(s.name)
+            # Guarded: a path-less never-cloned repo has no origin to ask, and one bad
+            # source must never break the listing for the others.
+            try:
+                item["ref"] = s.ref or _default_branch(repo_path)
+            except RuntimeError:
+                item["ref"] = s.ref
+
+            meta = conn.execute(
+                "SELECT git_commit FROM source_meta WHERE source=?",
+                (s.name,)).fetchone()
+            if meta is None:
+                item["git_status"] = "never indexed"
+            else:
+                try:
+                    clean, _ = _git_is_clean(repo_path)
+                    if not clean:
+                        item["git_status"] = "dirty"
+                    else:
+                        ref = s.ref or _default_branch(repo_path)
+                        try:
+                            _git_fetch(repo_path)
+                            current = _git_resolve_ref(repo_path, ref)
+                        except RuntimeError:
+                            current = None
+
+                        if current is None:
+                            item["git_status"] = "detached" if s.ref else "unknown"
+                        elif meta[0] == current:
+                            item["git_status"] = "up to date"
+                        else:
+                            item["git_status"] = "behind"
+                except Exception as e:
+                    item["git_status"] = f"error: {e}"
+        out.append(item)
     resp = {"sources": out}
     if warnings:
         resp["WARNING"] = warnings
