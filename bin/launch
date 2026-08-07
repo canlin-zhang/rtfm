@@ -15,7 +15,10 @@ SERVER = ROOT / "rtfm_server.py"
 
 
 def parse_pep723_deps(server: Path) -> list[str]:
-    text = server.read_text()
+    # The repo files are UTF-8 by contract; the server module's docstring and
+    # the PEP-723 comments carry em-dashes, and a locale read under an ASCII
+    # locale would crash the launch.
+    text = server.read_text(encoding="utf-8")
     block = re.search(r"# /// script\n(.*?)# ///", text, re.S)
     if not block:
         return []

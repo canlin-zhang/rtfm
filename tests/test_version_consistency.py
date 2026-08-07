@@ -56,26 +56,31 @@ def make_tree(
     lock_version = version if lock_version is None else lock_version
     (tmp_path / "pyproject.toml").write_text(
         f'[project]\nname = "rtfm"\nversion = "{version}"\ndependencies = [\n'
-        '    "mcp[cli]>=1.28.1,<2",\n    "pymupdf",\n    "pypdf",\n]\n'
+        '    "mcp[cli]>=1.28.1,<2",\n    "pymupdf",\n    "pypdf",\n]\n',
+        encoding="utf-8",
     )
     lock = "".join(
         f'[[package]]\nname = "{name}"\nversion = "{lock_version if name == "rtfm" else "0.1.0"}"\n'
         'source = { virtual = "." }\n'
         for name in lock_names
     )
-    (tmp_path / "uv.lock").write_text(lock)
+    (tmp_path / "uv.lock").write_text(lock, encoding="utf-8")
     (tmp_path / ".claude-plugin").mkdir(parents=True)
     # Deliberately NOT the real-file shape: here "version" is the last key with no
     # trailing comma, so the `,?` pattern's empty branch is the default exercise.
     # test_bump_preserves_comma_when_version_is_mid_object covers the real shape.
+    # Explicit UTF-8 on every write: fixtures may carry em-dashes, and the
+    # suite must be hermetic under an ASCII locale (the environment the
+    # ASCII-locale tests simulate for their children).
     (tmp_path / ".claude-plugin" / "plugin.json").write_text(
-        json.dumps({"name": "rtfm", "version": plugin_version}, indent=2) + "\n"
+        json.dumps({"name": "rtfm", "version": plugin_version}, indent=2) + "\n",
+        encoding="utf-8",
     )
-    (tmp_path / "rtfm_server.py").write_text(script_deps)
+    (tmp_path / "rtfm_server.py").write_text(script_deps, encoding="utf-8")
     # The real repo carries the check script next to the bump script; the
     # bump's self-check guard needs the skeleton to mirror that.
     (tmp_path / "scripts").mkdir()
-    (tmp_path / "scripts" / "check_version_consistency.py").write_text("# stub\n")
+    (tmp_path / "scripts" / "check_version_consistency.py").write_text("# stub\n", encoding="utf-8")
 
 
 # --- check script -------------------------------------------------------------
@@ -412,6 +417,10 @@ def run_bump_in_subprocess(
     fake_uv = bin_dir / "uv"
     fake_uv.write_text("#!/bin/sh\nexit 0\n")
     fake_uv.chmod(0o755)
+    if require_ascii and sys.getfilesystemencoding() != "utf-8":
+        # On an ASCII host the child inherits ASCII anyway and the child-side
+        # assert passes vacuously — the pin would be undetectable. Skip loudly.
+        pytest.skip("require_ascii pins are vacuous on non-UTF-8 hosts")
     loader = (
         "import importlib.util, sys; from pathlib import Path; "
         "assert sys.argv[4] == '0' or sys.getfilesystemencoding() == 'ascii', "
@@ -449,6 +458,8 @@ def run_bump_in_subprocess(
 def run_check_in_subprocess(tmp_path, env_extra=None, timeout=10, require_ascii=False):
     """Run the real check script against a fixture tree in a child process
     (ROOT redirected), optionally under a hostile locale."""
+    if require_ascii and sys.getfilesystemencoding() != "utf-8":
+        pytest.skip("require_ascii pins are vacuous on non-UTF-8 hosts")
     loader = (
         "import importlib.util, sys; from pathlib import Path; "
         "assert sys.argv[3] == '0' or sys.getfilesystemencoding() == 'ascii', "
@@ -762,7 +773,10 @@ def test_bump_timeout_echoes_unflushed_child_output(tmp_path):
     (tmp_path / "scripts" / "check_version_consistency.py").write_text(
         "import time\nprint('CLUE')\ntime.sleep(1000)\n"
     )
-    proc = run_bump_in_subprocess(tmp_path, self_check_timeout=1)
+    # self_check_timeout=0 makes the harness's max(1, ...) clamp load-bearing:
+    # an unclamped 0 raises TimeoutExpired instantly, output is None, and the
+    # CLUE never reaches the echo.
+    proc = run_bump_in_subprocess(tmp_path, self_check_timeout=0)
     assert "CLUE" in proc.stdout  # the clue survived the pipe, unflushed
     assert "timed out" in proc.stdout + proc.stderr
 
@@ -841,7 +855,10 @@ def test_bump_writes_utf8_under_ascii_locale(tmp_path):
     pyproject = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
     assert 'version = "0.5.2"' in pyproject
     assert "em dash" in pyproject
-    plugin = json.loads((tmp_path / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    plugin_text = (tmp_path / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
+    assert '"version": "0.5.2"' in plugin_text
+    assert "em dash" in plugin_text  # the em-dash survived the write, not mangled
+    plugin = json.loads(plugin_text)
     assert plugin["version"] == "0.5.2"
 
 
@@ -853,10 +870,10 @@ def test_bump_check_script_as_fifo_is_clean_error(tmp_path):
     fifo = tmp_path / "scripts" / "check_version_consistency.py"
     fifo.unlink()
     os.mkfifo(fifo)
-    # self_check_timeout=0 exercises the harness's max(1, ...) clamp (an
-    # unclamped 0 would make subprocess.run raise TimeoutExpired instantly).
-    proc = run_bump_in_subprocess(tmp_path, self_check_timeout=0)
-    assert "is not a regular file" in proc.stdout + proc.stderr
+    proc = run_bump_in_subprocess(tmp_path)
+    combined = proc.stdout + proc.stderr
+    assert "is not a regular file" in combined
+    assert proc.returncode == 1  # the loader's sys.exit(m.main()) contract
 
 
 def test_bump_check_script_garbage_stdout_exits_1(tmp_path):
@@ -893,8 +910,10 @@ def test_bump_check_script_trailing_newline_stdout_no_double_newline(tmp_path):
         "import sys\nsys.stdout.buffer.write(b'\\xff\\xfe\\n')\n"
     )
     proc = run_bump_in_subprocess(tmp_path)
-    assert "��\n" in proc.stdout  # echoed once, on its own line
-    assert "��\n\n" not in proc.stdout  # no double newline
+    # Echoed once, on its own line — the U+FFFD renders as '?' under an ASCII
+    # child stdout, so accept either rendering (mirrors the garbage test).
+    assert "��\n" in proc.stdout or "??\n" in proc.stdout
+    assert "��\n\n" not in proc.stdout and "??\n\n" not in proc.stdout  # no double newline
 
 
 def test_bump_interrupt_during_self_check_is_clean_error(tmp_path, monkeypatch):
