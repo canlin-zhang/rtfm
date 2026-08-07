@@ -25,7 +25,7 @@ jobs:
 
   # The contract suite is ASCII-hermetic (explicit UTF-8 reads/writes, the
   # require_ascii pins) — prove it under a POSIX locale, where the launch and
-  # check reads' explicit encoding is load-bearing. The 4 require_ascii tests
+  # check reads' explicit encoding is load-bearing. The require_ascii tests
   # skip here (the env-propagation assert would be vacuous on an ASCII host)
   # and run on the UTF-8 legs.
   test-ascii:
