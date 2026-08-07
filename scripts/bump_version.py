@@ -10,8 +10,8 @@ script is the one path that's allowed to change the version:
 2. regenerate uv.lock so it reflects the new version and dependency pins,
 3. re-run scripts/check_version_consistency.py as a self-check before exiting.
 
-It refuses to run if the existing declarations already disagree — that state is
-drift to be fixed, not a starting point.
+It refuses to run if pyproject.toml and plugin.json already disagree — that
+state is drift to be fixed, not a starting point.
 
 Usage: python3 scripts/bump_version.py 0.5.2
 """
@@ -27,6 +27,21 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+([-+][0-9A-Za-z.-]+)?$")
+
+
+def _edit_version(path: Path, pattern: re.Pattern[str], new_version: str) -> None:
+    """Replace the one matching version line in `path`, anchored to the line so a
+    bare `version = "..."` elsewhere in the file can never be hit. Refuses on any
+    count other than 1."""
+    text = path.read_text()
+    text, n = re.subn(
+        pattern,
+        lambda m: f"{m.group(1)}{new_version}{m.group(2)}",
+        text,
+    )
+    if n != 1:
+        sys.exit(f"ERROR: {path}: expected exactly one matching version line, found {n}")
+    path.write_text(text)
 
 
 def main() -> int:
@@ -45,30 +60,20 @@ def main() -> int:
             "run scripts/check_version_consistency.py and fix the drift first"
         )
 
-    text = pyproject.read_text()
-    matches = re.findall(r'^version = "[^"]+"$', text, re.M)
-    if len(matches) != 1:
-        sys.exit(
-            "ERROR: pyproject.toml: expected one `version = \"...\"` line, "
-            f"found {len(matches)}"
-        )
-    pyproject.write_text(text.replace(matches[0], f'version = "{new_version}"'))
-
-    text = plugin_json.read_text()
-    matches = re.findall(r'^(\s*)"version": "[^"]+",?$', text, re.M)
-    if len(matches) != 1:
-        sys.exit(f"ERROR: plugin.json: expected one \"version\" line, found {len(matches)}")
-    plugin_json.write_text(
-        re.sub(
-            r'^(\s*)"version": "[^"]+",?$',
-            lambda m: f'{m.group(1)}"version": "{new_version}",',
-            text,
-            flags=re.M,
-        )
-    )
+    # `,"?` in the plugin.json pattern echoes the original trailing comma, so the
+    # output stays valid JSON even when "version" is the last key in the object.
+    _edit_version(pyproject, re.compile(r'^(version = ")[^"]+(")$', re.M), new_version)
+    _edit_version(plugin_json, re.compile(r'^(\s*"version": ")[^"]+(",?)$', re.M), new_version)
 
     try:
         subprocess.run(["uv", "lock"], cwd=ROOT, check=True)
+    except subprocess.CalledProcessError as e:
+        sys.exit(
+            f"ERROR: `uv lock` failed (exit {e.returncode}); pyproject.toml and plugin.json "
+            "are already edited. Fix the resolution error, then restore and retry: "
+            "git checkout pyproject.toml .claude-plugin/plugin.json && "
+            f"python3 scripts/bump_version.py {new_version}"
+        )
     except FileNotFoundError:
         sys.exit("ERROR: `uv` not found on PATH — needed to regenerate uv.lock")
 
