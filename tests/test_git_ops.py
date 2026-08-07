@@ -193,3 +193,91 @@ def test_checkout_branch_resets_to_remote(tmp_path):
     rtfm._git_fetch(dest, timeout=30)
     rtfm._git_checkout(dest, "main")
     assert (dest / "a.md").read_text() == "v2\n"
+
+
+# --- reindex_source for git_repo ---
+
+def test_reindex_git_repo_linked_clean_indexes_files(home, tmp_path):
+    """A linked git_repo (path provided) with a clean tree indexes its files."""
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
+    (seed / "guide.md").write_text("the widget protocol defines flits\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "init"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), "main", dest, timeout=30)
+
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+                      url=str(remote), ref="main")
+    summary = rtfm.reindex_source(conn, src)
+    assert summary["files_seen"] >= 1
+    assert summary["newly_extracted"] >= 1
+
+    # Verify source_meta was recorded
+    row = conn.execute(
+        "SELECT git_commit, git_commit_date FROM source_meta WHERE source='specs'"
+    ).fetchone()
+    assert row is not None
+    assert len(row[0]) == 40  # SHA
+    assert "T" in row[1]       # ISO 8601 date
+
+    # Verify content is searchable
+    hits = rtfm.search_index(conn, "widget protocol")
+    assert any("widget protocol" in h["snippet"] for h in hits)
+
+
+def test_reindex_git_repo_dirty_refuses(home, tmp_path):
+    """A dirty git_repo refuses to index and returns a classified error."""
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
+    (seed / "guide.md").write_text("clean content\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "init"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), "main", dest, timeout=30)
+    # Dirty the tree
+    (dest / "guide.md").write_text("locally modified content\n")
+
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+                      url=str(remote), ref="main")
+    summary = rtfm.reindex_source(conn, src)
+    assert "error" in summary
+    assert "dirty" in summary.get("error", "").lower()
+    assert "guide.md" in summary.get("error", "")
+
+
+def test_reindex_git_repo_managed_clones_and_indexes(home, tmp_path):
+    """A managed git_repo (no path) clones, fetches, and indexes."""
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
+    (seed / "ref.md").write_text("alpha bravo charlie content\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "init"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref="main")
+    summary = rtfm.reindex_source(conn, src)
+    assert summary["files_seen"] >= 1
+    assert summary["newly_extracted"] >= 1
+
+    # Verify clone was created at the managed path
+    managed = rtfm._managed_repo_path("specs")
+    assert managed.is_dir()
+    assert (managed / ".git").is_dir()
+
+    # Verify content is searchable
+    hits = rtfm.search_index(conn, "alpha bravo")
+    assert any("alpha bravo" in h["snippet"] for h in hits)
