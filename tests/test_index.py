@@ -3,14 +3,9 @@ import os
 import sqlite3
 import subprocess
 
+import pytest
 import rtfm_server as rtfm
-
-# The git_repo tests seed a bare "remote" and push a `main` branch. Fresh `git init`
-# repos default to `master` on some machines; force init.defaultBranch=main for every
-# git subprocess these tests spawn (same mechanism as test_git_ops.py).
-os.environ.setdefault("GIT_CONFIG_COUNT", "1")
-os.environ.setdefault("GIT_CONFIG_KEY_0", "init.defaultBranch")
-os.environ.setdefault("GIT_CONFIG_VALUE_0", "main")
+from conftest import make_git_repo
 
 
 def test_schema_is_content_addressed(home):
@@ -295,105 +290,65 @@ def test_reindex_indexes_rst_files(home, tmp_path):
 
 # --- _stale_delta for git_repo ---
 
-def test_stale_delta_git_repo_current_is_not_stale(home, tmp_path):
+def test_stale_delta_git_repo_current_is_not_stale(home, tmp_path, git_branch):
     """A git_repo whose indexed commit matches origin/<ref> is not stale."""
-    # Create a bare "remote"
-    remote = tmp_path / "remote.git"
-    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
-    # Seed with commit
-    seed = tmp_path / "seed"
-    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
-    (seed / "a.md").write_text("hello\n")
-    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "commit", "-m", "init"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
-
-    # Clone to managed path
+    remote, seed, branch = make_git_repo(tmp_path, git_branch,
+                                         filename="a.md", content="hello\n")
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), None, dest, timeout=30)
+    rtfm._git_clone(str(remote), branch, dest, timeout=30)
     commit = rtfm._git_current_commit(dest)
     commit_date = rtfm._git_commit_date(dest, "HEAD")
-
-    # Record the current commit in source_meta
     conn = rtfm.get_index_db()
     conn.execute(
         "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?)",
         ("specs", commit, commit_date))
     conn.commit()
-
     src = rtfm.Source(name="specs", type="git_repo", path=dest,
-                       url=str(remote), ref="main")
+                       url=str(remote), ref=branch)
     changed, stale = rtfm._stale_delta(conn, src)
     assert stale is False
     assert changed == 0
 
 
-def test_stale_delta_git_repo_behind_is_stale(home, tmp_path):
+def test_stale_delta_git_repo_behind_is_stale(home, tmp_path, git_branch):
     """A git_repo whose indexed commit is behind origin/<ref> is stale."""
-    remote = tmp_path / "remote.git"
-    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
-    seed = tmp_path / "seed"
-    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
-    (seed / "a.md").write_text("v1\n")
-    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
-
+    remote, seed, branch = make_git_repo(tmp_path, git_branch,
+                                         filename="a.md", content="v1\n")
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), None, dest, timeout=30)
+    rtfm._git_clone(str(remote), branch, dest, timeout=30)
     old_commit = rtfm._git_current_commit(dest)
-
-    # Push a new commit
     (seed / "a.md").write_text("v2\n")
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v2"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
-
-    # Record OLD commit in source_meta
+    subprocess.run(["git", "-C", str(seed), "push", "origin", branch], capture_output=True)
     conn = rtfm.get_index_db()
     conn.execute(
         "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?)",
         ("specs", old_commit, "2025-01-01T00:00:00+00:00"))
     conn.commit()
-
     src = rtfm.Source(name="specs", type="git_repo", path=dest,
-                       url=str(remote), ref="main")
+                       url=str(remote), ref=branch)
     changed, stale = rtfm._stale_delta(conn, src)
     assert stale is True
 
 
-def test_stale_delta_git_repo_no_source_meta_is_stale(home, tmp_path):
+def test_stale_delta_git_repo_no_source_meta_is_stale(home, tmp_path, git_branch):
     """A git_repo with no source_meta row is always stale (never been indexed)."""
-    remote = tmp_path / "remote.git"
-    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
-    seed = tmp_path / "seed"
-    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
-    (seed / "a.md").write_text("hello\n")
-    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "commit", "-m", "init"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
-
+    remote, seed, branch = make_git_repo(tmp_path, git_branch,
+                                         filename="a.md", content="hello\n")
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), None, dest, timeout=30)
-
+    rtfm._git_clone(str(remote), branch, dest, timeout=30)
     conn = rtfm.get_index_db()
     src = rtfm.Source(name="specs", type="git_repo", path=dest,
-                       url=str(remote), ref="main")
+                       url=str(remote), ref=branch)
     changed, stale = rtfm._stale_delta(conn, src)
     assert stale is True
 
 
-def test_default_branch_parses_remote_head(home, tmp_path):
+def test_default_branch_parses_remote_head(home, tmp_path, git_branch):
     """_default_branch reads the remote's HEAD branch, not a hardcoded guess."""
-    remote = tmp_path / "remote.git"
-    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
-    seed = tmp_path / "seed"
-    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
-    (seed / "a.md").write_text("hello\n")
-    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "commit", "-m", "init"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
-
+    remote, seed, branch = make_git_repo(tmp_path, git_branch,
+                                         filename="a.md", content="hello\n")
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), None, dest, timeout=30)
-    assert rtfm._default_branch(dest) is not None
+    rtfm._git_clone(str(remote), branch, dest, timeout=30)
+    assert rtfm._default_branch(dest) == branch

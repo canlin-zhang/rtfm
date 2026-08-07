@@ -1,8 +1,9 @@
 # tests/test_tools.py
-import os
 import subprocess
 
+import pytest
 import rtfm_server as rtfm
+from conftest import make_git_repo
 
 
 def _seed(home, tmp_path, name="docs"):
@@ -219,43 +220,28 @@ def test_list_sources_reports_counts(home):
     assert all("unique_contents" in s for s in out["sources"])
 
 
-def test_list_sources_reports_git_status(home, tmp_path):
+def test_list_sources_reports_git_status(home, tmp_path, git_branch):
     """list_sources reports git status for git_repo sources."""
-    # The machine's git may default new repos to master; pin the initial branch to
-    # main so the seed clone and the push below are deterministic (same mechanism
-    # test_git_ops.py uses for every git subprocess it spawns).
-    os.environ["GIT_CONFIG_COUNT"] = "1"
-    os.environ["GIT_CONFIG_KEY_0"] = "init.defaultBranch"
-    os.environ["GIT_CONFIG_VALUE_0"] = "main"
-    remote = tmp_path / "remote.git"
-    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
-    seed = tmp_path / "seed"
-    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
-    (seed / "a.md").write_text("hello\n")
-    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "commit", "-m", "init"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
-
+    remote, seed, branch = make_git_repo(tmp_path, git_branch,
+                                         filename="a.md", content="hello\n")
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), None, dest, timeout=30)
-
+    rtfm._git_clone(str(remote), branch, dest, timeout=30)
     conn = rtfm.get_index_db()
     src = rtfm.Source(name="specs", type="git_repo", path=dest,
-                      url=str(remote), ref="main")
+                      url=str(remote), ref=branch)
     rtfm.reindex_source(conn, src)
-
     rtfm.load_manifest()
     mp = rtfm.manifest_path()
     mp.write_text(
-        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\n'
+        f'[[source]]\nname="specs"\ntype="git_repo"\n'
+        f'url="{remote}"\nref="{branch}"\npath="{dest}"\n'
     )
     out = rtfm.list_sources()
     specs = next(s for s in out["sources"] if s["name"] == "specs")
     assert specs["type"] == "git_repo"
     assert specs["url"] == str(remote)
-    assert specs["ref"] == "main"
+    assert specs["ref"] == branch
     assert "git_status" in specs
-    # Should be "up to date" since we just cloned and reindexed
     assert specs["git_status"] in ("up to date", "behind", "detached", "dirty")
 
 
@@ -351,27 +337,18 @@ def test_source_filter_restricts_search(home, tmp_path):
 def test_reindex_tool_handles_git_repo(home, tmp_path):
     """The reindex() MCP tool includes git_repo sources."""
     # The machine's git may default new repos to master; pin the initial branch to
-    # main so the seed clone and the push below are deterministic (same mechanism
-    # test_git_ops.py and test_list_sources_reports_git_status use).
-    os.environ["GIT_CONFIG_COUNT"] = "1"
-    os.environ["GIT_CONFIG_KEY_0"] = "init.defaultBranch"
-    os.environ["GIT_CONFIG_VALUE_0"] = "main"
-    remote = tmp_path / "remote.git"
-    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
-    seed = tmp_path / "seed"
-    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
-    (seed / "a.md").write_text("hello world content\n")
-    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "commit", "-m", "init"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "HEAD"], capture_output=True)
-
+def test_reindex_tool_handles_git_repo(home, tmp_path, git_branch):
+    """The reindex() MCP tool includes git_repo sources."""
+    remote, seed, branch = make_git_repo(tmp_path, git_branch,
+                                         filename="a.md",
+                                         content="hello world content\n")
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), None, dest, timeout=30)
-
+    rtfm._git_clone(str(remote), branch, dest, timeout=30)
     rtfm.load_manifest()
     mp = rtfm.manifest_path()
     mp.write_text(
-        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\n'
+        f'[[source]]\nname="specs"\ntype="git_repo"\n'
+        f'url="{remote}"\nref="{branch}"\npath="{dest}"\n'
     )
     out = rtfm.reindex(source="specs")
     assert len(out["reindexed"]) == 1
@@ -385,7 +362,7 @@ def test_health_check_reports_git_repo_sources(home, tmp_path):
     mp = rtfm.manifest_path()
     mp.write_text(
         '[[source]]\nname="specs"\ntype="git_repo"\n'
-        'url="https://example.com/repo.git"\nref="main"\n'
+        'url="https://example.com/repo.git"\nref="feat-x"\n'
     )
     out = rtfm.health_check()
     names = [s["name"] for s in out["sources"]]
