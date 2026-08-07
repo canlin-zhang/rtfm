@@ -33,6 +33,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+([-+][0-9A-Za-z.-]+)?$")
 RESTORE = "git checkout pyproject.toml uv.lock .claude-plugin/plugin.json"
+SELF_CHECK_TIMEOUT = 60  # the real check runs in ms; this bounds a replaced loop
 
 
 def _read_text(path: Path) -> str:
@@ -87,6 +88,10 @@ def _plan_edit(path: Path, text: str, pattern: re.Pattern[str], new_version: str
 
 
 def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        # ASCII stdout (C locale): don't die printing em-dashes or the U+FFFD
+        # replacement chars the gate deliberately echoes.
+        sys.stdout.reconfigure(errors="replace")
     if len(sys.argv) != 2 or not VERSION_RE.match(sys.argv[1]):
         sys.exit("usage: python3 scripts/bump_version.py <new-version> (e.g. 0.5.2)")
 
@@ -224,12 +229,18 @@ def main() -> int:
             # The real check is in-repo and runs in milliseconds; a long bound
             # converts a replaced looping script from a silent hang into the
             # clean timeout error below.
-            timeout=60,
+            timeout=SELF_CHECK_TIMEOUT,
         )
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
+        if e.output:
+            # Same newline handling as the gate's echo: the check's partial
+            # output can hold the clue that it was replaced.
+            print(e.output, end="" if e.output.endswith("\n") else "\n")
         sys.exit(
-            "ERROR: self-check timed out (60s); the check script may be stuck or "
-            "replaced. Verify with: python3 scripts/check_version_consistency.py"
+            f"ERROR: self-check timed out ({SELF_CHECK_TIMEOUT}s); the check script "
+            "may be stuck or replaced. Verify with: python3 "
+            "scripts/check_version_consistency.py — if the check script was replaced, "
+            "restore it first with: git checkout scripts/check_version_consistency.py"
         )
     except OSError as e:
         sys.exit(

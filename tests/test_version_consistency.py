@@ -769,6 +769,7 @@ def test_bump_self_check_timeout_is_clean_error(tmp_path, monkeypatch):
     def hanging_self_check(args, **kwargs):
         if args[:2] == ["uv", "lock"]:
             return subprocess.CompletedProcess(args, 0, stdout="")
+        assert kwargs.get("timeout") == 60, "self-check must be bounded"
         raise subprocess.TimeoutExpired(args, 60)
 
     with pytest.raises(SystemExit) as exc:
@@ -776,6 +777,7 @@ def test_bump_self_check_timeout_is_clean_error(tmp_path, monkeypatch):
     msg = str(exc.value.code)
     assert "timed out" in msg
     assert "Verify with" in msg
+    assert "restore it first" in msg  # a replaced script must be restored, not re-run
 
 
 def test_bump_self_check_exit0_without_ok_line_exits_1(tmp_path, monkeypatch):
