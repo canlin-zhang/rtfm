@@ -813,6 +813,14 @@ def test_check_prints_drift_under_ascii_locale(tmp_path):
         '    "mcp[cli]>=1.28.1,<2",\n    "pymupdf",\n    "pypdf",\n]\n',
         encoding="utf-8",
     )
+    # A third distinct value for plugin.json: with only two distinct prefixes,
+    # a lock<->plugin swap of the shared value rendered identically and passed
+    # every pin; three distinct prefixes make all six permutations
+    # distinguishable.
+    (tmp_path / ".claude-plugin" / "plugin.json").write_text(
+        '{\n  "name": "rtfm",\n  "version": "0.5.3—β"\n}\n',
+        encoding="utf-8",
+    )
     proc = run_check_in_subprocess(
         tmp_path,
         env_extra={"LC_ALL": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0"},
@@ -820,15 +828,16 @@ def test_check_prints_drift_under_ascii_locale(tmp_path):
     )
     combined = proc.stdout + proc.stderr
     assert "UnicodeEncodeError" not in combined  # this assert rules the crash out
-    assert "Traceback" not in combined  # belt-and-braces: any other crash class too
+    # Belt-and-braces: the content pins catch pre-verdict crashes; this one
+    # documents 'no traceback' as an independent contract.
+    assert "Traceback" not in combined
     assert "pyproject.toml: 0.5.1" in proc.stdout  # the drift listing itself printed
-    # All three listing lines are pinned by their ASCII-safe prefixes, with
-    # DISTINCT prefixes per file (0.5.1 vs 0.5.2) so a mis-associated value
-    # (e.g. the loop printing pyproject's version on every line) fails the
-    # pins. The non-ASCII tails render as '??' on the reconfigured stdout —
-    # unpinned.
+    # All three listing lines are pinned by their ASCII-safe prefixes, with a
+    # DISTINCT prefix per file (0.5.1 / 0.5.2 / 0.5.3) so any mis-associated
+    # value or swapped entry fails the pins. The non-ASCII tails render as
+    # '??' on the reconfigured stdout — unpinned.
     assert "uv.lock (rtfm entry): 0.5.2" in proc.stdout
-    assert ".claude-plugin/plugin.json: 0.5.2" in proc.stdout
+    assert ".claude-plugin/plugin.json: 0.5.3" in proc.stdout
     # The verdict is stderr and the data lines stdout — placement is part of
     # the pin, matching the suite's documented convention.
     assert "differs across files" in proc.stderr
@@ -845,11 +854,10 @@ def test_check_pep723_block_without_deps_key_is_clean_error(tmp_path, monkeypatc
         check.main()
 
 
-def test_bump_usage_wrong_arg_count_is_clean_error(tmp_path, monkeypatch):
+def test_bump_usage_wrong_arg_count_is_clean_error(monkeypatch):
     """A wrong argument count exits with the usage message, never a
-    traceback."""
-    make_tree(tmp_path)
-    monkeypatch.setattr(bump, "ROOT", tmp_path)
+    traceback. The argv guard fires before any file access, so no tree is
+    needed."""
     monkeypatch.setattr(sys, "argv", ["bump_version.py"])  # no version argument
     with pytest.raises(SystemExit, match="usage"):
         bump.main()
