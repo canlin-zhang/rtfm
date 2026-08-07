@@ -898,6 +898,65 @@ def test_bump_same_version_with_stale_lock_proceeds(tmp_path, monkeypatch, capsy
     assert "release: bump to 0.5.2" not in out
 
 
+def test_bump_uv_lock_failure_lock_only_advice(tmp_path, monkeypatch):
+    """In the lock-only path a uv failure must say the files were NOT modified
+    and restore only uv.lock — the destructive full-checkout advice is the
+    regression this pins."""
+    make_tree(tmp_path, version="0.5.2", lock_version="0.5.1")
+    fake, _ = make_runner(lock_ok=False)
+    with pytest.raises(SystemExit) as exc:
+        run_bump(tmp_path, monkeypatch, new_version="0.5.2", runner=fake)
+    msg = str(exc.value.code)
+    assert "were NOT modified" in msg
+    assert "git checkout uv.lock" in msg
+    assert "git checkout pyproject.toml" not in msg
+
+
+def test_bump_uv_lock_timeout_lock_only(tmp_path, monkeypatch):
+    """The uv-lock timeout branch in the lock-only path: a clean message with
+    the lock-only clause; the 600s bound is asserted like the self-check's."""
+    make_tree(tmp_path, version="0.5.2", lock_version="0.5.1")
+
+    def timeout_uv(args, **kwargs):
+        assert kwargs.get("timeout") == 600, "uv lock must be bounded"
+        raise subprocess.TimeoutExpired(args, 600)
+
+    with pytest.raises(SystemExit) as exc:
+        run_bump(tmp_path, monkeypatch, new_version="0.5.2", runner=timeout_uv)
+    msg = str(exc.value.code)
+    assert "timed out after 600s" in msg
+    assert "were NOT modified" in msg
+    assert "git checkout pyproject.toml" not in msg
+
+
+def test_bump_self_check_failure_lock_only_advice(tmp_path, monkeypatch):
+    """The self-check branches fire after the writes, so in the lock-only
+    path their restore advice must cover only uv.lock."""
+    make_tree(tmp_path, version="0.5.2", lock_version="0.5.1")
+    fake, _ = make_runner(self_check_ok=1)
+    with pytest.raises(SystemExit) as exc:
+        run_bump(tmp_path, monkeypatch, new_version="0.5.2", runner=fake)
+    msg = str(exc.value.code)
+    assert "git checkout uv.lock" in msg
+    assert "git checkout pyproject.toml" not in msg
+
+
+def test_bump_interrupt_lock_only_advice(tmp_path, monkeypatch):
+    """A Ctrl-C after the writes complete in the lock-only path must not
+    claim the files were edited or advise checking them out."""
+    make_tree(tmp_path, version="0.5.2", lock_version="0.5.1")
+
+    def interrupting_uv(args, **kwargs):
+        raise KeyboardInterrupt()
+
+    with pytest.raises(SystemExit) as exc:
+        run_bump(tmp_path, monkeypatch, new_version="0.5.2", runner=interrupting_uv)
+    msg = str(exc.value.code)
+    assert "were NOT modified" in msg
+    assert "git checkout uv.lock" in msg
+    assert "git checkout pyproject.toml" not in msg
+
+
 # The whitespace variants (not "") are the load-bearing ones: only they
 # discriminate a strip-removal regression. "\\t" is written as the escape so
 # both TOML and JSON parse it to a tab (a raw tab would break the JSON case).
