@@ -862,19 +862,34 @@ def test_bump_usage_wrong_arg_count_is_clean_error(tmp_path, monkeypatch):
     """A wrong argument count exits with the usage message, never a
     traceback. The argv guard fires before any file access, so no tree is
     needed — ROOT points at a nonexistent path, and a guard moved below the
-    reads would fail with a file error instead of 'usage'."""
+    reads would fail with a file error instead of 'usage'. The match is the
+    full usage line: a bare 'usage' would also match the tmp_path directory
+    name inside the file-error message."""
     monkeypatch.setattr(bump, "ROOT", tmp_path / "nonexistent")
     monkeypatch.setattr(sys, "argv", ["bump_version.py"])  # no version argument
-    with pytest.raises(SystemExit, match="usage"):
+    with pytest.raises(SystemExit, match=r"usage: python3 scripts/bump_version\.py"):
         bump.main()
 
 
 def test_bump_same_version_refuses(tmp_path, monkeypatch):
     """Bumping to the current version is a no-op that would print a
-    misleading 'Bumped' with a commit suggestion — refuse instead."""
+    misleading 'Bumped' with a commit suggestion — refuse instead, before any
+    subprocess runs."""
     make_tree(tmp_path)
+    fake, calls = make_runner()
     with pytest.raises(SystemExit, match="already at version"):
-        run_bump(tmp_path, monkeypatch, new_version="0.5.1")
+        run_bump(tmp_path, monkeypatch, new_version="0.5.1", runner=fake)
+    assert calls == []  # refused before any subprocess call
+
+
+def test_bump_same_version_with_stale_lock_proceeds(tmp_path, monkeypatch):
+    """pyproject and plugin.json at the target with a lagging uv.lock (a
+    failed earlier `uv lock`) is NOT a no-op — the bump must proceed so
+    `uv lock` can bring the lock up; the refusal fires only when the lock
+    agrees too."""
+    make_tree(tmp_path, version="0.5.2", lock_version="0.5.1")
+    fake, _ = make_runner()
+    assert run_bump(tmp_path, monkeypatch, new_version="0.5.2", runner=fake) == 0
 
 
 def test_check_empty_versions_are_clean_error(tmp_path, monkeypatch):

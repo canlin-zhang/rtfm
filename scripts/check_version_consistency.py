@@ -16,8 +16,9 @@ resolved versions; a lock that resolves a dependency outside its declared
 constraint (0.5.1: mcp 1.27.2 below the >=1.28.1 pin) is caught by `uv lock
 --check`, which the CI job runs alongside this script.
 
-Exit 0 = consistent, 1 = drift found. The dependency comparison is set-based:
-duplicate entries and ordering within a list are invisible to it.
+Exit 0 = consistent, 1 = drift found. The version comparison is exact-string;
+the dependency comparison is set-based (duplicate entries and ordering within
+a list are invisible to it).
 """
 
 from __future__ import annotations
@@ -118,10 +119,17 @@ def main() -> int:
         "uv.lock (rtfm entry)": lock_version,
         ".claude-plugin/plugin.json": plugin_version,
     }
-    if not all(isinstance(v, str) and v for v in versions.values()):
-        # Non-empty too: all-empty versions would pass the isinstance guard and
-        # set-equality as 'OK', blessing a wiped version field.
-        return _fail("release version must be a non-empty string in every file")
+    bad_versions = [
+        name for name, v in versions.items() if not (isinstance(v, str) and v.strip())
+    ]
+    if bad_versions:
+        # Non-empty (after stripping) too: all-empty or whitespace-only versions
+        # would pass the isinstance guard and set-equality as 'OK', blessing a
+        # wiped version field.
+        return _fail(
+            "release version must be a non-empty string in every file"
+            f" (offending: {', '.join(bad_versions)})"
+        )
     if len(set(versions.values())) > 1:
         for name, v in versions.items():
             print(f"  {name}: {v}")

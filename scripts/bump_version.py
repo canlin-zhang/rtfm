@@ -114,8 +114,19 @@ def main() -> int:
         )
     if new_version == old_version:
         # A no-op bump would print 'Bumped 0.5.1 -> 0.5.1' with a commit
-        # suggestion while changing nothing — refuse instead.
-        sys.exit(f"ERROR: already at version {old_version} — nothing to bump")
+        # suggestion while changing nothing — refuse instead. Only refuse when
+        # uv.lock agrees too: pyproject/plugin.json can sit at the target with
+        # a lagging lock (a failed earlier `uv lock`), and there the bump still
+        # has work to do — proceeding lets `uv lock` bring the lock up.
+        try:
+            lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
+            lock_version = next(
+                (p.get("version") for p in lock["package"] if p.get("name") == "rtfm"), None
+            )
+        except (OSError, tomllib.TOMLDecodeError):
+            lock_version = None
+        if lock_version == new_version:
+            sys.exit(f"ERROR: already at version {old_version} — nothing to bump")
 
     # `,?` in the plugin.json pattern echoes the original trailing comma, so the
     # output stays valid JSON whether "version" is the last key in the object
