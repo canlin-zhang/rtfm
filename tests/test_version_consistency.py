@@ -1014,7 +1014,7 @@ def test_bump_self_check_script_problem_lock_only_advice(
         with pytest.raises(SystemExit) as exc:
             run_bump(tmp_path, monkeypatch, new_version="0.5.2", runner=fake)
         msg = str(exc.value.code)
-        assert "restore it first" in msg
+        assert "restore the check script with:" in msg  # the post-write advice wording
         assert "git checkout scripts/check_version_consistency.py" in msg
         assert "git checkout pyproject.toml" not in msg
         assert "git checkout uv.lock" not in msg
@@ -1038,7 +1038,7 @@ def test_bump_self_check_unrunnable_lock_only_advice(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         run_bump(tmp_path, monkeypatch, new_version="0.5.2", runner=noexec_self_check)
     msg = str(exc.value.code)
-    assert "restore it first" in msg
+    assert "restore the check script with:" in msg  # the post-write advice wording
     assert "git checkout scripts/check_version_consistency.py" in msg
     assert "git checkout pyproject.toml" not in msg
     assert "git checkout uv.lock" not in msg
