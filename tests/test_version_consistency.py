@@ -761,6 +761,23 @@ def test_bump_interrupt_during_self_check_is_clean_error(tmp_path, monkeypatch):
     assert "agree" not in msg  # the check was interrupted before it could verify
 
 
+def test_bump_self_check_timeout_is_clean_error(tmp_path, monkeypatch):
+    """A check script that hangs (e.g. replaced by a loop) must hit the 60s
+    bound as a clean timeout error, never a silent hang."""
+    make_tree(tmp_path)
+
+    def hanging_self_check(args, **kwargs):
+        if args[:2] == ["uv", "lock"]:
+            return subprocess.CompletedProcess(args, 0, stdout="")
+        raise subprocess.TimeoutExpired(args, 60)
+
+    with pytest.raises(SystemExit) as exc:
+        run_bump(tmp_path, monkeypatch, runner=hanging_self_check)
+    msg = str(exc.value.code)
+    assert "timed out" in msg
+    assert "verify" in msg
+
+
 def test_bump_self_check_exit0_without_ok_line_exits_1(tmp_path, monkeypatch):
     """A check script that exits 0 without the OK verdict (e.g. replaced by an
     empty file — a /dev/null symlink is already rejected by the S_ISREG

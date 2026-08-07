@@ -14,7 +14,8 @@ jobs:
         # requires-python is >=3.11 (open upper bound); prove it on each version.
         # 3.14 is load-bearing: pathlib's exists()/is_file() stopped raising on
         # unreadable paths there, which is why bump's guard is stat()-based —
-        # a reversion would be CI-invisible without it.
+        # a reversion of the unreadable-path branch would be CI-invisible
+        # without it (the S_ISREG type-check half is pinned on every version).
         python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4

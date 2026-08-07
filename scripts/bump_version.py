@@ -221,6 +221,15 @@ def main() -> int:
             stdout=subprocess.PIPE,
             text=True,
             errors="replace",
+            # The real check is in-repo and runs in milliseconds; a long bound
+            # converts a replaced looping script from a silent hang into the
+            # clean timeout error below.
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        sys.exit(
+            "ERROR: self-check timed out (60s); the check script may be stuck or "
+            "replaced. Verify with: python3 scripts/check_version_consistency.py"
         )
     except OSError as e:
         sys.exit(
