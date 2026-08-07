@@ -397,13 +397,14 @@ def run_bump(tmp_path, monkeypatch, new_version="0.5.2", runner=None):
     return bump.main()
 
 
-def run_bump_in_subprocess(tmp_path, timeout=10, self_check_timeout=None):
+def run_bump_in_subprocess(tmp_path, timeout=10, self_check_timeout=None, env_extra=None):
     """Run the real bump script in a child process with a fake `uv` on PATH —
     for fixtures where the bump would otherwise hang (a regressed guard against
     a FIFO) or where only a real subprocess exercises the decode path (a
     garbage-emitting check script — a mocked runner returns a CompletedProcess
-    without decoding). self_check_timeout overrides the bump's 60s bound so a
-    real hanging child times out in test time."""
+    without decoding). self_check_timeout overrides the bump's bound (default
+    the module's SELF_CHECK_TIMEOUT) so a real hanging child times out in test
+    time; env_extra layers locale overrides for the ASCII-locale tests."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     fake_uv = bin_dir / "uv"
@@ -418,6 +419,11 @@ def run_bump_in_subprocess(tmp_path, timeout=10, self_check_timeout=None):
         "sys.argv = ['bump_version.py', '0.5.2']; m.main()"
     )
     env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
+    if env_extra:
+        env.update(env_extra)
+    bound = max(
+        1, self_check_timeout if self_check_timeout is not None else bump.SELF_CHECK_TIMEOUT
+    )
     return subprocess.run(
         [
             sys.executable,
@@ -425,7 +431,35 @@ def run_bump_in_subprocess(tmp_path, timeout=10, self_check_timeout=None):
             loader,
             str(ROOT / "scripts/bump_version.py"),
             str(tmp_path),
-            str(self_check_timeout if self_check_timeout is not None else 60),
+            str(bound),
+        ],
+        timeout=timeout,
+        capture_output=True,
+        text=True,
+        errors="replace",
+        env=env,
+    )
+
+
+def run_check_in_subprocess(tmp_path, env_extra=None, timeout=10):
+    """Run the real check script against a fixture tree in a child process
+    (ROOT redirected), optionally under a hostile locale."""
+    loader = (
+        "import importlib.util, sys; from pathlib import Path; "
+        "s = importlib.util.spec_from_file_location('check', sys.argv[1]); "
+        "m = importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+        "m.ROOT = Path(sys.argv[2]); sys.exit(m.main())"
+    )
+    env = dict(os.environ)
+    if env_extra:
+        env.update(env_extra)
+    return subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            loader,
+            str(ROOT / "scripts/check_version_consistency.py"),
+            str(tmp_path),
         ],
         timeout=timeout,
         capture_output=True,
@@ -723,6 +757,57 @@ def test_bump_timeout_echoes_unflushed_child_output(tmp_path):
     proc = run_bump_in_subprocess(tmp_path, self_check_timeout=1)
     assert "CLUE" in proc.stdout  # the clue survived the pipe, unflushed
     assert "timed out" in proc.stdout + proc.stderr
+
+
+def test_bump_timeout_silent_child_prints_no_none(tmp_path):
+    """A check script that hangs without printing: the timeout handler must
+    not print 'None' — exercises the falsy-output guard through the real
+    decode path."""
+    make_tree(tmp_path)
+    (tmp_path / "scripts" / "check_version_consistency.py").write_text(
+        "import time\ntime.sleep(1000)\n"
+    )
+    proc = run_bump_in_subprocess(tmp_path, self_check_timeout=1)
+    combined = proc.stdout + proc.stderr
+    assert "timed out" in combined
+    assert "None" not in combined
+
+
+def test_check_reads_utf8_under_ascii_locale(tmp_path):
+    """The explicit UTF-8 reads must keep working under an ASCII locale: the
+    repo files carry em-dashes, and locale read_text would mislabel a valid
+    UTF-8 file 'not UTF-8'."""
+    make_tree(tmp_path)
+    (tmp_path / ".claude-plugin" / "plugin.json").write_text(
+        '{\n  "name": "rtfm",\n  "description": "test — em dash",\n  "version": "0.5.1"\n}\n'
+    )
+    proc = run_check_in_subprocess(
+        tmp_path, env_extra={"LC_ALL": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0"}
+    )
+    assert proc.returncode == 0
+    assert "OK" in proc.stdout
+
+
+def test_bump_writes_utf8_under_ascii_locale(tmp_path):
+    """The explicit UTF-8 writes must survive an ASCII locale: pyproject and
+    plugin.json carry em-dashes, and a locale-encoding write would truncate
+    the file in open('w') before UnicodeEncodeError — a ValueError outside
+    the OSError handler."""
+    make_tree(tmp_path)
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "rtfm"\nversion = "0.5.1"\ndescription = "test — em dash"\n'
+        'dependencies = [\n    "mcp[cli]>=1.28.1,<2",\n    "pymupdf",\n    "pypdf",\n]\n'
+    )
+    (tmp_path / "scripts" / "check_version_consistency.py").write_text(
+        "print('OK: version and dependency declarations are consistent')\n"
+    )
+    proc = run_bump_in_subprocess(
+        tmp_path,
+        env_extra={"LC_ALL": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0"},
+    )
+    combined = proc.stdout + proc.stderr
+    assert "UnicodeEncodeError" not in combined
+    assert "Bumped" in combined
 
 
 def test_bump_check_script_as_fifo_is_clean_error(tmp_path):

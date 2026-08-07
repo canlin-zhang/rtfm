@@ -124,8 +124,13 @@ def main() -> int:
     )
     try:
         try:
-            pyproject.write_text(new_pyproject)  # both plans succeeded — commit both writes
-            plugin_json.write_text(new_plugin)
+            # Explicit UTF-8 on the writes too: the files carry em-dashes, and
+            # a locale-encoding write under an ASCII locale truncates the file
+            # in open('w') before UnicodeEncodeError — outside this OSError
+            # handler.
+            # both plans succeeded — commit both writes
+            pyproject.write_text(new_pyproject, encoding="utf-8")
+            plugin_json.write_text(new_plugin, encoding="utf-8")
         except OSError as e:
             sys.exit(
                 f"ERROR: write failed: {e}; pyproject.toml and plugin.json may be half-edited. "
@@ -225,8 +230,9 @@ def main() -> int:
         # traceback the bump with a decode error).
         check = subprocess.run(
             # -u: a replaced script that prints a clue then hangs must not lose
-            # it to block-buffering (stdout to a pipe is 8K-buffered; without
-            # -u, TimeoutExpired.output comes back None and the echo is silent).
+            # it to block-buffering (Python's stdout is 8K-buffered on a pipe;
+            # without -u, TimeoutExpired.output comes back None and the echo is
+            # silent).
             [sys.executable, "-u", str(check_script)],
             cwd=ROOT,
             stdout=subprocess.PIPE,
