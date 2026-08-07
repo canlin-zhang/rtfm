@@ -882,17 +882,25 @@ def test_bump_same_version_refuses(tmp_path, monkeypatch):
     assert calls == []  # refused before any subprocess call
 
 
-def test_bump_same_version_with_stale_lock_proceeds(tmp_path, monkeypatch):
+def test_bump_same_version_with_stale_lock_proceeds(tmp_path, monkeypatch, capsys):
     """pyproject and plugin.json at the target with a lagging uv.lock (a
     failed earlier `uv lock`) is NOT a no-op — the bump must proceed so
     `uv lock` can bring the lock up; the refusal fires only when the lock
-    agrees too."""
+    agrees too. The success line uses lock-only framing, not a misleading
+    'Bumped' with release framing."""
     make_tree(tmp_path, version="0.5.2", lock_version="0.5.1")
     fake, calls = make_runner()
     assert run_bump(tmp_path, monkeypatch, new_version="0.5.2", runner=fake) == 0
     assert ["uv", "lock"] in [a for a, _ in calls]  # the lock catch-up ran uv lock
+    out = capsys.readouterr().out
+    assert "uv.lock regenerated at 0.5.2" in out
+    assert "chore: refresh lockfile" in out
+    assert "release: bump to 0.5.2" not in out
 
 
+# The whitespace variants (not "") are the load-bearing ones: only they
+# discriminate a strip-removal regression. "\\t" is written as the escape so
+# both TOML and JSON parse it to a tab (a raw tab would break the JSON case).
 @pytest.mark.parametrize("blank_version", ["", "   ", "\\t"])
 def test_check_blank_versions_are_clean_error(tmp_path, monkeypatch, blank_version):
     """Blank versions (empty or whitespace-only) in all three files would
@@ -924,22 +932,32 @@ def test_check_blank_versions_are_clean_error(tmp_path, monkeypatch, blank_versi
         pytest.param("this is not [ toml", id="unparseable"),
         pytest.param("version = 1\n", id="no-package-key"),
         pytest.param('package = "rtfm"\n', id="bare-string-package"),
+        pytest.param('package = ["rtfm"]\n', id="list-of-strings-package"),
+        pytest.param(
+            '[[package]]\nname = "rtfm"\nversion = "0.5.2"\nsource = { virtual = "." }\n'
+            '[[package]]\nname = "rtfm"\nversion = "0.5.1"\nsource = { virtual = "." }\n',
+            id="duplicate-rtfm-entries",
+        ),
         pytest.param(
             '[[package]]\nname = "other"\nversion = "0.5.1"\n'
             'source = { virtual = "." }\n',
             id="no-rtfm-entry",
         ),
+        pytest.param(b"\xff\xfe\x00", id="non-utf8-bytes"),
     ],
 )
 def test_bump_same_version_with_malformed_lock_proceeds(
     tmp_path, monkeypatch, lock_content
 ):
-    """A lock that cannot confirm the version (missing, unparseable, or
-    wrong-shape) must not traceback the refusal — the bump proceeds so
-    `uv lock` can bring the lock up."""
+    """A lock that cannot confirm the version (missing, unparseable,
+    wrong-shape, duplicated, or non-UTF-8) must not traceback while deciding
+    whether to refuse — the bump proceeds so `uv lock` can bring the lock
+    up."""
     make_tree(tmp_path, version="0.5.2")
     if lock_content is None:
         (tmp_path / "uv.lock").unlink()
+    elif isinstance(lock_content, bytes):
+        (tmp_path / "uv.lock").write_bytes(lock_content)
     else:
         (tmp_path / "uv.lock").write_text(lock_content, encoding="utf-8")
     fake, _ = make_runner()

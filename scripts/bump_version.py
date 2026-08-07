@@ -34,6 +34,8 @@ ROOT = Path(__file__).resolve().parent.parent
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+([-+][0-9A-Za-z.-]+)?$")
 RESTORE = "git checkout pyproject.toml uv.lock .claude-plugin/plugin.json"
 SELF_CHECK_TIMEOUT = 60  # the real check runs in ms; this bounds a replaced loop
+UV_LOCK_TIMEOUT = 600  # generous: a legit resolution can take minutes; a hung
+# one must not stall the bump silently
 
 
 def _read_text(path: Path) -> str:
@@ -137,6 +139,18 @@ def main() -> int:
         if lock_version == new_version:
             sys.exit(f"ERROR: already at version {old_version} — nothing to bump")
 
+    # In the lock-only path (old == new) pyproject/plugin.json are rewritten
+    # byte-identically and never actually change — failure messages must not
+    # claim they were edited, and the restore advice covers only uv.lock
+    # (checking out unchanged files would destroy uncommitted edits).
+    lock_only = new_version == old_version
+    edited_clause = (
+        "uv.lock is stale; pyproject.toml and plugin.json were NOT modified"
+        if lock_only
+        else "pyproject.toml and plugin.json are already edited"
+    )
+    lock_restore = "git checkout uv.lock" if lock_only else RESTORE
+
     # `,?` in the plugin.json pattern echoes the original trailing comma, so the
     # output stays valid JSON whether "version" is the last key in the object
     # or a middle key followed by a comma.
@@ -163,7 +177,13 @@ def main() -> int:
             )
 
         try:
-            subprocess.run(["uv", "lock"], cwd=ROOT, check=True)
+            subprocess.run(["uv", "lock"], cwd=ROOT, check=True, timeout=UV_LOCK_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            sys.exit(
+                f"ERROR: `uv lock` timed out after {UV_LOCK_TIMEOUT}s; {edited_clause}. "
+                f"Fix the issue, then restore and retry: "
+                f"{lock_restore} && python3 scripts/bump_version.py {new_version}"
+            )
         except subprocess.CalledProcessError as e:
             # POSIX subprocess convention: returncode == -signum for signal death.
             why = (
@@ -173,9 +193,8 @@ def main() -> int:
             )
             tail = "Fix the issue" if e.returncode < 0 else "Fix the resolution error"
             sys.exit(
-                f"ERROR: `uv lock` {why}; pyproject.toml and plugin.json "
-                f"are already edited. {tail}, then restore and retry: "
-                f"{RESTORE} && python3 scripts/bump_version.py {new_version}"
+                f"ERROR: `uv lock` {why}; {edited_clause}. {tail}, then restore and "
+                f"retry: {lock_restore} && python3 scripts/bump_version.py {new_version}"
             )
         except FileNotFoundError as e:
             # uv missing from PATH — or a wrapper script whose shebang interpreter
@@ -183,8 +202,8 @@ def main() -> int:
             sys.exit(
                 f"ERROR: could not run `uv lock`: {e}; uv is missing from PATH or its "
                 "wrapper script's interpreter is missing — needed to regenerate uv.lock. "
-                "pyproject.toml and plugin.json are already edited. Fix the issue, then "
-                f"restore and retry: {RESTORE} && python3 scripts/bump_version.py {new_version}"
+                f"{edited_clause}. Fix the issue, then restore and retry: "
+                f"{lock_restore} && python3 scripts/bump_version.py {new_version}"
             )
         except OSError as e:
             # uv present but not runnable: ENOEXEC (corrupt binary, missing shebang)
@@ -192,9 +211,9 @@ def main() -> int:
             # CalledProcessError; a wrapper whose shebang interpreter is gone raises
             # FileNotFoundError (ENOENT) and is handled by the branch above.
             sys.exit(
-                f"ERROR: could not run `uv lock`: {e}; pyproject.toml and plugin.json are "
-                f"already edited. Fix the issue, then restore and retry: "
-                f"{RESTORE} && python3 scripts/bump_version.py {new_version}"
+                f"ERROR: could not run `uv lock`: {e}; {edited_clause}. Fix the issue, "
+                f"then restore and retry: "
+                f"{lock_restore} && python3 scripts/bump_version.py {new_version}"
             )
     except KeyboardInterrupt:
         # A Ctrl-C mid-bump can leave pyproject/plugin.json bumped while uv.lock
