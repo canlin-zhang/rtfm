@@ -169,8 +169,15 @@ def main() -> int:
             f"stale. Restore and retry: {RESTORE} && python3 scripts/bump_version.py {new_version}"
         )
 
-    # Reject non-regular files first: open() on a FIFO or device blocks forever
-    # (stat() and the probe cannot both tell us this). Directories land here too.
+    # Reject non-regular files before the probe: open() on a FIFO blocks until
+    # a writer appears — a bare stat() can't flag it (stat() succeeds on FIFOs)
+    # and the probe can't (it blocks before returning). Directories land here
+    # too; missing paths are caught by exists() first.
+    if not check_script.exists():
+        sys.exit(
+            f"ERROR: {check_script} not found — can't self-check. Restore the edited "
+            f"files with: {RESTORE}"
+        )
     if not check_script.is_file():
         sys.exit(
             f"ERROR: {check_script} is not a regular file — can't self-check. Restore the "
@@ -179,7 +186,7 @@ def main() -> int:
     try:
         with check_script.open("rb") as f:
             f.read(1)  # probe readability — stat() succeeds on chmod-0 files
-    except FileNotFoundError:
+    except FileNotFoundError:  # race-only now: deleted between exists() and open()
         sys.exit(
             f"ERROR: {check_script} not found — can't self-check. Restore the edited "
             f"files with: {RESTORE}"
@@ -189,31 +196,47 @@ def main() -> int:
             f"ERROR: {check_script} unreadable ({e}) — can't self-check. Restore the "
             f"edited files with: {RESTORE}"
         )
+    except KeyboardInterrupt:  # sub-millisecond window; the tree is consistent here
+        sys.exit("ERROR: interrupted; verify with: python3 scripts/check_version_consistency.py")
     try:
         # stderr stays inherited so a failing check's diagnostics are visible
-        # above the gate; stdout is captured to verify the check really ran.
+        # above the gate; stdout is captured to verify the check really ran
+        # (errors="replace": a replaced script emitting raw bytes must not
+        # traceback the bump with a decode error).
         check = subprocess.run(
-            [sys.executable, str(check_script)], cwd=ROOT, stdout=subprocess.PIPE, text=True
+            [sys.executable, str(check_script)],
+            cwd=ROOT,
+            stdout=subprocess.PIPE,
+            text=True,
+            errors="replace",
         )
     except OSError as e:
         sys.exit(
             f"ERROR: could not run the self-check: {e}. Restore the edited files with: {RESTORE}"
         )
     except KeyboardInterrupt:
-        # The bump itself completed; only the verification was cut short.
+        # The bump itself completed; only the verification was cut short. Do not
+        # claim the three files agree — the check was interrupted before it
+        # could say so, and a silently-diverged uv.lock is exactly its job.
         sys.exit(
-            "ERROR: interrupted during the self-check; the bump itself completed and the "
-            "three files agree. Verify with: python3 scripts/check_version_consistency.py"
+            "ERROR: interrupted during the self-check; the bump itself completed "
+            "(uv.lock was regenerated); verify with: "
+            "python3 scripts/check_version_consistency.py"
         )
     if (
         check.returncode != 0
         or "OK: version and dependency declarations are consistent" not in check.stdout
     ):
-        # Requiring the OK verdict, not just exit 0, catches a replaced check
-        # script (empty file, /dev/null symlink) that 'succeeds' without running.
+        # Requiring the OK verdict (the check script's exact success line — keep
+        # the two in sync), not just exit 0, catches a replaced check script
+        # (empty file — a /dev/null symlink is already rejected by the is_file()
+        # guard above) that 'succeeds' without running. Echo the captured
+        # stdout: the check's actionable details (per-file versions, per-dep
+        # diffs) are on stdout and would otherwise stay invisible.
+        print(check.stdout, end="")
         sys.exit(
             "ERROR: post-bump consistency check did not pass or could not run "
-            "(output above, if any); restore the edited files with: "
+            "(output above); restore the edited files with: "
             f"{RESTORE}"
         )
 

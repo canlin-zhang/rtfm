@@ -315,8 +315,9 @@ def test_check_non_utf8_file_is_clean_error(tmp_path, monkeypatch):
 
 
 def test_check_non_utf8_server_is_clean_error(tmp_path, monkeypatch):
-    """Same branch family on the third read path: a non-UTF-8 rtfm_server.py
-    must exit with 'not UTF-8 text', never traceback."""
+    """Same branch family, third reader pinned here: _read_pep723_deps's
+    UnicodeDecodeError catch — a non-UTF-8 rtfm_server.py must exit with
+    'not UTF-8 text', never traceback."""
     make_tree(tmp_path)
     (tmp_path / "rtfm_server.py").write_bytes(b"\xff\xfe\x00")
     monkeypatch.setattr(check, "ROOT", tmp_path)
@@ -343,6 +344,16 @@ def test_check_unparseable_pep723_block_is_clean_error(tmp_path, monkeypatch):
     make_tree(tmp_path, script_deps="# /// script\n# dependencies = [\n# ///\n")
     monkeypatch.setattr(check, "ROOT", tmp_path)
     with pytest.raises(SystemExit, match="unparseable"):
+        check.main()
+
+
+def test_check_reversed_pep723_markers_is_clean_error(tmp_path, monkeypatch):
+    """Markers in reversed order (a '# ///' line before '# /// script') hit the
+    end <= start half of the block guard — without it, the slice is empty and
+    the error is misattributed to a missing 'dependencies' key."""
+    make_tree(tmp_path, script_deps="# ///\n# /// script\n")
+    monkeypatch.setattr(check, "ROOT", tmp_path)
+    with pytest.raises(SystemExit, match="PEP-723 block"):
         check.main()
 
 
@@ -384,6 +395,31 @@ def run_bump(tmp_path, monkeypatch, new_version="0.5.2", runner=None):
     monkeypatch.setattr(bump.subprocess, "run", runner if runner is not None else make_runner()[0])
     monkeypatch.setattr(sys, "argv", ["bump_version.py", new_version])
     return bump.main()
+
+
+def run_bump_in_subprocess(tmp_path, timeout=10):
+    """Run the real bump script in a child process with a fake `uv` on PATH —
+    for fixtures where the bump would otherwise hang (a FIFO) or where its
+    stdio must be observed raw (a garbage-emitting check script)."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_uv = bin_dir / "uv"
+    fake_uv.write_text("#!/bin/sh\nexit 0\n")
+    fake_uv.chmod(0o755)
+    loader = (
+        "import importlib.util, sys; from pathlib import Path; "
+        "s = importlib.util.spec_from_file_location('bump', sys.argv[1]); "
+        "m = importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+        "m.ROOT = Path(sys.argv[2]); sys.argv = ['bump_version.py', '0.5.2']; m.main()"
+    )
+    env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
+    return subprocess.run(
+        [sys.executable, "-c", loader, str(ROOT / "scripts/bump_version.py"), str(tmp_path)],
+        timeout=timeout,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
 
 
 def test_bump_updates_all_declarations_and_self_checks(tmp_path, monkeypatch):
@@ -629,7 +665,7 @@ def test_bump_check_script_as_directory_is_clean_error(tmp_path, monkeypatch):
 def test_bump_check_script_unreadable_is_clean_error(tmp_path, monkeypatch):
     """The canonical probe case: a chmod-0 check script (non-root) must exit
     with 'unreadable', never the generic gate message — the directory variant
-    above pins the same branch root-safely."""
+    above pins the same guard root-safely."""
     make_tree(tmp_path)
     check_script = tmp_path / "scripts" / "check_version_consistency.py"
     check_script.chmod(0o000)
@@ -641,6 +677,32 @@ def test_bump_check_script_unreadable_is_clean_error(tmp_path, monkeypatch):
         assert "git checkout" in msg
     finally:
         check_script.chmod(0o644)  # let pytest clean up the tmp dir
+
+
+def test_bump_check_script_as_fifo_is_clean_error(tmp_path):
+    """A FIFO at the check-script path must exit cleanly — a regressed guard
+    (is_file() → exists()) hangs the child's open() forever, which the timeout
+    fails loudly instead of hanging the suite."""
+    make_tree(tmp_path)
+    fifo = tmp_path / "scripts" / "check_version_consistency.py"
+    fifo.unlink()
+    os.mkfifo(fifo)
+    proc = run_bump_in_subprocess(tmp_path)
+    assert "is not a regular file" in proc.stdout + proc.stderr
+
+
+def test_bump_check_script_garbage_stdout_exits_1(tmp_path):
+    """A replaced check script emitting raw bytes must not traceback the bump
+    with a UnicodeDecodeError — errors='replace' routes it to the gate's clean
+    'did not pass' message."""
+    make_tree(tmp_path)
+    (tmp_path / "scripts" / "check_version_consistency.py").write_text(
+        "import sys\nsys.stdout.buffer.write(b'\\xff\\xfe')\n"
+    )
+    proc = run_bump_in_subprocess(tmp_path)
+    combined = proc.stdout + proc.stderr
+    assert "UnicodeDecodeError" not in combined
+    assert "did not pass" in combined
 
 
 def test_bump_interrupt_during_self_check_is_clean_error(tmp_path, monkeypatch):
@@ -662,8 +724,9 @@ def test_bump_interrupt_during_self_check_is_clean_error(tmp_path, monkeypatch):
 
 def test_bump_self_check_exit0_without_ok_line_exits_1(tmp_path, monkeypatch):
     """A check script that exits 0 without the OK verdict (e.g. replaced by an
-    empty file or a /dev/null symlink) must not count as a pass — the gate
-    requires the OK line, not just exit 0."""
+    empty file — a /dev/null symlink is already rejected by the is_file()
+    guard) must not count as a pass — the gate requires the OK line, not just
+    exit 0."""
     make_tree(tmp_path)
 
     def silent_pass(args, **kwargs):

@@ -135,6 +135,8 @@ def main() -> int:
             print(f"  only in pyproject.toml: {missing}")
         return _fail("dependency declarations differ (mcp pin drift?); mirror the change in both")
 
+    # scripts/bump_version.py's self-check gate matches on this exact line —
+    # keep the two in sync.
     print("OK: version and dependency declarations are consistent")
     return 0
 
