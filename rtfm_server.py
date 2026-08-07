@@ -1076,12 +1076,22 @@ def search_index(conn: sqlite3.Connection, query: str, source: str | None = None
 
 
 def read_document_text(src: Source, relpath: str, start: int = 1, end: int | None = None) -> str:
-    """Read a page range (pdf) or line range (text) from a file in a source."""
-    if src.path is None:
+    """Read a page range (pdf) or line range (text) from a file in a source.
+
+    A path-less git_repo source reads from its managed clone
+    (~/.rtfm/repos/<name>/); a path-less dir source has nothing to read."""
+    if src.path is not None:
+        root = src.path
+    elif src.type == "git_repo":
+        root = _managed_repo_path(src.name)
+        if not root.exists():
+            return (f"!!! ERROR !!! source '{src.name}' has no clone yet — "
+                    f"run reindex('{src.name}') first.")
+    else:
         return f"!!! ERROR !!! source '{src.name}' has no local path."
-    path = (src.path / relpath).resolve()
+    path = (root / relpath).resolve()
     try:
-        path.relative_to(src.path.resolve())
+        path.relative_to(root.resolve())
     except ValueError:
         return f"!!! ERROR !!! '{relpath}' escapes source '{src.name}'."
     if not path.exists():

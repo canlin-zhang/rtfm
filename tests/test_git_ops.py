@@ -351,6 +351,64 @@ def test_reindex_git_repo_managed_clones_and_indexes(home, tmp_path):
     assert any("alpha bravo" in h["snippet"] for h in hits)
 
 
+def test_read_document_text_managed_git_repo_resolves_clone(home, tmp_path):
+    """read_document_text resolves a path-less git_repo source to its managed clone."""
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
+    (seed / "ref.md").write_text("line one\nline two\nline three\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "init"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref="main")
+    rtfm.reindex_source(conn, src)
+
+    text = rtfm.read_document_text(src, "ref.md", start=2, end=3)
+    assert "line two" in text and "line three" in text
+    assert "line one" not in text
+
+
+def test_read_before_reindex_managed_repo_guides_recovery(home, tmp_path):
+    """Reading a never-cloned managed git_repo points the user at reindex."""
+    src = rtfm.Source(name="specs", type="git_repo", url="https://example.com/r.git")
+    text = rtfm.read_document_text(src, "ref.md")
+    assert "no clone yet" in text
+    assert "reindex('specs')" in text
+
+
+def test_search_then_read_managed_git_repo(home, tmp_path):
+    """The search→read flow works for a managed git_repo (path-less) source."""
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
+    (seed / "ref.md").write_text("alpha bravo charlie\nline two\nline three\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "init"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+
+    rtfm.load_manifest()
+    mp = rtfm.manifest_path()
+    mp.write_text(
+        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\n'
+    )
+
+    # search auto-reindexes the managed clone and returns hit locations with relpaths
+    out = rtfm.search(query="alpha bravo")
+    assert out["results"]
+    hit = out["results"][0]
+    assert any(l["source"] == "specs" and l["relpath"] == "ref.md"
+               for l in hit["locations"])
+
+    # read the hit's file through the MCP tool — must resolve the managed clone
+    text = rtfm.read(source="specs", relpath="ref.md", start=1, end=2)
+    assert "alpha bravo charlie" in text
+    assert "line three" not in text
+
+
 # --- search auto-reindex for git_repo ---
 
 def test_search_auto_reindexes_stale_git_repo(home, tmp_path):
