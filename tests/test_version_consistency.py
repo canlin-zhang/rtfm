@@ -804,10 +804,13 @@ def test_bump_timeout_silent_child_prints_no_none(tmp_path):
 
 
 def test_check_prints_drift_under_ascii_locale(tmp_path):
-    """A non-ASCII version value must not crash the check's drift listing
+    """Non-ASCII version values must not crash the check's drift listing
     under an ASCII locale — the check's stdout reconfigure (the bump got the
-    same guard in an earlier round) must keep the report readable."""
-    make_tree(tmp_path, version="0.5.2—β")
+    same guard in an earlier round) must keep the report printing."""
+    # The three fixture values (0.5.1 / 0.5.2 / 0.5.3) must stay mutually
+    # non-prefix: a value like 0.5.10 would make '0.5.1' match its rendering
+    # and silently weaken the pins below.
+    make_tree(tmp_path, lock_version="0.5.2—β")
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nname = "rtfm"\nversion = "0.5.1"\ndependencies = [\n'
         '    "mcp[cli]>=1.28.1,<2",\n    "pymupdf",\n    "pypdf",\n]\n',
@@ -816,7 +819,8 @@ def test_check_prints_drift_under_ascii_locale(tmp_path):
     # A third distinct value for plugin.json: with only two distinct prefixes,
     # a lock<->plugin swap of the shared value rendered identically and passed
     # every pin; three distinct prefixes make all six permutations
-    # distinguishable.
+    # distinguishable. (lock_version= above feeds only uv.lock — pyproject and
+    # plugin.json are overwritten right here.)
     (tmp_path / ".claude-plugin" / "plugin.json").write_text(
         '{\n  "name": "rtfm",\n  "version": "0.5.3—β"\n}\n',
         encoding="utf-8",
@@ -854,13 +858,44 @@ def test_check_pep723_block_without_deps_key_is_clean_error(tmp_path, monkeypatc
         check.main()
 
 
-def test_bump_usage_wrong_arg_count_is_clean_error(monkeypatch):
+def test_bump_usage_wrong_arg_count_is_clean_error(tmp_path, monkeypatch):
     """A wrong argument count exits with the usage message, never a
     traceback. The argv guard fires before any file access, so no tree is
-    needed."""
+    needed — ROOT points at a nonexistent path, and a guard moved below the
+    reads would fail with a file error instead of 'usage'."""
+    monkeypatch.setattr(bump, "ROOT", tmp_path / "nonexistent")
     monkeypatch.setattr(sys, "argv", ["bump_version.py"])  # no version argument
     with pytest.raises(SystemExit, match="usage"):
         bump.main()
+
+
+def test_bump_same_version_refuses(tmp_path, monkeypatch):
+    """Bumping to the current version is a no-op that would print a
+    misleading 'Bumped' with a commit suggestion — refuse instead."""
+    make_tree(tmp_path)
+    with pytest.raises(SystemExit, match="already at version"):
+        run_bump(tmp_path, monkeypatch, new_version="0.5.1")
+
+
+def test_check_empty_versions_are_clean_error(tmp_path, monkeypatch):
+    """Empty-string versions in all three files would pass the isinstance
+    guard and set-equality as 'OK' — the guard must refuse the shape."""
+    make_tree(tmp_path)
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "rtfm"\nversion = ""\ndependencies = [\n'
+        '    "mcp[cli]>=1.28.1,<2",\n    "pymupdf",\n    "pypdf",\n]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "uv.lock").write_text(
+        '[[package]]\nname = "rtfm"\nversion = ""\nsource = { virtual = "." }\n',
+        encoding="utf-8",
+    )
+    (tmp_path / ".claude-plugin" / "plugin.json").write_text(
+        '{\n  "name": "rtfm",\n  "version": ""\n}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check, "ROOT", tmp_path)
+    assert check.main() == 1
 
 
 def test_check_reads_utf8_under_ascii_locale(tmp_path):

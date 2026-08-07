@@ -112,6 +112,10 @@ def main() -> int:
             f"ERROR: pyproject.toml ({old_version}) and plugin.json ({plugin_version}) "
             "disagree — run scripts/check_version_consistency.py and fix the drift first"
         )
+    if new_version == old_version:
+        # A no-op bump would print 'Bumped 0.5.1 -> 0.5.1' with a commit
+        # suggestion while changing nothing — refuse instead.
+        sys.exit(f"ERROR: already at version {old_version} — nothing to bump")
 
     # `,?` in the plugin.json pattern echoes the original trailing comma, so the
     # output stays valid JSON whether "version" is the last key in the object
