@@ -73,7 +73,7 @@ def make_tree(
     )
     (tmp_path / "rtfm_server.py").write_text(script_deps)
     # The real repo carries the check script next to the bump script; the
-    # bump's existence guard needs the skeleton to mirror that.
+    # bump's self-check guard needs the skeleton to mirror that.
     (tmp_path / "scripts").mkdir()
     (tmp_path / "scripts" / "check_version_consistency.py").write_text("# stub\n")
 
@@ -244,7 +244,8 @@ def test_check_pyproject_side_deps_guard_is_discriminating(tmp_path, monkeypatch
 
 def test_check_server_as_directory_is_clean_error(tmp_path, monkeypatch):
     """rtfm_server.py as a directory: _read_pep723_deps's OSError catch must
-    exit cleanly — the third read path in the same branch family."""
+    exit cleanly — the server-side twin of the two pyproject-as-directory
+    tests."""
     make_tree(tmp_path)
     (tmp_path / "rtfm_server.py").unlink()
     (tmp_path / "rtfm_server.py").mkdir()
@@ -313,6 +314,16 @@ def test_check_non_utf8_file_is_clean_error(tmp_path, monkeypatch):
         check.main()
 
 
+def test_check_non_utf8_server_is_clean_error(tmp_path, monkeypatch):
+    """Same branch family on the third read path: a non-UTF-8 rtfm_server.py
+    must exit with 'not UTF-8 text', never traceback."""
+    make_tree(tmp_path)
+    (tmp_path / "rtfm_server.py").write_bytes(b"\xff\xfe\x00")
+    monkeypatch.setattr(check, "ROOT", tmp_path)
+    with pytest.raises(SystemExit, match="not UTF-8"):
+        check.main()
+
+
 def test_check_missing_server_file_is_clean_error(tmp_path, monkeypatch):
     make_tree(tmp_path)
     (tmp_path / "rtfm_server.py").unlink()
@@ -354,8 +365,16 @@ def make_runner(lock_ok=True, self_check_ok=0):
         if args and args[:2] == ["uv", "lock"]:
             if not lock_ok:
                 raise subprocess.CalledProcessError(1, args)
-            return subprocess.CompletedProcess(args, 0)
-        return subprocess.CompletedProcess(args, self_check_ok)  # the self-check script
+            return subprocess.CompletedProcess(args, 0, stdout="")
+        # The self-check script: exit 0 must carry the OK verdict line — the
+        # bump's gate requires it, so the fake models the real check's contract.
+        return subprocess.CompletedProcess(
+            args, self_check_ok, stdout=(
+                "OK: version and dependency declarations are consistent"
+                if self_check_ok == 0
+                else ""
+            )
+        )
 
     return fake, calls
 
@@ -422,6 +441,7 @@ def test_bump_uv_lock_failure_is_clean_error_with_revert_instructions(tmp_path, 
     msg = str(exc.value.code)
     assert "already edited" in msg and "git checkout" in msg
     assert "failed (exit 1)" in msg  # a genuine uv failure keeps its specific wording
+    assert "resolution" in msg  # ...and its specific advice (the positive twin of the signal pin)
 
 
 def test_bump_uv_missing_is_clean_error(tmp_path, monkeypatch):
@@ -580,8 +600,9 @@ def test_bump_self_check_unrunnable_is_clean_error(tmp_path, monkeypatch):
 
 
 def test_bump_check_script_missing_is_clean_error(tmp_path, monkeypatch):
-    """The self-check's existence guard: without the check script next to the
-    bump script, exit with the restore hint instead of a FileNotFoundError."""
+    """The self-check guard's missing-script branch: without the check script
+    next to the bump script, exit with the restore hint instead of a
+    FileNotFoundError."""
     make_tree(tmp_path)
     (tmp_path / "scripts" / "check_version_consistency.py").unlink()
     with pytest.raises(SystemExit) as exc:
@@ -591,9 +612,9 @@ def test_bump_check_script_missing_is_clean_error(tmp_path, monkeypatch):
 
 
 def test_bump_check_script_as_directory_is_clean_error(tmp_path, monkeypatch):
-    """A directory where the check script belongs: the readability probe fails
-    (IsADirectoryError) and the bump exits with the restore hint — it must not
-    blame a consistency failure the check never ran."""
+    """A directory where the check script belongs: the is_file() guard rejects
+    it and the bump exits with the restore hint — it must not blame a
+    consistency failure the check never ran."""
     make_tree(tmp_path)
     (tmp_path / "scripts" / "check_version_consistency.py").unlink()
     (tmp_path / "scripts" / "check_version_consistency.py").mkdir()
@@ -601,6 +622,57 @@ def test_bump_check_script_as_directory_is_clean_error(tmp_path, monkeypatch):
         run_bump(tmp_path, monkeypatch)
     msg = str(exc.value.code)
     assert "self-check" in msg
+    assert "git checkout" in msg
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
+def test_bump_check_script_unreadable_is_clean_error(tmp_path, monkeypatch):
+    """The canonical probe case: a chmod-0 check script (non-root) must exit
+    with 'unreadable', never the generic gate message — the directory variant
+    above pins the same branch root-safely."""
+    make_tree(tmp_path)
+    check_script = tmp_path / "scripts" / "check_version_consistency.py"
+    check_script.chmod(0o000)
+    try:
+        with pytest.raises(SystemExit) as exc:
+            run_bump(tmp_path, monkeypatch)
+        msg = str(exc.value.code)
+        assert "unreadable" in msg
+        assert "git checkout" in msg
+    finally:
+        check_script.chmod(0o644)  # let pytest clean up the tmp dir
+
+
+def test_bump_interrupt_during_self_check_is_clean_error(tmp_path, monkeypatch):
+    """Ctrl-C during the self-check (the bump already completed): the tree is
+    consistent, so the message points at verification, not restoration."""
+    make_tree(tmp_path)
+
+    def interrupt_self_check(args, **kwargs):
+        if args[:2] == ["uv", "lock"]:
+            return subprocess.CompletedProcess(args, 0, stdout="")
+        raise KeyboardInterrupt()
+
+    with pytest.raises(SystemExit) as exc:
+        run_bump(tmp_path, monkeypatch, runner=interrupt_self_check)
+    msg = str(exc.value.code)
+    assert "self-check" in msg
+    assert "check_version_consistency.py" in msg
+
+
+def test_bump_self_check_exit0_without_ok_line_exits_1(tmp_path, monkeypatch):
+    """A check script that exits 0 without the OK verdict (e.g. replaced by an
+    empty file or a /dev/null symlink) must not count as a pass — the gate
+    requires the OK line, not just exit 0."""
+    make_tree(tmp_path)
+
+    def silent_pass(args, **kwargs):
+        return subprocess.CompletedProcess(args, 0, stdout="")
+
+    with pytest.raises(SystemExit) as exc:
+        run_bump(tmp_path, monkeypatch, runner=silent_pass)
+    msg = str(exc.value.code)
+    assert "did not pass" in msg
     assert "git checkout" in msg
 
 
