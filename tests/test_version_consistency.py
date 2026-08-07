@@ -397,7 +397,9 @@ def run_bump(tmp_path, monkeypatch, new_version="0.5.2", runner=None):
     return bump.main()
 
 
-def run_bump_in_subprocess(tmp_path, timeout=10, self_check_timeout=None, env_extra=None):
+def run_bump_in_subprocess(
+    tmp_path, timeout=10, self_check_timeout=None, env_extra=None, require_ascii=False
+):
     """Run the real bump script in a child process with a fake `uv` on PATH —
     for fixtures where the bump would otherwise hang (a regressed guard against
     a FIFO) or where only a real subprocess exercises the decode path (a
@@ -412,11 +414,13 @@ def run_bump_in_subprocess(tmp_path, timeout=10, self_check_timeout=None, env_ex
     fake_uv.chmod(0o755)
     loader = (
         "import importlib.util, sys; from pathlib import Path; "
+        "assert sys.argv[4] == '0' or sys.getfilesystemencoding() == 'ascii', "
+        "'env_extra must reach the child'; "
         "s = importlib.util.spec_from_file_location('bump', sys.argv[1]); "
         "m = importlib.util.module_from_spec(s); s.loader.exec_module(m); "
         "m.ROOT = Path(sys.argv[2]); "
         "m.SELF_CHECK_TIMEOUT = int(sys.argv[3]); "
-        "sys.argv = ['bump_version.py', '0.5.2']; m.main()"
+        "sys.argv = ['bump_version.py', '0.5.2']; sys.exit(m.main())"
     )
     env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
     if env_extra:
@@ -432,6 +436,7 @@ def run_bump_in_subprocess(tmp_path, timeout=10, self_check_timeout=None, env_ex
             str(ROOT / "scripts/bump_version.py"),
             str(tmp_path),
             str(bound),
+            "1" if require_ascii else "0",
         ],
         timeout=timeout,
         capture_output=True,
@@ -441,11 +446,13 @@ def run_bump_in_subprocess(tmp_path, timeout=10, self_check_timeout=None, env_ex
     )
 
 
-def run_check_in_subprocess(tmp_path, env_extra=None, timeout=10):
+def run_check_in_subprocess(tmp_path, env_extra=None, timeout=10, require_ascii=False):
     """Run the real check script against a fixture tree in a child process
     (ROOT redirected), optionally under a hostile locale."""
     loader = (
         "import importlib.util, sys; from pathlib import Path; "
+        "assert sys.argv[3] == '0' or sys.getfilesystemencoding() == 'ascii', "
+        "'env_extra must reach the child'; "
         "s = importlib.util.spec_from_file_location('check', sys.argv[1]); "
         "m = importlib.util.module_from_spec(s); s.loader.exec_module(m); "
         "m.ROOT = Path(sys.argv[2]); sys.exit(m.main())"
@@ -460,6 +467,7 @@ def run_check_in_subprocess(tmp_path, env_extra=None, timeout=10):
             loader,
             str(ROOT / "scripts/check_version_consistency.py"),
             str(tmp_path),
+            "1" if require_ascii else "0",
         ],
         timeout=timeout,
         capture_output=True,
@@ -762,7 +770,8 @@ def test_bump_timeout_echoes_unflushed_child_output(tmp_path):
 def test_bump_timeout_silent_child_prints_no_none(tmp_path):
     """A check script that hangs without printing: the timeout handler must
     not print 'None' — exercises the falsy-output guard through the real
-    decode path."""
+    timeout handler (output is None when nothing was read, so the decode
+    branch is skipped)."""
     make_tree(tmp_path)
     (tmp_path / "scripts" / "check_version_consistency.py").write_text(
         "import time\ntime.sleep(1000)\n"
@@ -776,13 +785,27 @@ def test_bump_timeout_silent_child_prints_no_none(tmp_path):
 def test_check_reads_utf8_under_ascii_locale(tmp_path):
     """The explicit UTF-8 reads must keep working under an ASCII locale: the
     repo files carry em-dashes, and locale read_text would mislabel a valid
-    UTF-8 file 'not UTF-8'."""
-    make_tree(tmp_path)
-    (tmp_path / ".claude-plugin" / "plugin.json").write_text(
+    UTF-8 file 'not UTF-8'. The fixture puts an em-dash in plugin.json and in
+    rtfm_server.py's PEP-723 block, covering _read and _read_pep723_deps."""
+    make_tree(
+        tmp_path,
+        script_deps=(
+            "# /// script\n"
+            '# requires-python = ">=3.11"\n'
+            '# description = "test — em dash"\n'
+            "# dependencies = [\n"
+            '#   "mcp[cli]>=1.28.1,<2",\n#   "pymupdf",\n#   "pypdf",\n# ]\n'
+            "# ///\n"
+        ),
+    )
+    plugin_json = (
         '{\n  "name": "rtfm",\n  "description": "test — em dash",\n  "version": "0.5.1"\n}\n'
     )
+    (tmp_path / ".claude-plugin" / "plugin.json").write_text(plugin_json, encoding="utf-8")
     proc = run_check_in_subprocess(
-        tmp_path, env_extra={"LC_ALL": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0"}
+        tmp_path,
+        env_extra={"LC_ALL": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0"},
+        require_ascii=True,
     )
     assert proc.returncode == 0
     assert "OK" in proc.stdout
@@ -796,7 +819,12 @@ def test_bump_writes_utf8_under_ascii_locale(tmp_path):
     make_tree(tmp_path)
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nname = "rtfm"\nversion = "0.5.1"\ndescription = "test — em dash"\n'
-        'dependencies = [\n    "mcp[cli]>=1.28.1,<2",\n    "pymupdf",\n    "pypdf",\n]\n'
+        'dependencies = [\n    "mcp[cli]>=1.28.1,<2",\n    "pymupdf",\n    "pypdf",\n]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / ".claude-plugin" / "plugin.json").write_text(
+        '{\n  "name": "rtfm",\n  "description": "test — em dash",\n  "version": "0.5.1"\n}\n',
+        encoding="utf-8",
     )
     (tmp_path / "scripts" / "check_version_consistency.py").write_text(
         "print('OK: version and dependency declarations are consistent')\n"
@@ -804,10 +832,17 @@ def test_bump_writes_utf8_under_ascii_locale(tmp_path):
     proc = run_bump_in_subprocess(
         tmp_path,
         env_extra={"LC_ALL": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0"},
+        require_ascii=True,
     )
     combined = proc.stdout + proc.stderr
     assert "UnicodeEncodeError" not in combined
     assert "Bumped" in combined
+    # File state, not just output: both writes landed intact under ASCII.
+    pyproject = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'version = "0.5.2"' in pyproject
+    assert "em dash" in pyproject
+    plugin = json.loads((tmp_path / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    assert plugin["version"] == "0.5.2"
 
 
 def test_bump_check_script_as_fifo_is_clean_error(tmp_path):
@@ -818,7 +853,9 @@ def test_bump_check_script_as_fifo_is_clean_error(tmp_path):
     fifo = tmp_path / "scripts" / "check_version_consistency.py"
     fifo.unlink()
     os.mkfifo(fifo)
-    proc = run_bump_in_subprocess(tmp_path)
+    # self_check_timeout=0 exercises the harness's max(1, ...) clamp (an
+    # unclamped 0 would make subprocess.run raise TimeoutExpired instantly).
+    proc = run_bump_in_subprocess(tmp_path, self_check_timeout=0)
     assert "is not a regular file" in proc.stdout + proc.stderr
 
 
@@ -830,13 +867,21 @@ def test_bump_check_script_garbage_stdout_exits_1(tmp_path):
     (tmp_path / "scripts" / "check_version_consistency.py").write_text(
         "import sys\nsys.stdout.buffer.write(b'\\xff\\xfe')\n"
     )
-    proc = run_bump_in_subprocess(tmp_path)
+    # Under an ASCII locale the echoed U+FFFD would crash the bump's stdout
+    # without the sys.stdout.reconfigure(errors="replace") guard — this run
+    # makes that guard load-bearing.
+    proc = run_bump_in_subprocess(
+        tmp_path,
+        env_extra={"LC_ALL": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0"},
+        require_ascii=True,
+    )
     combined = proc.stdout + proc.stderr
     assert "UnicodeDecodeError" not in combined
     assert "did not pass" in combined
-    # The gate echoed the decoded garbage (U+FFFD), on its own line — pins the
-    # echo and the append-newline half of its newline handling.
-    assert "��\n" in proc.stdout
+    # The gate echoed the decoded garbage, on its own line — pins the echo and
+    # the append-newline half of its newline handling. Under the ASCII locale
+    # the U+FFFD renders as '?'; under a UTF-8 locale as the replacement char.
+    assert "��\n" in proc.stdout or "??\n" in proc.stdout
 
 
 def test_bump_check_script_trailing_newline_stdout_no_double_newline(tmp_path):
