@@ -131,15 +131,20 @@ def main() -> int:
             f"are already edited. Fix the resolution error, then restore and retry: "
             f"{RESTORE} && python3 scripts/bump_version.py {new_version}"
         )
-    except FileNotFoundError:
+    except FileNotFoundError as e:
+        # uv missing from PATH — or a wrapper script whose shebang interpreter
+        # is gone (execve then fails with ENOENT, same as an absent binary).
         sys.exit(
-            "ERROR: `uv` not found on PATH — needed to regenerate uv.lock. pyproject.toml "
-            f"and plugin.json are already edited; restore with: {RESTORE}"
+            f"ERROR: could not run `uv lock` ({e}); uv is missing from PATH or its "
+            "wrapper/interpreter is broken — needed to regenerate uv.lock. "
+            "pyproject.toml and plugin.json are already edited; restore with: "
+            f"{RESTORE}"
         )
     except OSError as e:
         # uv present but not runnable: ENOEXEC (corrupt binary, missing shebang)
-        # and EACCES (noexec mount) are both OSErrors, not CalledProcessError.
-        # (FileNotFoundError is only raised when the binary is not on PATH.)
+        # and EACCES (noexec mount) are both OSErrors, not CalledProcessError; a
+        # wrapper whose shebang interpreter is gone raises FileNotFoundError
+        # (ENOENT) and is handled by the branch above.
         sys.exit(
             f"ERROR: could not run `uv lock`: {e}; pyproject.toml and plugin.json are "
             f"already edited. Fix the issue, then restore and retry: "

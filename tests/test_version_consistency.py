@@ -365,14 +365,15 @@ def test_bump_uv_missing_is_clean_error(tmp_path, monkeypatch):
 
     with pytest.raises(SystemExit) as exc:
         run_bump(tmp_path, monkeypatch, runner=no_uv)
-    assert "not found" in str(exc.value.code)
+    assert "missing from PATH" in str(exc.value.code)
     assert "git checkout" in str(exc.value.code)
 
 
 def test_bump_uv_unrunnable_is_clean_error(tmp_path, monkeypatch):
-    """uv present but not executable (corrupt binary, noexec mount) raises
-    PermissionError — an OSError, not a CalledProcessError — and must exit
-    with the restore hint, never traceback."""
+    """uv present but not runnable: EACCES (noexec mount) raises
+    PermissionError; ENOEXEC (corrupt binary) raises plain OSError — both
+    OSErrors, not CalledProcessError — and the bump must exit with the
+    restore hint, never traceback."""
     make_tree(tmp_path)
 
     def noexec_uv(args, **kwargs):
