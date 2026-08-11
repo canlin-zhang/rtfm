@@ -91,6 +91,12 @@ def make_tree(
 # --- check script -------------------------------------------------------------
 
 
+def run_check(tmp_path, monkeypatch):
+    """Run the check script against a fixture tree (mirror of run_bump)."""
+    monkeypatch.setattr(check, "ROOT", tmp_path)
+    return check.main()
+
+
 @pytest.mark.parametrize(
     "mutate",
     [
@@ -108,14 +114,12 @@ def make_tree(
 def test_check_version_drift_in_any_file_exits_1(tmp_path, monkeypatch, mutate):
     make_tree(tmp_path)
     mutate(tmp_path)
-    monkeypatch.setattr(check, "ROOT", tmp_path)
-    assert check.main() == 1
+    assert run_check(tmp_path, monkeypatch) == 1
 
 
 def test_check_consistent_tree_exits_0(tmp_path, monkeypatch):
     make_tree(tmp_path)
-    monkeypatch.setattr(check, "ROOT", tmp_path)
-    assert check.main() == 0
+    assert run_check(tmp_path, monkeypatch) == 0
 
 
 def test_check_dep_specifier_drift_names_both_sides(tmp_path, monkeypatch, capsys):
@@ -123,8 +127,7 @@ def test_check_dep_specifier_drift_names_both_sides(tmp_path, monkeypatch, capsy
     direction of 0.5.1, where the block was the pinned side and pyproject
     lagged): exit 1, and the message shows the exact specifier from each file."""
     make_tree(tmp_path, script_deps=PEP723.replace('"mcp[cli]>=1.28.1,<2"', '"mcp[cli]"'))
-    monkeypatch.setattr(check, "ROOT", tmp_path)
-    assert check.main() == 1
+    assert run_check(tmp_path, monkeypatch) == 1
     out = capsys.readouterr()
     combined = out.out + out.err  # differing specifiers print to stdout, ERROR to stderr
     # Exact-line membership, not substrings: a swapped print loop would emit the
@@ -137,8 +140,7 @@ def test_check_dep_specifier_drift_names_both_sides(tmp_path, monkeypatch, capsy
 
 def test_check_missing_rtfm_lock_entry_exits_1(tmp_path, monkeypatch, capsys):
     make_tree(tmp_path, lock_names=("other",))
-    monkeypatch.setattr(check, "ROOT", tmp_path)
-    assert check.main() == 1
+    assert run_check(tmp_path, monkeypatch) == 1
     assert "no [[package]] entry named 'rtfm'" in capsys.readouterr().err
 
 
@@ -150,8 +152,7 @@ def test_check_duplicate_rtfm_lock_entries_exit_1(tmp_path, monkeypatch, capsys)
         '[[package]]\nname = "rtfm"\nversion = "0.5.1"\nsource = { virtual = "." }\n'
         '[[package]]\nname = "rtfm"\nversion = "9.9.9"\nsource = { virtual = "." }\n'
     )
-    monkeypatch.setattr(check, "ROOT", tmp_path)
-    assert check.main() == 1
+    assert run_check(tmp_path, monkeypatch) == 1
     assert "2 [[package]] entries named 'rtfm'" in capsys.readouterr().err
 
 
@@ -160,9 +161,8 @@ def test_check_lock_missing_package_array_is_clean_error(tmp_path, monkeypatch):
     not KeyError-traceback."""
     make_tree(tmp_path)
     (tmp_path / "uv.lock").write_text("version = 1\n")
-    monkeypatch.setattr(check, "ROOT", tmp_path)
     with pytest.raises(SystemExit, match="missing key 'package'"):
-        check.main()
+        run_check(tmp_path, monkeypatch)
 
 
 def test_check_lock_package_wrong_shape_is_clean_error(tmp_path, monkeypatch):
@@ -171,8 +171,7 @@ def test_check_lock_package_wrong_shape_is_clean_error(tmp_path, monkeypatch):
     well-formed real lock, so only a fixture can pin this."""
     make_tree(tmp_path)
     (tmp_path / "uv.lock").write_text('package = "rtfm"\n')
-    monkeypatch.setattr(check, "ROOT", tmp_path)
-    assert check.main() == 1
+    assert run_check(tmp_path, monkeypatch) == 1
 
 
 def test_check_rtfm_entry_without_version_key_is_clean_error(tmp_path, monkeypatch, capsys):
@@ -180,8 +179,7 @@ def test_check_rtfm_entry_without_version_key_is_clean_error(tmp_path, monkeypat
     than a missing entry — the message must distinguish the two."""
     make_tree(tmp_path)
     (tmp_path / "uv.lock").write_text('[[package]]\nname = "rtfm"\nsource = { virtual = "." }\n')
-    monkeypatch.setattr(check, "ROOT", tmp_path)
-    assert check.main() == 1
+    assert run_check(tmp_path, monkeypatch) == 1
     assert "has no version key" in capsys.readouterr().err
 
 
@@ -201,16 +199,14 @@ def test_check_versions_must_be_strings(tmp_path, monkeypatch):
     (tmp_path / ".claude-plugin" / "plugin.json").write_text(
         '{\n  "name": "rtfm",\n  "version": 5\n}\n'
     )
-    monkeypatch.setattr(check, "ROOT", tmp_path)
-    assert check.main() == 1
+    assert run_check(tmp_path, monkeypatch) == 1
 
 
 def test_check_pyproject_missing_version_key_is_clean_error(tmp_path, monkeypatch):
     make_tree(tmp_path)
     (tmp_path / "pyproject.toml").write_text('[project]\nname = "rtfm"\n')
-    monkeypatch.setattr(check, "ROOT", tmp_path)
     with pytest.raises(SystemExit, match="missing key 'project.version'"):
-        check.main()
+        run_check(tmp_path, monkeypatch)
 
 
 def test_check_deps_must_be_lists(tmp_path, monkeypatch):
@@ -222,8 +218,7 @@ def test_check_deps_must_be_lists(tmp_path, monkeypatch):
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nname = "rtfm"\nversion = "0.5.1"\ndependencies = "mcp[cli]>=1.28.1,<2"\n'
     )
-    monkeypatch.setattr(check, "ROOT", tmp_path)
-    assert check.main() == 1
+    assert run_check(tmp_path, monkeypatch) == 1
 
 
 def test_check_script_side_deps_guard_is_discriminating(tmp_path, monkeypatch):
@@ -235,8 +230,7 @@ def test_check_script_side_deps_guard_is_discriminating(tmp_path, monkeypatch):
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nname = "rtfm"\nversion = "0.5.1"\ndependencies = ["a"]\n'
     )
-    monkeypatch.setattr(check, "ROOT", tmp_path)
-    assert check.main() == 1
+    assert run_check(tmp_path, monkeypatch) == 1
 
 
 def test_check_pyproject_side_deps_guard_is_discriminating(tmp_path, monkeypatch):
@@ -248,8 +242,7 @@ def test_check_pyproject_side_deps_guard_is_discriminating(tmp_path, monkeypatch
     (tmp_path / "pyproject.toml").write_text(
         '[project]\nname = "rtfm"\nversion = "0.5.1"\ndependencies = "a"\n'
     )
-    monkeypatch.setattr(check, "ROOT", tmp_path)
-    assert check.main() == 1
+    assert run_check(tmp_path, monkeypatch) == 1
 
 
 def test_check_server_as_directory_is_clean_error(tmp_path, monkeypatch):
@@ -258,9 +251,8 @@ def test_check_server_as_directory_is_clean_error(tmp_path, monkeypatch):
     make_tree(tmp_path)
     (tmp_path / "rtfm_server.py").unlink()
     (tmp_path / "rtfm_server.py").mkdir()
-    monkeypatch.setattr(check, "ROOT", tmp_path)
     with pytest.raises(SystemExit, match="rtfm_server.py"):
-        check.main()
+        run_check(tmp_path, monkeypatch)
 
 
 def test_check_non_table_project_is_clean_error(tmp_path, monkeypatch):
@@ -268,9 +260,8 @@ def test_check_non_table_project_is_clean_error(tmp_path, monkeypatch):
     into it TypeErrors. The guard must exit cleanly."""
     make_tree(tmp_path)
     (tmp_path / "pyproject.toml").write_text("project = 5\n")
-    monkeypatch.setattr(check, "ROOT", tmp_path)
     with pytest.raises(SystemExit, match="missing key"):
-        check.main()
+        run_check(tmp_path, monkeypatch)
 
 
 @pytest.mark.parametrize(
@@ -294,9 +285,8 @@ def test_check_malformed_config_is_clean_error(tmp_path, monkeypatch, name, writ
     one parametrized test pins them."""
     make_tree(tmp_path)
     write_bad(tmp_path)
-    monkeypatch.setattr(check, "ROOT", tmp_path)
     with pytest.raises(SystemExit, match="unparseable"):
-        check.main()
+        run_check(tmp_path, monkeypatch)
 
 
 def test_check_pyproject_as_directory_is_clean_error(tmp_path, monkeypatch):
@@ -306,9 +296,8 @@ def test_check_pyproject_as_directory_is_clean_error(tmp_path, monkeypatch):
     make_tree(tmp_path)
     (tmp_path / "pyproject.toml").unlink()
     (tmp_path / "pyproject.toml").mkdir()
-    monkeypatch.setattr(check, "ROOT", tmp_path)
     with pytest.raises(SystemExit, match="pyproject.toml"):
-        check.main()
+        run_check(tmp_path, monkeypatch)
 
 
 def test_check_missing_file_is_clean_error_not_traceback(tmp_path, monkeypatch):
@@ -316,9 +305,8 @@ def test_check_missing_file_is_clean_error_not_traceback(tmp_path, monkeypatch):
     traceback — pytest.raises(SystemExit) would fail the test on the latter."""
     make_tree(tmp_path)
     (tmp_path / ".claude-plugin" / "plugin.json").unlink()
-    monkeypatch.setattr(check, "ROOT", tmp_path)
     with pytest.raises(SystemExit, match="plugin.json not found"):
-        check.main()
+        run_check(tmp_path, monkeypatch)
 
 
 def test_check_non_utf8_file_is_clean_error(tmp_path, monkeypatch):
@@ -326,9 +314,8 @@ def test_check_non_utf8_file_is_clean_error(tmp_path, monkeypatch):
     OSError — and must exit cleanly with its own message, never traceback."""
     make_tree(tmp_path)
     (tmp_path / ".claude-plugin" / "plugin.json").write_bytes(b"\xff\xfe\x00")
-    monkeypatch.setattr(check, "ROOT", tmp_path)
     with pytest.raises(SystemExit, match="not UTF-8"):
-        check.main()
+        run_check(tmp_path, monkeypatch)
 
 
 def test_check_non_utf8_server_is_clean_error(tmp_path, monkeypatch):
@@ -337,40 +324,35 @@ def test_check_non_utf8_server_is_clean_error(tmp_path, monkeypatch):
     'not UTF-8 text', never traceback."""
     make_tree(tmp_path)
     (tmp_path / "rtfm_server.py").write_bytes(b"\xff\xfe\x00")
-    monkeypatch.setattr(check, "ROOT", tmp_path)
     with pytest.raises(SystemExit, match="not UTF-8"):
-        check.main()
+        run_check(tmp_path, monkeypatch)
 
 
 def test_check_missing_server_file_is_clean_error(tmp_path, monkeypatch):
     make_tree(tmp_path)
     (tmp_path / "rtfm_server.py").unlink()
-    monkeypatch.setattr(check, "ROOT", tmp_path)
     with pytest.raises(SystemExit, match="rtfm_server.py"):
-        check.main()
+        run_check(tmp_path, monkeypatch)
 
 
 def test_check_server_without_pep723_block_is_clean_error(tmp_path, monkeypatch):
     make_tree(tmp_path, script_deps="# plain module, no script block\n")
-    monkeypatch.setattr(check, "ROOT", tmp_path)
     with pytest.raises(SystemExit, match="PEP-723 block"):
-        check.main()
+        run_check(tmp_path, monkeypatch)
 
 
 def test_check_unparseable_pep723_block_is_clean_error(tmp_path, monkeypatch):
     make_tree(tmp_path, script_deps="# /// script\n# dependencies = [\n# ///\n")
-    monkeypatch.setattr(check, "ROOT", tmp_path)
     with pytest.raises(SystemExit, match="unparseable"):
-        check.main()
+        run_check(tmp_path, monkeypatch)
 
 
 def test_check_pep723_block_without_deps_key_is_clean_error(tmp_path, monkeypatch):
     """A PEP-723 block that parses but lacks 'dependencies' hits _key's
     missing-key exit — clean, never a traceback."""
     make_tree(tmp_path, script_deps='# /// script\n# requires-python = ">=3.11"\n# ///\n')
-    monkeypatch.setattr(check, "ROOT", tmp_path)
     with pytest.raises(SystemExit, match="missing key"):
-        check.main()
+        run_check(tmp_path, monkeypatch)
 
 
 def test_checker_and_launcher_parsers_agree_on_real_server():
@@ -404,8 +386,7 @@ def test_check_blank_versions_are_clean_error(tmp_path, monkeypatch, blank_versi
         f'{{"name": "rtfm", "version": "{blank_version}"}}\n',
         encoding="utf-8",
     )
-    monkeypatch.setattr(check, "ROOT", tmp_path)
-    assert check.main() == 1
+    assert run_check(tmp_path, monkeypatch) == 1
 
 
 def test_check_prints_drift_under_ascii_locale(tmp_path):
@@ -416,16 +397,11 @@ def test_check_prints_drift_under_ascii_locale(tmp_path):
     # non-prefix: a value like 0.5.10 would make '0.5.1' match its rendering
     # and silently weaken the pins below.
     make_tree(tmp_path, lock_version="0.5.2—β")
-    (tmp_path / "pyproject.toml").write_text(
-        '[project]\nname = "rtfm"\nversion = "0.5.1"\ndependencies = [\n'
-        '    "mcp[cli]>=1.28.1,<2",\n    "pymupdf",\n    "pypdf",\n]\n',
-        encoding="utf-8",
-    )
     # A third distinct value for plugin.json: with only two distinct prefixes,
     # a lock<->plugin swap of the shared value rendered identically and passed
     # every pin; three distinct prefixes make all six permutations
-    # distinguishable. (lock_version= above feeds only uv.lock — pyproject and
-    # plugin.json are overwritten right here.)
+    # distinguishable. (lock_version= feeds only uv.lock; pyproject keeps the
+    # skeleton's 0.5.1, plugin.json is overwritten right here.)
     (tmp_path / ".claude-plugin" / "plugin.json").write_text(
         '{\n  "name": "rtfm",\n  "version": "0.5.3—β"\n}\n',
         encoding="utf-8",
@@ -483,22 +459,40 @@ def test_check_reads_utf8_under_ascii_locale(tmp_path):
     assert "OK" in proc.stdout
 
 
-def run_check_in_subprocess(tmp_path, env_extra=None, timeout=10, require_ascii=False):
-    """Run the real check script against a fixture tree in a child process
-    (ROOT redirected), optionally under a hostile locale."""
+def _run_script_in_subprocess(
+    script_path,
+    module_name,
+    tmp_path,
+    path_extra=None,
+    env_extra=None,
+    timeout=10,
+    require_ascii=False,
+):
+    """Run a real guard script against a fixture tree in a child process
+    (ROOT redirected), optionally with a PATH prefix (the bump's fake `uv`)
+    and under a hostile locale. The child asserts its argv flag so locale
+    overrides that fail to reach it are caught, not silently vacuous."""
     if require_ascii and (
         sys.platform != "linux" or sys.getfilesystemencoding() != "utf-8"
     ):
+        # On an ASCII host the child inherits ASCII anyway and the child-side
+        # assert passes vacuously — the pin would be undetectable. On macOS/
+        # Windows the fs encoding stays utf-8 under LC_ALL=C and the child
+        # assert can never pass (it always raises). Either way the pin is
+        # meaningless: skip loudly.
         pytest.skip("require_ascii pins need a Linux UTF-8 host")
     loader = (
         "import importlib.util, sys; from pathlib import Path; "
         "assert sys.argv[3] == '0' or sys.getfilesystemencoding() == 'ascii', "
         "'env_extra must reach the child'; "
-        "s = importlib.util.spec_from_file_location('check', sys.argv[1]); "
+        f"s = importlib.util.spec_from_file_location({module_name!r}, sys.argv[1]); "
         "m = importlib.util.module_from_spec(s); s.loader.exec_module(m); "
-        "m.ROOT = Path(sys.argv[2]); sys.exit(m.main())"
+        "m.ROOT = Path(sys.argv[2]); "
+        f"sys.argv = [{module_name!r}, '0.5.2']; sys.exit(m.main())"
     )
     env = dict(os.environ)
+    if path_extra:
+        env["PATH"] = path_extra + env["PATH"]
     if env_extra:
         env.update(env_extra)
     return subprocess.run(
@@ -506,7 +500,7 @@ def run_check_in_subprocess(tmp_path, env_extra=None, timeout=10, require_ascii=
             sys.executable,
             "-c",
             loader,
-            str(ROOT / "scripts/check_version_consistency.py"),
+            str(script_path),
             str(tmp_path),
             "1" if require_ascii else "0",
         ],
@@ -515,6 +509,40 @@ def run_check_in_subprocess(tmp_path, env_extra=None, timeout=10, require_ascii=
         text=True,
         errors="replace",
         env=env,
+    )
+
+
+def run_check_in_subprocess(tmp_path, env_extra=None, timeout=10, require_ascii=False):
+    """Run the real check script against a fixture tree in a child process."""
+    return _run_script_in_subprocess(
+        ROOT / "scripts/check_version_consistency.py",
+        "check",
+        tmp_path,
+        env_extra=env_extra,
+        timeout=timeout,
+        require_ascii=require_ascii,
+    )
+
+
+def run_bump_in_subprocess(tmp_path, timeout=10, env_extra=None, require_ascii=False):
+    """Run the real bump script in a child process with a fake `uv` on PATH —
+    for fixtures only a real subprocess can exercise: raw-bytes output from
+    the check script (a mocked runner returns a CompletedProcess without
+    decoding), a FIFO at the check-script path, and the ASCII-locale write
+    path."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_uv = bin_dir / "uv"
+    fake_uv.write_text("#!/bin/sh\nexit 0\n")
+    fake_uv.chmod(0o755)
+    return _run_script_in_subprocess(
+        ROOT / "scripts/bump_version.py",
+        "bump_version",
+        tmp_path,
+        path_extra=str(bin_dir) + os.pathsep,
+        env_extra=env_extra,
+        timeout=timeout,
+        require_ascii=require_ascii,
     )
 
 
@@ -550,56 +578,6 @@ def run_bump(tmp_path, monkeypatch, new_version="0.5.2", runner=None):
     return bump.main()
 
 
-def run_bump_in_subprocess(tmp_path, timeout=10, env_extra=None, require_ascii=False):
-    """Run the real bump script in a child process with a fake `uv` on PATH —
-    for fixtures only a real subprocess can exercise: raw-bytes output from
-    the check script (a mocked runner returns a CompletedProcess without
-    decoding), a FIFO at the check-script path, and the ASCII-locale write
-    path. env_extra layers locale overrides; require_ascii pins that the env
-    actually reached the child."""
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    fake_uv = bin_dir / "uv"
-    fake_uv.write_text("#!/bin/sh\nexit 0\n")
-    fake_uv.chmod(0o755)
-    if require_ascii and (
-        sys.platform != "linux" or sys.getfilesystemencoding() != "utf-8"
-    ):
-        # On an ASCII host the child inherits ASCII anyway and the child-side
-        # assert passes vacuously — the pin would be undetectable. On macOS/
-        # Windows the fs encoding stays utf-8 under LC_ALL=C and the child
-        # assert can never pass (it always raises). Either way the pin is
-        # meaningless: skip loudly.
-        pytest.skip("require_ascii pins need a Linux UTF-8 host")
-    loader = (
-        "import importlib.util, sys; from pathlib import Path; "
-        "assert sys.argv[3] == '0' or sys.getfilesystemencoding() == 'ascii', "
-        "'env_extra must reach the child'; "
-        "s = importlib.util.spec_from_file_location('bump', sys.argv[1]); "
-        "m = importlib.util.module_from_spec(s); s.loader.exec_module(m); "
-        "m.ROOT = Path(sys.argv[2]); "
-        "sys.argv = ['bump_version.py', '0.5.2']; sys.exit(m.main())"
-    )
-    env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ["PATH"])
-    if env_extra:
-        env.update(env_extra)
-    return subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            loader,
-            str(ROOT / "scripts/bump_version.py"),
-            str(tmp_path),
-            "1" if require_ascii else "0",
-        ],
-        timeout=timeout,
-        capture_output=True,
-        text=True,
-        errors="replace",
-        env=env,
-    )
-
-
 def test_bump_updates_all_declarations_and_self_checks(tmp_path, monkeypatch):
     make_tree(tmp_path)
     fake, calls = make_runner()
@@ -624,8 +602,7 @@ def test_bump_updates_all_declarations_and_self_checks(tmp_path, monkeypatch):
     (tmp_path / "uv.lock").write_text(
         (tmp_path / "uv.lock").read_text().replace('version = "0.5.1"', 'version = "0.5.2"')
     )
-    monkeypatch.setattr(check, "ROOT", tmp_path)
-    assert check.main() == 0
+    assert run_check(tmp_path, monkeypatch) == 0
 
 
 def test_bump_refuses_on_pre_existing_drift(tmp_path, monkeypatch):
@@ -790,30 +767,24 @@ def test_bump_interrupt_during_uv_lock_prints_restore_hint(tmp_path, monkeypatch
     assert "git checkout" in msg
 
 
-def test_bump_uv_lock_failure_lock_only_advice(tmp_path, monkeypatch):
-    """In the lock-only path a uv failure must say the files were NOT modified
-    and restore only uv.lock — the destructive full-checkout advice is the
-    regression this pins."""
-    make_tree(tmp_path, version="0.5.2", lock_version="0.5.1")
-    fake, _ = make_runner(lock_ok=False)
-    with pytest.raises(SystemExit) as exc:
-        run_bump(tmp_path, monkeypatch, new_version="0.5.2", runner=fake)
-    msg = str(exc.value.code)
-    assert "were NOT modified" in msg
-    assert "git checkout uv.lock" in msg
-    assert "git checkout pyproject.toml" not in msg
-
-
-def test_bump_interrupt_lock_only_advice(tmp_path, monkeypatch):
-    """A Ctrl-C after the writes complete in the lock-only path must not
-    claim the files were edited or advise checking them out."""
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(lambda args: subprocess.CalledProcessError(1, args), id="uv-failure"),
+        pytest.param(lambda args: KeyboardInterrupt(), id="interrupt"),
+    ],
+)
+def test_bump_lock_only_advice_restores_only_lock(tmp_path, monkeypatch, failure):
+    """In the lock-only path a failure (uv failure or Ctrl-C) must say the
+    files were NOT modified and restore only uv.lock — the destructive
+    full-checkout advice is the regression this pins."""
     make_tree(tmp_path, version="0.5.2", lock_version="0.5.1")
 
-    def interrupting_uv(args, **kwargs):
-        raise KeyboardInterrupt()
+    def failing(args, **kwargs):
+        raise failure(args)
 
     with pytest.raises(SystemExit) as exc:
-        run_bump(tmp_path, monkeypatch, new_version="0.5.2", runner=interrupting_uv)
+        run_bump(tmp_path, monkeypatch, new_version="0.5.2", runner=failing)
     msg = str(exc.value.code)
     assert "were NOT modified" in msg
     assert "git checkout uv.lock" in msg
@@ -982,17 +953,24 @@ def test_bump_self_check_timeout_is_clean_error(tmp_path, monkeypatch):
     assert "uncommitted edits" in msg  # the destructive side of git checkout is named
 
 
-def test_bump_check_script_garbage_stdout_exits_1(tmp_path):
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(b"\xff\xfe", id="no-trailing-newline"),
+        pytest.param(b"\xff\xfe\n", id="trailing-newline"),
+    ],
+)
+def test_bump_check_script_garbage_stdout_exits_1(tmp_path, payload):
     """A broken check script emitting raw bytes must not traceback the bump
     with a UnicodeDecodeError — errors='replace' routes it to the gate's
-    clean 'did not pass' message."""
+    clean 'did not pass' message, and the echo adds no double newline. Both
+    payloads run under the ASCII locale so the U+FFFD rendering is
+    deterministic ('??') — that run also makes the stdout reconfigure
+    load-bearing."""
     make_tree(tmp_path)
     (tmp_path / "scripts" / "check_version_consistency.py").write_text(
-        "import sys\nsys.stdout.buffer.write(b'\\xff\\xfe')\n"
+        f"import sys\nsys.stdout.buffer.write({payload!r})\n"
     )
-    # Under an ASCII locale the echoed U+FFFD would crash the bump's stdout
-    # without the sys.stdout.reconfigure(errors="replace") guard — this run
-    # makes that guard load-bearing.
     proc = run_bump_in_subprocess(
         tmp_path,
         env_extra={"LC_ALL": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0"},
@@ -1001,27 +979,8 @@ def test_bump_check_script_garbage_stdout_exits_1(tmp_path):
     combined = proc.stdout + proc.stderr
     assert "UnicodeDecodeError" not in combined
     assert "did not pass" in combined
-    # The gate echoed the decoded garbage, on its own line — pins the echo and
-    # the append-newline half of its newline handling. The pipe decode is
-    # locale-based, but ASCII and UTF-8 decoding of \xff\xfe with
-    # errors="replace" both yield two U+FFFD; the child's ASCII-forced stdout
-    # then renders them as '?' here on every host.
-    assert "??\n" in proc.stdout
-
-
-def test_bump_check_script_trailing_newline_stdout_no_double_newline(tmp_path):
-    """A check script whose stdout ends with a newline (the real check's
-    shape): the echo must not add a second one — pins the end='' half of the
-    newline handling, which the no-trailing-newline fixture cannot reach."""
-    make_tree(tmp_path)
-    (tmp_path / "scripts" / "check_version_consistency.py").write_text(
-        "import sys\nsys.stdout.buffer.write(b'\\xff\\xfe\\n')\n"
-    )
-    proc = run_bump_in_subprocess(tmp_path)
-    # Echoed once, on its own line — the U+FFFD renders as '?' under an ASCII
-    # child stdout, so accept either rendering (mirrors the garbage test).
-    assert "��\n" in proc.stdout or "??\n" in proc.stdout
-    assert "��\n\n" not in proc.stdout and "??\n\n" not in proc.stdout  # no double newline
+    assert "??\n" in proc.stdout  # echoed once, on its own line
+    assert "??\n\n" not in proc.stdout  # no double newline from the echo logic
 
 
 def test_bump_interrupt_during_self_check_is_clean_error(tmp_path, monkeypatch):
@@ -1103,7 +1062,7 @@ def test_bump_missing_version_key_is_clean_error(tmp_path, monkeypatch):
     cleanly, not KeyError-traceback."""
     make_tree(tmp_path)
     (tmp_path / "pyproject.toml").write_text('[project]\nname = "rtfm"\n')
-    with pytest.raises(SystemExit, match="version"):
+    with pytest.raises(SystemExit, match=r"cannot read \[project\]\.version"):
         run_bump(tmp_path, monkeypatch)
 
 

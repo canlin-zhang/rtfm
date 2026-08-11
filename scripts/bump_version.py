@@ -203,8 +203,11 @@ def main() -> int:
                 f"Restore and retry: {restore} && {retry}"
             )
     except KeyboardInterrupt:
+        # Lock-only: the files are never modified (byte-identical writes), so
+        # state_clause is the honest claim. Normal path: an interrupt can land
+        # mid-write, so hedge.
         state = (
-            "uv.lock is stale and pyproject.toml/plugin.json were NOT modified"
+            state_clause
             if lock_only
             else "pyproject.toml and plugin.json may be edited and uv.lock stale"
         )
