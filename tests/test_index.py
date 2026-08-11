@@ -291,8 +291,9 @@ def test_reindex_indexes_rst_files(home, tmp_path):
 # --- _stale_delta for git_repo ---
 
 def test_stale_delta_git_repo_current_is_not_stale(home, tmp_path, git_branch):
-    """A linked git_repo whose indexed commit matches the current HEAD is not stale
-    (a fresh clone has HEAD == origin/<ref>, so this pins the linked HEAD-compare)."""
+    """Exercises the linked not-stale path at a fresh clone (HEAD == origin/<ref>,
+    clean tree); the HEAD-vs-origin distinction is pinned by
+    test_stale_delta_git_repo_linked_head_moved_is_stale."""
     remote, seed, branch = make_git_repo(tmp_path, git_branch,
                                          filename="a.md", content="hello\n")
     dest = tmp_path / "dest"
@@ -306,7 +307,7 @@ def test_stale_delta_git_repo_current_is_not_stale(home, tmp_path, git_branch):
     conn.commit()
     src = rtfm.Source(name="specs", type="git_repo", path=dest,
                        url=str(remote), ref=branch)
-    changed, stale = rtfm._stale_delta(conn, src)
+    changed, stale = rtfm._stale_delta_git_repo(conn, src)
     assert stale is False
     assert changed == 0
 
@@ -328,7 +329,7 @@ def test_stale_delta_linked_dirty_is_stale(home, tmp_path, git_branch):
     (dest / "a.md").write_text("uncommitted v2\n")
     src = rtfm.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref=branch)
-    changed, stale = rtfm._stale_delta(conn, src)
+    changed, stale = rtfm._stale_delta_git_repo(conn, src)
     assert stale is True
 
 
@@ -347,14 +348,14 @@ def test_stale_delta_pinned_sha_never_stale(home, tmp_path, git_branch):
     conn.commit()
     src = rtfm.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref=sha)
-    changed, stale = rtfm._stale_delta(conn, src)
+    changed, stale = rtfm._stale_delta_git_repo(conn, src)
     assert stale is False
 
 
 def test_stale_delta_git_repo_behind_is_stale(home, tmp_path, git_branch):
     """A managed git_repo whose indexed commit is behind origin/<ref> is stale —
     rtfm owns the clone, so the fetch-and-compare applies. (Linked clones are
-    read-only: only the tree's HEAD matters there — see
+    read-only: only the tree's HEAD or a dirty tree matters there — see
     test_stale_delta_git_repo_linked_head_moved_is_stale.)"""
     remote, seed, branch = make_git_repo(tmp_path, git_branch,
                                          filename="a.md", content="v1\n")
@@ -371,7 +372,7 @@ def test_stale_delta_git_repo_behind_is_stale(home, tmp_path, git_branch):
         ("specs", old_commit, "2025-01-01T00:00:00+00:00"))
     conn.commit()
     src = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref=branch)
-    changed, stale = rtfm._stale_delta(conn, src)
+    changed, stale = rtfm._stale_delta_git_repo(conn, src)
     assert stale is True
 
 
@@ -397,14 +398,14 @@ def test_stale_delta_git_repo_linked_head_moved_is_stale(home, tmp_path, git_bra
     conn.commit()
     src = rtfm.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref=branch)
-    changed, stale = rtfm._stale_delta(conn, src)
+    changed, stale = rtfm._stale_delta_git_repo(conn, src)
     assert stale is False  # remote moved, tree didn't — nothing to reindex
 
     # The USER refreshes their own clone (their fetch + checkout) — stale now
     subprocess.run(["git", "-C", str(dest), "fetch", "origin"], capture_output=True)
     subprocess.run(["git", "-C", str(dest), "checkout", "-B", branch, f"origin/{branch}"],
                     capture_output=True)
-    changed, stale = rtfm._stale_delta(conn, src)
+    changed, stale = rtfm._stale_delta_git_repo(conn, src)
     assert stale is True
 
 
@@ -417,7 +418,7 @@ def test_stale_delta_git_repo_no_source_meta_is_stale(home, tmp_path, git_branch
     conn = rtfm.get_index_db()
     src = rtfm.Source(name="specs", type="git_repo", path=dest,
                        url=str(remote), ref=branch)
-    changed, stale = rtfm._stale_delta(conn, src)
+    changed, stale = rtfm._stale_delta_git_repo(conn, src)
     assert stale is True
 
 

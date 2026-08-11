@@ -59,6 +59,13 @@ no budget gate. The principle is "do the simple correct thing first, optimize
 later." A failed fetch/reindex degrades gracefully: search the
 currently-indexed content with a loud warning.
 
+The git_repo verdicts cost git subprocesses (and a fetch for managed sources)
+and feed the failure warning, which would otherwise repeat on every query for
+a persistently broken or dirty source — they are memoized in-process per
+source for a short window (STALENESS_TTL, 30 s). Staleness is therefore
+checked at most every 30 s per source, and a recurring warning repeats at
+most every 30 s, not on every query.
+
 The comparison is per-mode, honoring the read-only linked contract:
 
 - **Managed** — fetch first (rtfm owns the clone), then compare against
@@ -73,7 +80,10 @@ The comparison is per-mode, honoring the read-only linked contract:
   against the clone's *local* `origin/<ref>` refs, so a
   fetched-but-not-checked-out clone still reports "behind".
 - **Pinned SHA** — the pin never moves: staleness is undefined. Once indexed,
-  a SHA-pinned source is never auto-reindexed.
+  a SHA-pinned source is never auto-reindexed — with one exception: a managed
+  pin whose *manifest* ref changed (the user pinned a new version) is detected,
+  because the managed comparison is against the pin itself, not "never stale".
+  Linked pins never auto-reindex: the tree is the user's checkout concern.
 
 Amends ADR 0003 (staleness window → every-query).
 
@@ -93,8 +103,9 @@ a stale checkout — confident, cited results from the wrong content.
 The refusal is gated on staleness: `search` only reindexes a source it found
 stale, and a dirty tree makes a linked source stale, so the first search after
 a file is edited warns loudly (the reindex refusal) instead of serving silently
-stale content. A dirty tree at the indexed commit with no edit since indexing
-is not re-flagged every query.
+stale content. The warning recurs while the tree stays dirty — bounded by the
+staleness memo (at most every 30 s per source) — until the tree is committed,
+stashed, or cleaned.
 
 ### Git terminology in output, not invented terms
 
@@ -106,15 +117,16 @@ pinned SHA, where staleness is undefined.
 
 Three operational values sit outside git's vocabulary and are rtfm's own:
 `"never indexed"` (no `source_meta` row yet), `"unknown"` (the declared ref
-does not resolve — check the ref spelling in the manifest), and an
-`"error: ..."` string (a git call failed; the detail names it). The
-git-native values are git's; these three are rtfm's, and are documented as
-such.
+does not resolve — check the ref spelling in the manifest; for managed
+sources also a failed fetch — check the network), and an `"error: ..."`
+string (a git call failed; the detail names it). The git-native values are
+git's; these three are rtfm's, and are documented as such.
 
 ### mutable is not applicable
 
-`git_repo` sources ignore the `mutable` flag — the truth is the remote at `ref`,
-never local edits.
+`git_repo` sources ignore the `mutable` flag — for managed clones the truth is
+the remote at `ref`, never local edits. (Linked clones index the user's tree
+as-is, but never mutate it.)
 
 ### Timeout: 60s default, configurable
 

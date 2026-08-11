@@ -16,6 +16,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,8 +63,11 @@ def _git_timeout() -> int:
 
 # --- git operations ----------------------------------------------------------
 
-def _git(args: list[str], cwd: Path, timeout: int | None = None) -> subprocess.CompletedProcess:
-    """Run a git command. Raises RuntimeError on non-zero exit or timeout."""
+def _git(args: list[str], cwd: Path, timeout: int | None = None,
+         allow_exit_codes: tuple[int, ...] = ()) -> subprocess.CompletedProcess:
+    """Run a git command. Raises RuntimeError on non-zero exit or timeout.
+    `allow_exit_codes` are non-zero exits that are legitimate answers, not failures
+    (git merge-base --is-ancestor exits 1 for a genuine 'not an ancestor')."""
     t = timeout if timeout is not None else _git_timeout()
     if not cwd.is_dir():
         # subprocess.run raises FileNotFoundError for a missing cwd exactly as for a
@@ -80,7 +84,12 @@ def _git(args: list[str], cwd: Path, timeout: int | None = None) -> subprocess.C
     except FileNotFoundError:
         raise RuntimeError(
             "git executable not found — install git or remove the git_repo source.") from None
-    if cp.returncode != 0:
+    except OSError as e:
+        # PermissionError on an untraversable cwd (chmod-000 dir passes is_dir but
+        # fails in chdir), EACCES on a non-executable git in PATH, EAGAIN — all
+        # OSErrors the RuntimeError-only guards would otherwise leak raw.
+        raise RuntimeError(f"git failed: {e}") from None
+    if cp.returncode != 0 and cp.returncode not in allow_exit_codes:
         raise RuntimeError(
             f"git {' '.join(args)} exited {cp.returncode}: {(cp.stderr or '').strip()[:200]}")
     return cp
@@ -99,7 +108,7 @@ def _git_repo_root(path: Path) -> Path | None:
         cp = _git(["rev-parse", "--show-toplevel"], cwd=path, timeout=10)
         return Path(cp.stdout.strip())
     except RuntimeError as e:
-        if "not a git repository" in str(e):
+        if re.search(r"not a git repository", str(e), re.IGNORECASE):
             return None
         raise
 
@@ -178,18 +187,21 @@ def _git_clone(url: str, ref: str | None, dest: Path, timeout: int | None = None
     (git rejects `--branch HEAD`, and `git clone --branch <sha>` fails — the pinned
     SHA is checked out afterwards by _git_checkout's detached path). Raises RuntimeError."""
     t = timeout if timeout is not None else _git_timeout()
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise RuntimeError(f"could not create {dest.parent}: {e}") from None
     args = ["clone", url, str(dest)]
     if ref:
         args[1:1] = ["--branch", ref]
     try:
         _git(args, cwd=dest.parent, timeout=t)
-    except RuntimeError:
+    except RuntimeError as e:
         # A hex-shaped ref might be a branch named like a SHA (git treats it as a
         # branch name — the --branch form above already succeeded for those) or a
         # true pinned SHA, which git rejects in --branch. Clone the default branch
         # and let _git_checkout perform the detached checkout of the pinned SHA.
-        if not _is_sha(ref):
+        if not (ref and _is_sha(ref)) or "Remote branch" not in str(e):
             raise
         args[1:3] = []                       # drop --branch <ref>, keep url + dest
         _git(args, cwd=dest.parent, timeout=t)
@@ -197,7 +209,9 @@ def _git_clone(url: str, ref: str | None, dest: Path, timeout: int | None = None
 
 def _git_checkout(path: Path, ref: str) -> None:
     """Move the working tree to `ref`. For branches: reset to match origin/<ref>.
-    For tags/SHAs: direct checkout. Raises RuntimeError on failure.
+    For tags/SHAs: direct checkout, with one retry that fetches the tag by explicit
+    refspec (a plain fetch cannot materialize a tag whose commit is unreachable from
+    any branch). Raises RuntimeError on failure.
 
     Managed clones only — linked clones are read-only (ADR 0013). The caller
     (_ensure_git_repo_ready) has already fetched, so origin/<ref> is current; the
@@ -226,15 +240,19 @@ def _git_checkout(path: Path, ref: str) -> None:
         except RuntimeError as e:
             if "did not match any file(s) known to git" not in str(e):
                 raise
-            _git(["fetch", "origin", f"refs/tags/{ref}:refs/tags/{ref}"],
-                 cwd=path, timeout=_git_timeout())
+            try:
+                _git(["fetch", "origin", f"refs/tags/{ref}:refs/tags/{ref}"],
+                     cwd=path, timeout=_git_timeout())
+            except RuntimeError:
+                raise e from None           # the ref really doesn't exist — original error
             _git(["checkout", ref], cwd=path, timeout=_git_timeout())
 
 
 def _is_sha(ref: str) -> bool:
-    """True for a full or short SHA-1 (git's hex form) — a pinned SHA, not a branch
-    name. A pinned SHA puts the checkout in git's detached-HEAD state: staleness
-    undefined (ADR 0013)."""
+    """True for a hex-shaped ref (full or short SHA-1 form). Hex shape alone does not
+    make a pin — a branch named 'deadbeef' is a branch — that decision is
+    _is_sha_pin's. A pinned SHA puts the checkout in git's detached-HEAD state:
+    staleness undefined (ADR 0013)."""
     return bool(re.fullmatch(r"[0-9a-f]{7,40}", ref))
 
 
@@ -261,24 +279,27 @@ def _git_is_branch(path: Path, ref: str) -> bool:
 
 
 def _git_is_ancestor(path: Path, ancestor: str, descendant: str) -> bool:
-    """True if `ancestor` is an ancestor of `descendant` (both must resolve locally)."""
-    try:
-        _git(["merge-base", "--is-ancestor", ancestor, descendant], cwd=path, timeout=10)
-        return True
-    except RuntimeError:
-        return False
+    """True if `ancestor` is an ancestor of `descendant` (both must resolve locally).
+
+    git exits 1 for the legitimate 'not an ancestor' answer and 128 for errors; only
+    the exit-1 case returns False, so a git failure raises and the caller degrades
+    to 'unknown' instead of reporting a wrong 'diverged'."""
+    cp = _git(["merge-base", "--is-ancestor", ancestor, descendant],
+              cwd=path, timeout=10, allow_exit_codes=(1,))
+    return cp.returncode == 0
 
 
 def _linked_git_status(repo_path: Path, src: Source, indexed: str) -> str:
     """git_status for a linked clone, in git's own terms — read-only: compares the
-    indexed commit against the LOCAL origin/<ref> (the clone's own fetched knowledge;
-    rtfm never fetches a linked clone, ADR 0013). A pinned SHA puts the checkout in
-    git's detached-HEAD state — staleness undefined. An unresolvable ref means
-    'unknown' — check the ref spelling in the manifest."""
-    ref = src.ref or _default_branch(repo_path)
-    if _is_sha_pin(repo_path, ref):
-        return "detached"
+    indexed commit against the LOCAL origin/<ref> (origin first, local fallback for
+    tags/SHAs/local-only branches — the clone's own knowledge; rtfm never fetches a
+    linked clone, ADR 0013). A pinned SHA puts the checkout in git's detached-HEAD
+    state — staleness undefined. An unresolvable ref means 'unknown' — check the ref
+    spelling in the manifest."""
     try:
+        ref = src.ref or _default_branch(repo_path)
+        if _is_sha_pin(repo_path, ref):
+            return "detached"
         origin_sha = _git_resolve_ref(repo_path, ref)   # origin/<ref> first, local fallback
     except RuntimeError:
         return "unknown"
@@ -293,13 +314,13 @@ def _linked_git_status(repo_path: Path, src: Source, indexed: str) -> str:
 
 def _managed_git_status(repo_path: Path, src: Source, indexed: str) -> str:
     """git_status for a managed clone: fetch (rtfm owns the clone), then compare the
-    indexed commit to origin/<ref>. The reset keeps HEAD at origin, so 'ahead' and
-    'diverged' are unreachable here. A pinned SHA needs no fetch — the pin never
-    moves — and reports git's detached-HEAD state."""
-    ref = src.ref or _default_branch(repo_path)
-    if _is_sha_pin(repo_path, ref):
-        return "detached"
+    indexed commit to origin/<ref> (origin first, local fallback). The reset keeps
+    HEAD at origin, so 'ahead' and 'diverged' are unreachable here. A pinned SHA
+    needs no fetch — the pin never moves — and reports git's detached-HEAD state."""
     try:
+        ref = src.ref or _default_branch(repo_path)
+        if _is_sha_pin(repo_path, ref):
+            return "detached"
         _git_fetch(repo_path)
         current = _git_resolve_ref(repo_path, ref)
     except RuntimeError:
@@ -546,17 +567,22 @@ def _git_error_class(e: RuntimeError) -> str:
 
 
 def _normalize_remote(url: str) -> str:
-    """Canonical form for remote comparison: scheme/credentials stripped, scp-style
-    'host:path' made slash-form, trailing '.git' dropped, lowercased. Two URLs for
-    the same repo (https vs ssh) compare equal; different repos never do."""
+    """Canonical form for remote comparison: scheme/credentials stripped, explicit
+    ports dropped (ssh://host:22/..., https://host:443/...), scp-style 'host:path'
+    made slash-form, trailing '.git' and '/' dropped, lowercased. Two URLs for the
+    same repo (https vs ssh, ported vs not, trailing slash or not) compare equal.
+    The theoretical collision — a real repo at 'host:port/repo' vs one at
+    'host/port/repo' — is not expected for real repo URLs."""
     u = url.strip()
     if "://" in u:
         u = u.split("://", 1)[1]
     if "@" in u:
         u = u.split("@", 1)[1]
-    u = u.replace(":", "/", 1)
+    u = re.sub(r":\d+(?=/|$)", "", u)        # explicit port, not the scp path colon
+    u = u.replace(":", "/", 1)                # scp form git@host:org/repo.git
     if u.endswith(".git"):
         u = u[:-4]
+    u = u.rstrip("/")
     return u.lower()
 
 
@@ -582,6 +608,11 @@ def _ensure_git_repo_ready(src: Source) -> tuple[Path, str | None]:
     if src.path is not None:
         repo_path = src.path
         # Linked mode: verify repo + remote + clean tree only (no fetch, no checkout).
+        if not repo_path.exists():
+            return repo_path, (
+                f"ERROR:PATH_MISSING: {repo_path} does not exist. "
+                f"Recover: clone the repo there, or remove 'path' from the manifest "
+                f"to let rtfm manage the clone.")
         try:
             root = _git_repo_root(repo_path)
         except RuntimeError as e:
@@ -760,7 +791,7 @@ def _reindex_git_repo(conn: sqlite3.Connection, src: Source) -> dict:
         commit = _git_current_commit(repo_path)
         commit_date = _git_commit_date(repo_path, "HEAD")
     except RuntimeError as e:
-        if "ambiguous argument 'HEAD'" in str(e):
+        if re.search(r"ambiguous argument 'HEAD'|Needed a single revision", str(e)):
             return {"source": src.name,
                     "error": (f"ERROR:EMPTY_REPO: {repo_path} has no commits yet. "
                               f"Recover: commit something first, or point 'ref' at an "
@@ -772,16 +803,26 @@ def _reindex_git_repo(conn: sqlite3.Connection, src: Source) -> dict:
         "git_commit=excluded.git_commit, git_commit_date=excluded.git_commit_date",
         (src.name, commit, commit_date))
     conn.commit()
+    _staleness_cache.pop(src.name, None)  # a fresh index makes the cached verdict stale
 
     # Now run the file-level indexing (shared core with dir sources)
     summary = {"source": src.name, "commit": commit, "commit_date": commit_date}
+    if src.path is not None and src.ref:
+        try:
+            _git_resolve_ref(repo_path, src.ref)
+        except RuntimeError:
+            # Read-only mode cannot validate the ref by checking it out — surface
+            # the typo where the work happens, not only in list_sources' 'unknown'.
+            summary["warning"] = (
+                f"ref '{src.ref}' does not resolve in the clone — check the ref "
+                f"spelling in the manifest (list_sources reports 'unknown').")
     summary.update(_index_files(conn, src.name, repo_path))
     return summary
 
 
 def reindex_source(conn: sqlite3.Connection, src: Source) -> dict:
     """Rebuild one source. Dispatches on type: git_repo sources go through the
-    managed flow (fetch/checkout/dirty-check) or the linked flow (verify repo,
+    managed flow (fetch, dirty-check, checkout) or the linked flow (verify repo,
     remote URL, clean tree only — read-only); dir sources index in place. Returns a summary.
 
     extraction_skips = files_seen - unique contents that required fresh extraction this run.
@@ -799,14 +840,29 @@ def reindex_source(conn: sqlite3.Connection, src: Source) -> dict:
     return summary
 
 
+STALENESS_TTL = 30  # seconds: git_repo verdicts are memoized in-process for this long
+
+
 def _stale_delta(conn: sqlite3.Connection, src: Source) -> tuple[int, bool]:
     """Cheap staleness check. Dispatches on source type.
     Returns (changed, stale):
       changed  count of new/changed items (files for dir, always 0 for git_repo)
       stale    whether the index differs from reality
+
+    git_repo verdicts cost git subprocesses (and a fetch for managed sources) and
+    feed the auto-reindex failure warning, which would otherwise repeat on every
+    query for a persistently broken or dirty source — they are memoized per source
+    for STALENESS_TTL seconds (ADR 0013: staleness is checked at most every 30 s,
+    not on every query).
     """
     if src.type == "git_repo":
-        return _stale_delta_git_repo(conn, src)
+        now = time.monotonic()
+        hit = _staleness_cache.get(src.name)
+        if hit and now - hit[0] < STALENESS_TTL:
+            return 0, hit[1]
+        _, stale = _stale_delta_git_repo(conn, src)
+        _staleness_cache[src.name] = (now, stale)
+        return 0, stale
     # dir sources: stat + (relpath, mtime) compare — no hashing or extraction.
     # `changed` counts files that would need fresh extraction and bounds the cost of an
     # inline auto-reindex (see _auto_reindex_max); `stale` also catches files that vanished
@@ -821,6 +877,9 @@ def _stale_delta(conn: sqlite3.Connection, src: Source) -> tuple[int, bool]:
     return changed, stale
 
 
+_staleness_cache: dict[str, tuple[float, bool]] = {}
+
+
 def _stale_delta_git_repo(conn: sqlite3.Connection, src: Source) -> tuple[int, bool]:
     """Commit-based staleness for git_repo. Returns (0, stale).
 
@@ -829,10 +888,11 @@ def _stale_delta_git_repo(conn: sqlite3.Connection, src: Source) -> tuple[int, b
     current HEAD (the user moved their checkout) or the tree is dirty (uncommitted
     edits would be silently absent from results; a dirty reindex refusal then warns
     loudly on search). Remote movement alone is the user's own business (their fetch
-    told them); list_sources reports it.
-    Managed clones are rtfm's own: fetch, then compare the indexed commit to origin/<ref>.
-    A pinned SHA never moves — staleness undefined (ADR 0013): never auto-reindex once
-    indexed.
+    told them); list_sources reports it. A linked pinned SHA is the user's checkout
+    concern — never auto-reindex (staleness undefined, ADR 0013).
+    Managed clones are rtfm's own: fetch, then compare the indexed commit to
+    origin/<ref> — for a pinned SHA, to the pin itself (the pin never moves, but the
+    MANIFEST can: a changed pin must be detected, not served silently forever).
     """
     try:
         row = conn.execute(
@@ -843,9 +903,9 @@ def _stale_delta_git_repo(conn: sqlite3.Connection, src: Source) -> tuple[int, b
         if not repo_path.exists():
             return 0, True  # clone vanished
         ref = src.ref or _default_branch(repo_path)
-        if _is_sha_pin(repo_path, ref):
-            return 0, False  # pinned SHA: staleness undefined (ADR 0013)
         if src.path is not None:
+            if _is_sha_pin(repo_path, ref):
+                return 0, False  # linked pin: never auto-reindex (ADR 0013)
             head_moved = row[0] != _git_current_commit(repo_path)
             if head_moved:
                 return 0, True
@@ -1020,7 +1080,8 @@ def load_manifest() -> tuple[list[Source], list[str]]:
     """Return (sources, warnings). Bootstraps a default manifest if none exists.
 
     Duplicate names are resolved first-wins; each refused duplicate yields a loud, actionable
-    warning (ADR 0006). Misconfigured sources are validated: a `path`-less dir source is dropped,
+    warning (ADR 0006). Misconfigured sources are validated: a `path`-less dir source or a
+    url-less git_repo source is dropped (loudly),
     a missing/non-dir/unreadable path is kept-but-warned (so it stays visible and self-heals if
     the path appears). Never raises — one bad entry never breaks the rest.
     """
@@ -1298,6 +1359,7 @@ def search(query: str, source: str | None = None, max_files: int = 20,
     warnings = list(warnings)
     conn = get_index_db()
     budget = _auto_reindex_max()
+    warned_repo_paths: set[str] = set()      # one warning per clone, not per source
     for s in sources:
         if source is not None and s.name != source:
             continue
@@ -1318,6 +1380,13 @@ def search(query: str, source: str | None = None, max_files: int = 20,
             else:  # git_repo — always auto-reindex, budget doesn't apply
                 result = reindex_source(conn, s)
                 if isinstance(result, dict) and result.get("error"):
+                    # Multiple sources on one clone (or one broken remote) would
+                    # otherwise repeat the identical warning once per source.
+                    key = (s.path if s.path is not None
+                           else str(_managed_repo_path(s.name)))
+                    if key in warned_repo_paths:
+                        continue
+                    warned_repo_paths.add(key)
                     warnings.append(
                         f"!!! AUTO-REINDEX FAILED '{s.name}' !!! {result['error']} — "
                         f"searching previously indexed content only. "
@@ -1329,7 +1398,7 @@ def search(query: str, source: str | None = None, max_files: int = 20,
     try:
         hits = search_index(conn, query, source=source, limit=max_files,
                             max_locations=max_locations)
-    except sqlite3.OperationalError as e:                # corrupt/missing/locked index
+    except sqlite3.Error as e:                           # corrupt/missing/locked index
         hits = []
         warnings.append(
             f"!!! INDEX ERROR !!! {e} — the search index looks corrupt or busy. "
@@ -1355,6 +1424,18 @@ def reindex(source: str | None = None) -> dict:
                and (source is None or s.name == source)]
     if source is not None and not targets:
         return {"error": f"source '{source}' not found. Call list_sources()."}
+    # Rebuild semantics: sources removed from the manifest (or dropped at load, e.g.
+    # url-less git_repo) must not keep serving their leftover index rows.
+    manifest_names = {s.name for s in sources}
+    dropped = [r[0] for r in conn.execute(
+        "SELECT DISTINCT source FROM locations WHERE source NOT IN "
+        f"({','.join('?' * len(manifest_names))})", tuple(manifest_names))]
+    for name in dropped:
+        conn.execute("DELETE FROM locations WHERE source=?", (name,))
+        conn.execute("DELETE FROM source_meta WHERE source=?", (name,))
+        _staleness_cache.pop(name, None)
+    if dropped:
+        conn.commit()
     resp: dict = {"reindexed": [reindex_source(conn, s) for s in targets]}
     if warnings:
         resp["WARNING"] = warnings
@@ -1419,11 +1500,12 @@ def list_sources() -> dict:
     is ahead of origin/ref — a linked clone with unpushed commits), "diverged" (both
     sides moved), "dirty" (uncommitted changes in the working tree), "detached"
     (tracking a pinned SHA — git's detached-HEAD state; staleness undefined), plus rtfm's
-    operational states: "never indexed" (no source_meta row yet), "unknown" (ref that
-    doesn't resolve — check the ref spelling in the manifest), or an "error: ..." string
-    (a git call failed; the detail names it). Linked clones are read-only: the comparison
-    uses the clone's own local refs, never a fetch. One bad source never breaks the rest:
-    git failures degrade to a status string, never an exception.
+    operational states: "never indexed" (no source_meta row yet), "unknown" (the ref
+    doesn't resolve — check the ref spelling in the manifest; for managed sources also
+    a failed fetch — check the network), or an "error: ..." string (a git call failed;
+    the detail names it). Linked clones are read-only: the comparison uses the clone's
+    own local refs, never a fetch. One bad source never breaks the rest: git failures
+    degrade to a status string, never an exception.
     """
     sources, warnings = load_manifest()
     conn = get_index_db()
@@ -1473,7 +1555,8 @@ def list_sources() -> dict:
 
 @mcp.tool()
 def health_check() -> dict:
-    """Check server health: corpus home, schema version, index DB, PDF extractors, sources."""
+    """Check server health: corpus home, schema version, index DB, PDF extractors,
+    git presence, sources."""
     status: dict = {"server": "rtfm", "ok": True, "issues": []}
     status["corpus_home"] = str(corpus_home())
     try:
@@ -1501,6 +1584,13 @@ def health_check() -> dict:
         status["sources"] = [{"name": s.name, "type": s.type,
                               **( {"url": s.url, "ref": s.ref} if s.type == "git_repo" else {})}
                              for s in sources]
+        if not status.get("git") and any(s.type == "git_repo" for s in sources):
+            # git_repo sources cannot be refreshed without git — a green 'ok' with
+            # an impossible corpus is a silent failure.
+            status["ok"] = False
+            status["issues"].append(
+                "git executable not found — git_repo sources cannot be refreshed. "
+                "Recover: install git, or remove the git_repo sources.")
         if warnings:
             status["issues"].extend(warnings)
             status["ok"] = False

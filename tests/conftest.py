@@ -2,6 +2,17 @@ import subprocess
 
 import pytest
 
+import rtfm_server as rtfm
+
+
+@pytest.fixture(autouse=True)
+def _clear_staleness_cache():
+    """The git_repo staleness memo is module-level and TTL'd — a verdict cached by
+    one test must not leak into the next (or the same test's later assertions)."""
+    rtfm._staleness_cache.clear()
+    yield
+    rtfm._staleness_cache.clear()
+
 
 @pytest.fixture(autouse=True)
 def _git_identity(monkeypatch):
