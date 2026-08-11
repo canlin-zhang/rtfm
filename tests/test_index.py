@@ -291,7 +291,8 @@ def test_reindex_indexes_rst_files(home, tmp_path):
 # --- _stale_delta for git_repo ---
 
 def test_stale_delta_git_repo_current_is_not_stale(home, tmp_path, git_branch):
-    """A git_repo whose indexed commit matches origin/<ref> is not stale."""
+    """A linked git_repo whose indexed commit matches the current HEAD is not stale
+    (a fresh clone has HEAD == origin/<ref>, so this pins the linked HEAD-compare)."""
     remote, seed, branch = make_git_repo(tmp_path, git_branch,
                                          filename="a.md", content="hello\n")
     dest = tmp_path / "dest"
@@ -308,6 +309,46 @@ def test_stale_delta_git_repo_current_is_not_stale(home, tmp_path, git_branch):
     changed, stale = rtfm._stale_delta(conn, src)
     assert stale is False
     assert changed == 0
+
+
+def test_stale_delta_linked_dirty_is_stale(home, tmp_path, git_branch):
+    """A linked git_repo with uncommitted edits at the indexed commit is stale —
+    the reindex refusal then warns loudly on search instead of serving silently
+    absent edits (ADR 0013: dirty = refuse)."""
+    remote, seed, branch = make_git_repo(tmp_path, git_branch,
+                                         filename="a.md", content="v1\n")
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), branch, dest, timeout=30)
+    commit = rtfm._git_current_commit(dest)
+    conn = rtfm.get_index_db()
+    conn.execute(
+        "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?)",
+        ("specs", commit, "2025-01-01T00:00:00+00:00"))
+    conn.commit()
+    (dest / "a.md").write_text("uncommitted v2\n")
+    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+                      url=str(remote), ref=branch)
+    changed, stale = rtfm._stale_delta(conn, src)
+    assert stale is True
+
+
+def test_stale_delta_pinned_sha_never_stale(home, tmp_path, git_branch):
+    """A pinned-SHA source is never stale once indexed — the pin never moves,
+    staleness is undefined (ADR 0013)."""
+    remote, seed, branch = make_git_repo(tmp_path, git_branch,
+                                         filename="a.md", content="v1\n")
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), branch, dest, timeout=30)
+    sha = rtfm._git_current_commit(dest)
+    conn = rtfm.get_index_db()
+    conn.execute(
+        "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?)",
+        ("specs", sha, "2025-01-01T00:00:00+00:00"))
+    conn.commit()
+    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+                      url=str(remote), ref=sha)
+    changed, stale = rtfm._stale_delta(conn, src)
+    assert stale is False
 
 
 def test_stale_delta_git_repo_behind_is_stale(home, tmp_path, git_branch):

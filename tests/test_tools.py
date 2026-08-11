@@ -1,4 +1,6 @@
 # tests/test_tools.py
+import subprocess
+
 from conftest import make_git_repo
 
 import rtfm_server as rtfm
@@ -218,8 +220,23 @@ def test_list_sources_reports_counts(home):
     assert all("unique_contents" in s for s in out["sources"])
 
 
+def _status_of(home, tmp_path, name="specs", src=None, remote=None, ref=None):
+    """Manifest with one git_repo source, return its list_sources git_status."""
+    rtfm.load_manifest()
+    mp = rtfm.manifest_path()
+    url = str(remote) if remote is not None else str(src.url)
+    path = f'\npath="{src.path}"' if src.path is not None else ""
+    mp.write_text(
+        f'[[source]]\nname="{name}"\ntype="git_repo"\nurl="{url}"\n'
+        f'ref="{ref if ref is not None else src.ref}"\n{path}\n'
+    )
+    out = rtfm.list_sources()
+    return next(s for s in out["sources"] if s["name"] == name)["git_status"]
+
+
 def test_list_sources_reports_git_status(home, tmp_path, git_branch):
-    """list_sources reports git status for git_repo sources."""
+    """list_sources reports the pinned 'up to date' status for a fresh linked clone
+    at its ref — each vocabulary value has its own state test below."""
     remote, seed, branch = make_git_repo(tmp_path, git_branch,
                                          filename="a.md", content="hello\n")
     dest = tmp_path / "dest"
@@ -228,20 +245,114 @@ def test_list_sources_reports_git_status(home, tmp_path, git_branch):
     src = rtfm.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref=branch)
     rtfm.reindex_source(conn, src)
-    rtfm.load_manifest()
-    mp = rtfm.manifest_path()
-    mp.write_text(
-        f'[[source]]\nname="specs"\ntype="git_repo"\n'
-        f'url="{remote}"\nref="{branch}"\npath="{dest}"\n'
-    )
-    out = rtfm.list_sources()
-    specs = next(s for s in out["sources"] if s["name"] == "specs")
-    assert specs["type"] == "git_repo"
-    assert specs["url"] == str(remote)
-    assert specs["ref"] == branch
-    assert "git_status" in specs
-    assert specs["git_status"] in ("up to date", "behind", "ahead", "diverged",
-                                   "detached", "dirty")
+    assert _status_of(home, tmp_path, src=src) == "up to date"
+
+
+def test_list_sources_linked_ahead(home, tmp_path, git_branch):
+    """A linked clone with an unpushed commit reports 'ahead' (git's own term)."""
+    remote, seed, branch = make_git_repo(tmp_path, git_branch,
+                                         filename="a.md", content="hello\n")
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), branch, dest, timeout=30)
+    (dest / "local.md").write_text("unpushed work\n")
+    subprocess.run(["git", "-C", str(dest), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(dest), "commit", "-m", "local"], capture_output=True)
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+                      url=str(remote), ref=branch)
+    rtfm.reindex_source(conn, src)  # index AFTER the local commit — status compares the index
+    assert _status_of(home, tmp_path, src=src) == "ahead"
+
+
+def test_list_sources_linked_behind(home, tmp_path, git_branch):
+    """A linked clone whose remote moved (user fetched, did not check out) reports
+    'behind' — the ADR-documented case, using the clone's own local refs."""
+    remote, seed, branch = make_git_repo(tmp_path, git_branch,
+                                         filename="a.md", content="v1\n")
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), branch, dest, timeout=30)
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+                      url=str(remote), ref=branch)
+    rtfm.reindex_source(conn, src)
+    (seed / "a.md").write_text("v2\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "v2"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", branch], capture_output=True)
+    # The USER fetches their own clone; rtfm must not fetch for them.
+    subprocess.run(["git", "-C", str(dest), "fetch", "origin"], capture_output=True)
+    assert _status_of(home, tmp_path, src=src) == "behind"
+
+
+def test_list_sources_linked_diverged(home, tmp_path, git_branch):
+    """Both sides moved off the common ancestor: git's 'diverged'."""
+    remote, seed, branch = make_git_repo(tmp_path, git_branch,
+                                         filename="a.md", content="v1\n")
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), branch, dest, timeout=30)
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+                      url=str(remote), ref=branch)
+    rtfm.reindex_source(conn, src)
+    (seed / "a.md").write_text("remote v2\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "remote v2"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", branch], capture_output=True)
+    (dest / "local.md").write_text("local v2\n")
+    subprocess.run(["git", "-C", str(dest), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(dest), "commit", "-m", "local v2"], capture_output=True)
+    subprocess.run(["git", "-C", str(dest), "fetch", "origin"], capture_output=True)
+    rtfm.reindex_source(conn, src)  # index AFTER both sides moved — status compares the index
+    assert _status_of(home, tmp_path, src=src) == "diverged"
+
+
+def test_list_sources_detached_pinned_sha(home, tmp_path, git_branch):
+    """A pinned SHA ref reports git's 'detached' state — staleness undefined."""
+    remote, seed, branch = make_git_repo(tmp_path, git_branch,
+                                         filename="a.md", content="hello\n")
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), branch, dest, timeout=30)
+    sha = rtfm._git_current_commit(dest)
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+                      url=str(remote), ref=sha)
+    rtfm.reindex_source(conn, src)
+    assert _status_of(home, tmp_path, src=src, ref=sha) == "detached"
+
+
+def test_list_sources_unknown_ref(home, tmp_path, git_branch):
+    """A declared ref that resolves nowhere reports 'unknown' — check the spelling."""
+    remote, seed, branch = make_git_repo(tmp_path, git_branch,
+                                         filename="a.md", content="hello\n")
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), branch, dest, timeout=30)
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+                      url=str(remote), ref=branch)
+    rtfm.reindex_source(conn, src)
+    assert _status_of(home, tmp_path, src=src, ref="no-such-branch") == "unknown"
+
+
+def test_list_sources_never_indexed(home, tmp_path):
+    """A managed source with no source_meta row reports 'never indexed'."""
+    remote, seed, branch = make_git_repo(tmp_path, "main",
+                                         filename="a.md", content="hello\n")
+    src = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref=branch)
+    assert _status_of(home, tmp_path, src=src, remote=remote) == "never indexed"
+
+
+def test_list_sources_dirty(home, tmp_path, git_branch):
+    """A linked clone with uncommitted changes reports 'dirty'."""
+    remote, seed, branch = make_git_repo(tmp_path, git_branch,
+                                         filename="a.md", content="hello\n")
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), branch, dest, timeout=30)
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+                      url=str(remote), ref=branch)
+    rtfm.reindex_source(conn, src)
+    (dest / "a.md").write_text("locally edited\n")
+    assert _status_of(home, tmp_path, src=src) == "dirty"
 
 
 def test_health_check_reports_schema_version(home):

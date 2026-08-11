@@ -212,3 +212,32 @@ def test_git_repo_linked_mode_matching_remote_is_clean(home, tmp_path):
     )
     sources, warnings = rtfm.load_manifest()
     assert warnings == []
+
+
+def test_git_repo_without_url_is_dropped(home):
+    """A url-less git_repo is warned about AND dropped — keeping it would make
+    every search run `git clone None ...` (the whole-reindex crash of review
+    round 1). Dir sources set the precedent: unusable sources are dropped loudly."""
+    (home / "manifest.toml").write_text(
+        '[[source]]\nname="no-url"\ntype="git_repo"\nref="main"\n'
+    )
+    sources, warnings = rtfm.load_manifest()
+    assert any("no 'url'" in w and "no-url" in w for w in warnings)
+    assert all(s.name != "no-url" for s in sources)
+
+
+def test_git_repo_linked_missing_git_warns(home, tmp_path, monkeypatch):
+    """A git-less machine with a linked source gets a GIT MISSING warning at
+    load time, never the misleading NOT A GIT REPO."""
+    repo = tmp_path / "myrepo"
+    subprocess.run(["git", "init", str(repo)], capture_output=True)
+    emptybin = tmp_path / "emptybin"
+    emptybin.mkdir()
+    monkeypatch.setenv("PATH", str(emptybin))
+    (home / "manifest.toml").write_text(
+        f'[[source]]\nname="specs"\ntype="git_repo"\n'
+        f'url="https://example.com/repo.git"\npath="{repo}"\n'
+    )
+    sources, warnings = rtfm.load_manifest()
+    assert any("GIT MISSING" in w and "specs" in w for w in warnings)
+    assert not any("NOT A GIT REPO" in w for w in warnings)
