@@ -25,17 +25,20 @@ mutable = true
 # path    = "/path/to/vendor/Documentation"
 # mutable = false
 
-# Example: a git-tracked doc repo — linked mode (user provides the clone).
+# Example: a git-tracked doc repo — linked mode (user provides the clone). Read-only:
+# rtfm verifies the remote URL and a clean tree, then indexes the checkout as-is —
+# it never fetches or resets the user's clone.
 # [[source]]
 # name    = "specs"
 # type    = "git_repo"
-# url     = "https://github.com/org/specs.git"
+# url     = "https://example.com/org/specs.git"
 # ref     = "main"
-# path    = "/home/you/repos/specs"
+# path    = "/path/to/specs"
 
-# Example: a git-tracked doc repo — managed mode (rtfm clones for you).
+# Example: a git-tracked doc repo — managed mode (rtfm clones to ~/.rtfm/repos/<name>/
+# and fetches + resets on every reindex).
 # [[source]]
-# name    = "vendor-docs"
+# name    = "docs-managed"
 # type    = "git_repo"
-# url     = "https://gitlab.com/vendor/docs.git"
+# url     = "https://example.com/org/specs.git"
 # ref     = "v2.1-stable"

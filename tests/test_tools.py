@@ -240,7 +240,8 @@ def test_list_sources_reports_git_status(home, tmp_path, git_branch):
     assert specs["url"] == str(remote)
     assert specs["ref"] == branch
     assert "git_status" in specs
-    assert specs["git_status"] in ("up to date", "behind", "detached", "dirty")
+    assert specs["git_status"] in ("up to date", "behind", "ahead", "diverged",
+                                   "detached", "dirty")
 
 
 def test_health_check_reports_schema_version(home):

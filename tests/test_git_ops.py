@@ -203,27 +203,6 @@ def test_checkout_branch_resets_to_remote(tmp_path):
     assert (dest / "a.md").read_text() == "v2\n"
 
 
-def test_ahead_count_counts_unpushed_commits(tmp_path):
-    """_git_ahead_count is 0 for a repo at origin, N for one with unpushed commits."""
-    remote = tmp_path / "remote.git"
-    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
-    seed = tmp_path / "seed"
-    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
-    (seed / "a.md").write_text("v1\n")
-    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
-
-    dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), "main", dest, timeout=30)
-    assert rtfm._git_ahead_count(dest, "main") == 0
-
-    (dest / "local.md").write_text("unpushed work\n")
-    subprocess.run(["git", "-C", str(dest), "add", "."], capture_output=True)
-    subprocess.run(["git", "-C", str(dest), "commit", "-m", "local"], capture_output=True)
-    assert rtfm._git_ahead_count(dest, "main") == 1
-
-
 # --- reindex_source for git_repo ---
 
 def test_reindex_git_repo_linked_clean_indexes_files(home, tmp_path):
@@ -285,9 +264,10 @@ def test_reindex_git_repo_dirty_refuses(home, tmp_path):
     assert "guide.md" in summary.get("error", "")
 
 
-def test_reindex_git_repo_linked_ahead_refuses_and_preserves(home, tmp_path):
-    """A linked git_repo whose local branch has unpushed commits refuses to reset
-    ('checkout -B' would orphan them) and leaves the repo untouched."""
+def test_reindex_git_repo_linked_ahead_indexes_without_mutating(home, tmp_path):
+    """A linked git_repo with unpushed local commits is indexed as-is — linked mode
+    is read-only (ADR 0013), so rtfm neither fetches nor resets: the local commit,
+    the working tree, and the clone's remote-tracking refs all survive."""
     remote = tmp_path / "remote.git"
     subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
     seed = tmp_path / "seed"
@@ -310,18 +290,23 @@ def test_reindex_git_repo_linked_ahead_refuses_and_preserves(home, tmp_path):
     subprocess.run(["git", "-C", str(dest), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(dest), "commit", "-m", "local work"], capture_output=True)
     local_sha = rtfm._git_current_commit(dest)
+    origin_before = rtfm._git(["rev-parse", "origin/main"], cwd=dest,
+                              timeout=10).stdout.strip()
 
     conn = rtfm.get_index_db()
     src = rtfm.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref="main")
     summary = rtfm.reindex_source(conn, src)
-    assert "error" in summary
-    assert "BRANCH_AHEAD" in summary["error"]
-    assert "push" in summary["error"].lower()
+    assert "error" not in summary
+    assert summary["files_seen"] >= 1
+    assert summary["newly_extracted"] >= 1
 
-    # rtfm never mutates the linked repo: commit and working tree survive
+    # rtfm never mutates the linked repo: commit, working tree, and remote refs survive
     assert rtfm._git_current_commit(dest) == local_sha
     assert (dest / "local.md").exists()
+    origin_after = rtfm._git(["rev-parse", "origin/main"], cwd=dest,
+                             timeout=10).stdout.strip()
+    assert origin_after == origin_before  # no fetch happened
 
 
 def test_reindex_git_repo_managed_clones_and_indexes(home, tmp_path):
@@ -412,7 +397,43 @@ def test_search_then_read_managed_git_repo(home, tmp_path):
 # --- search auto-reindex for git_repo ---
 
 def test_search_auto_reindexes_stale_git_repo(home, tmp_path):
-    """Search on a stale git_repo auto-reindexes and returns fresh results."""
+    """Search on a stale managed git_repo auto-reindexes (fetch + reset — rtfm owns
+    the clone) and returns fresh results."""
+    import rtfm_server as rtfm
+
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
+    (seed / "guide.md").write_text("the widget protocol defines flits v1\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+
+    rtfm.load_manifest()  # bootstrap default
+    mp = rtfm.manifest_path()
+    mp.write_text(
+        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\n'
+    )
+
+    # First search clones and indexes v1
+    out = rtfm.search(query="widget protocol")
+    assert any("v1" in h["snippet"] for h in out["results"])
+
+    # Push v2 to remote
+    (seed / "guide.md").write_text("the widget protocol defines flits v2\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "v2"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+
+    # Search again — fetches, resets, and reindexes
+    out = rtfm.search(query="widget protocol")
+    assert any("v2" in h["snippet"] for h in out["results"])
+
+
+def test_search_auto_reindexes_linked_after_user_refresh(home, tmp_path):
+    """A linked git_repo auto-reindexes when the USER moves their checkout — linked
+    mode is read-only (ADR 0013), so only the tree's HEAD change triggers it."""
     import rtfm_server as rtfm
 
     remote = tmp_path / "remote.git"
@@ -427,34 +448,32 @@ def test_search_auto_reindexes_stale_git_repo(home, tmp_path):
     dest = tmp_path / "dest"
     rtfm._git_clone(str(remote), "main", dest, timeout=30)
 
-    # First reindex
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", path=dest,
-                      url=str(remote), ref="main")
-    rtfm.reindex_source(conn, src)
-
-    # Search finds v1
-    hits = rtfm.search_index(conn, "widget protocol")
-    assert any("v1" in h["snippet"] for h in hits)
-
-    # Push v2 to remote
-    (seed / "guide.md").write_text("the widget protocol defines flits v2\n")
-    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "commit", "-m", "v2"], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
-
-    # Now search through the MCP tool — should auto-reindex and find v2
     rtfm.load_manifest()  # bootstrap default
     mp = rtfm.manifest_path()
     mp.write_text(
         f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\n'
     )
+
+    # First search indexes v1
+    out = rtfm.search(query="widget protocol")
+    assert any("v1" in h["snippet"] for h in out["results"])
+
+    # Push v2; the USER refreshes their own clone (rtfm never fetches for them)
+    (seed / "guide.md").write_text("the widget protocol defines flits v2\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "v2"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    subprocess.run(["git", "-C", str(dest), "fetch", "origin"], capture_output=True)
+    subprocess.run(["git", "-C", str(dest), "checkout", "-B", "main", "origin/main"],
+                    capture_output=True)
+
+    # Search again — the moved HEAD triggers the auto-reindex
     out = rtfm.search(query="widget protocol")
     assert any("v2" in h["snippet"] for h in out["results"])
 
 
 def test_search_warns_when_git_repo_fetch_fails(home, tmp_path, monkeypatch):
-    """When git fetch fails, search warns and serves stale content."""
+    """When git fetch fails on a managed clone, search warns and serves stale content."""
     remote = tmp_path / "remote.git"
     subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
     seed = tmp_path / "seed"
@@ -464,12 +483,12 @@ def test_search_warns_when_git_repo_fetch_fails(home, tmp_path, monkeypatch):
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
 
-    dest = tmp_path / "dest"
+    # Clone into the managed location so the source is 'managed' (rtfm owns it)
+    dest = rtfm._managed_repo_path("specs")
     rtfm._git_clone(str(remote), "main", dest, timeout=30)
 
     conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", path=dest,
-                      url=str(remote), ref="main")
+    src = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref="main")
     rtfm.reindex_source(conn, src)
 
     # Push v2
@@ -486,7 +505,7 @@ def test_search_warns_when_git_repo_fetch_fails(home, tmp_path, monkeypatch):
     rtfm.load_manifest()
     mp = rtfm.manifest_path()
     mp.write_text(
-        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\n'
+        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\n'
     )
     out = rtfm.search(query="widget")
     # Should serve v1 (stale) with a warning
