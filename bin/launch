@@ -15,7 +15,11 @@ SERVER = ROOT / "rtfm_server.py"
 
 
 def parse_pep723_deps(server: Path) -> list[str]:
-    text = server.read_text()
+    # The repo files are UTF-8 by contract; the server module's docstring
+    # carries em-dashes, and a locale read under an ASCII locale would break
+    # the launch (the FATAL handler below reports it, but the venv fallback
+    # would fail entirely).
+    text = server.read_text(encoding="utf-8")
     block = re.search(r"# /// script\n(.*?)# ///", text, re.S)
     if not block:
         return []
