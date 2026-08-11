@@ -50,21 +50,22 @@ ADR 0007 specified `--depth 1`. A shallow clone breaks `git checkout` of older
 refs that have fallen out of the shallow history. Full clone is simpler and
 correct; disk cost is modest for document repos.
 
-### Staleness: commit-based, checked on every search
+### Staleness: commit-based, checked on every search (memoized)
 
 Staleness means the indexed commit ≠ the upstream ref. On every `search`,
 rtfm compares the commit stored in `source_meta` against the current ref
-state (per mode below) and reindexes inline when stale — no staleness window,
-no budget gate. The principle is "do the simple correct thing first, optimize
-later." A failed fetch/reindex degrades gracefully: search the
-currently-indexed content with a loud warning.
+state (per mode below) and reindexes inline when stale — no budget gate. The
+principle is "do the simple correct thing first, optimize later." A failed
+fetch/reindex degrades gracefully: search the currently-indexed content with
+a loud warning.
 
 The git_repo verdicts cost git subprocesses (and a fetch for managed sources)
-and feed the failure warning, which would otherwise repeat on every query for
-a persistently broken or dirty source — they are memoized in-process per
-source for a short window (STALENESS_TTL, 30 s). Staleness is therefore
-checked at most every 30 s per source, and a recurring warning repeats at
-most every 30 s, not on every query.
+and feed the auto-reindex attempt and its failure warning. Both are memoized
+in-process per source+ref for a short window (STALENESS_TTL, 30 s): the
+staleness check runs at most every 30 s per source, and search re-attempts a
+stale source (and re-emits its failure warning) at most every 30 s — a
+persistently broken or dirty source warns on the first query of each window,
+not on every query, and a hung network cannot block every search.
 
 The comparison is per-mode, honoring the read-only linked contract:
 
@@ -85,7 +86,8 @@ The comparison is per-mode, honoring the read-only linked contract:
   because the managed comparison is against the pin itself, not "never stale".
   Linked pins never auto-reindex: the tree is the user's checkout concern.
 
-Amends ADR 0003 (staleness window → every-query).
+Amends ADR 0003 (staleness window → every-query, memoized to at most once
+per 30 s per source).
 
 ### No `refresh` flag
 

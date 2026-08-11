@@ -214,6 +214,17 @@ def test_git_repo_linked_mode_matching_remote_is_clean(home, tmp_path):
     assert warnings == []
 
 
+def test_unknown_source_type_warns(home):
+    """An unknown type is a loud config error — a typo'd type must not load
+    silently and then be invisible to search."""
+    (home / "manifest.toml").write_text(
+        '[[source]]\nname="typoed"\ntype="Git_Repo"\nurl="https://example.com/r.git"\n'
+    )
+    sources, warnings = rtfm.load_manifest()
+    assert any("unknown type" in w and "typoed" in w for w in warnings)
+    assert any(s.name == "typoed" for s in sources)  # kept but loud
+
+
 def test_git_repo_without_url_is_dropped(home):
     """A url-less git_repo is warned about AND dropped — keeping it would make
     every search run `git clone None ...` (the whole-reindex crash of review

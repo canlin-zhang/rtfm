@@ -801,9 +801,9 @@ def test_tag_only_commit_ref_checkout(home, tmp_path):
     assert summary["files_seen"] >= 1
 
 
-def test_deleted_linked_clone_is_git_failed(home, tmp_path):
-    """A linked clone deleted on disk is GIT_FAILED ('path does not exist'), never
-    the misleading GIT_MISSING."""
+def test_deleted_linked_clone_is_path_missing(home, tmp_path):
+    """A linked clone deleted on disk is PATH_MISSING ('does not exist') with the
+    right recovery advice, never the misleading GIT_MISSING."""
     remote = tmp_path / "remote.git"
     subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
     seed = tmp_path / "seed"
@@ -881,8 +881,8 @@ def test_remote_mismatch_normalized(home, tmp_path):
 
 def test_managed_ref_less_missing_git_is_git_missing(home, tmp_path, monkeypatch):
     """A git-less machine with a ref-less managed source: the classification chain
-    must not crash on _is_sha(None) — GIT_MISSING, not a TypeError (the crash of
-    review round 2, three independent reproductions)."""
+    must not crash — the clone-failure path called _is_sha(ref) with ref=None,
+    which TypeError'd instead of producing GIT_MISSING."""
     remote = tmp_path / "remote.git"
     subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
     _no_git(monkeypatch, tmp_path)
@@ -1121,25 +1121,22 @@ def test_health_check_git_probe(home, tmp_path, monkeypatch):
     assert any("git" in issue.lower() for issue in out["issues"])
 
 
-def test_linked_corrupt_config_is_tolerated(home, tmp_path):
-    """A corrupt .git/config makes git report the remote as missing — the mismatch
-    check has nothing to compare, and the tree still indexes: no raw exception, no
-    wrong NOT_GIT_REPO classification (the managed fetch path surfaces the
-    corruption when the remote is actually needed)."""
+def test_linked_unparseable_config_is_git_failed(home, tmp_path):
+    """A genuinely unparseable .git/config fails the repo probe: classified
+    GIT_FAILED, never a raw exception or a wrong class. (A merely odd config —
+    `[core]\nbroken` is valid syntax — makes git report the remote as missing and
+    is covered by test_linked_no_origin_proceeds.)"""
     dest = tmp_path / "dest"
     subprocess.run(["git", "init", str(dest)], capture_output=True)
-    subprocess.run(["git", "-C", str(dest), "remote", "add", "origin",
-                    "https://example.com/repo.git"], capture_output=True)
     (dest / "a.md").write_text("v1\n")
     subprocess.run(["git", "-C", str(dest), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(dest), "commit", "-m", "v1"], capture_output=True)
-    (dest / ".git" / "config").write_text("[core]\nbroken")
+    (dest / ".git" / "config").write_text("[core\nbroken=")  # unparseable
     conn = rtfm.get_index_db()
     src = rtfm.Source(name="specs", type="git_repo", path=dest,
                       url="https://example.com/repo.git", ref="main")
     summary = rtfm.reindex_source(conn, src)
-    assert "error" not in summary
-    assert summary["files_seen"] >= 1
+    assert "GIT_FAILED" in summary["error"]
 
 
 def test_linked_no_origin_proceeds(home, tmp_path):
@@ -1158,8 +1155,9 @@ def test_linked_no_origin_proceeds(home, tmp_path):
 
 
 def test_managed_pin_change_detected(home, tmp_path):
-    """Changing the manifest pin from one SHA to another must be detected — the
-    old pin's content was served silently forever before round 2."""
+    """Changing the manifest pin from one SHA to another is detected — this test
+    pins the explicit reindex path; the search-triggered AUTO path (the round-2
+    fix) is pinned by test_managed_pin_change_detected_on_search."""
     remote = tmp_path / "remote.git"
     subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
     seed = tmp_path / "seed"
@@ -1200,3 +1198,232 @@ def test_reindex_purges_manifest_absent_sources(home, tmp_path):
     assert not rtfm.search_index(conn, "orphan content")
     assert conn.execute(
         "SELECT COUNT(*) FROM locations WHERE source='gone'").fetchone()[0] == 0
+
+
+# --- round-3 review batch: memo semantics, purge guard, final gaps ---
+
+def test_staleness_memo_bounds_checks_and_invalidates(home, tmp_path, monkeypatch):
+    """The verdict memo: two _stale_delta calls within the TTL run one check (one
+    fetch for managed); an explicit reindex invalidates the entry."""
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
+    (seed / "a.md").write_text("v1\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    dest = rtfm._managed_repo_path("specs")
+    rtfm._git_clone(str(remote), "main", dest, timeout=30)
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref="main")
+    rtfm.reindex_source(conn, src)
+
+    calls = []
+    real_fetch = rtfm._git_fetch
+
+    def counting_fetch(path, timeout=None):
+        calls.append(1)
+        return real_fetch(path, timeout=timeout)
+
+    monkeypatch.setattr(rtfm, "_git_fetch", counting_fetch)
+    changed, stale, cached = rtfm._stale_delta(conn, src)
+    assert (changed, stale, cached) == (0, False, False) and len(calls) == 1
+    changed, stale, cached = rtfm._stale_delta(conn, src)
+    assert cached is True and len(calls) == 1  # memoized — no second fetch
+    rtfm.reindex_source(conn, src)             # invalidates the entry (its own fetch +1)
+    changed, stale, cached = rtfm._stale_delta(conn, src)
+    assert cached is False and len(calls) == 3  # fresh check again (1 + 1 + 1)
+
+
+def test_search_does_not_reattempt_broken_source_within_ttl(home, tmp_path, monkeypatch):
+    """A broken source is attempted on the first query of each memo window only —
+    the reindex attempt and its failure warning must not repeat on every query."""
+    rtfm.load_manifest()
+    mp = rtfm.manifest_path()
+    mp.write_text(
+        f'[[source]]\nname="specs"\ntype="git_repo"\n'
+        f'url="{tmp_path / "no-such-remote.git"}"\nref="main"\n'
+    )
+    attempts = []
+    real_reindex = rtfm.reindex_source
+
+    def counting_reindex(conn, src):
+        attempts.append(src.name)
+        return real_reindex(conn, src)
+
+    monkeypatch.setattr(rtfm, "reindex_source", counting_reindex)
+
+    out1 = rtfm.search(query="widget")
+    assert len(attempts) == 1
+    assert any("CLONE_FAILED" in w for w in out1["WARNING"])
+    out2 = rtfm.search(query="widget")   # within the TTL — cached verdict
+    assert len(attempts) == 1            # no re-attempt
+    assert "WARNING" not in out2         # no repeated warning
+
+
+def test_managed_pin_change_detected_on_search(home, tmp_path):
+    """The AUTO path for a pin change: manifest edited to a new pin, the next
+    search (immediately, within any memo window) reindexes to the new pin — the
+    memo is keyed by (name, ref), so a manifest edit invalidates instantly."""
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
+    (seed / "a.md").write_text("pin v1 keyword\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    sha1 = rtfm._git_current_commit(seed)
+    (seed / "a.md").write_text("pin v2 keyword\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "v2"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    sha2 = rtfm._git_current_commit(seed)
+
+    rtfm.load_manifest()
+    mp = rtfm.manifest_path()
+
+    def write_manifest(ref):
+        mp.write_text(
+            f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="{ref}"\n'
+        )
+
+    write_manifest(sha1)
+    out = rtfm.search(query="keyword")
+    assert any("pin v1" in h["snippet"] for h in out["results"])
+    write_manifest(sha2)
+    out = rtfm.search(query="keyword")   # immediately — no 30s wait
+    assert any("pin v2" in h["snippet"] for h in out["results"])
+
+
+def test_search_dedupes_warnings_per_clone(home, tmp_path):
+    """Two sources on one dirty clone: exactly one AUTO-REINDEX FAILED warning."""
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
+    (seed / "a.md").write_text("shared keyword body\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), "main", dest, timeout=30)
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="s1", type="git_repo", path=dest, url=str(remote), ref="main")
+    src2 = rtfm.Source(name="s2", type="git_repo", path=dest, url=str(remote), ref="main")
+    rtfm.reindex_source(conn, src)
+    rtfm.reindex_source(conn, src2)
+
+    rtfm.load_manifest()
+    mp = rtfm.manifest_path()
+    mp.write_text(
+        f'[[source]]\nname="s1"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\n'
+        f'[[source]]\nname="s2"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\n'
+    )
+    (dest / "a.md").write_text("uncommitted edit\n")  # dirty the shared clone
+
+    out = rtfm.search(query="shared keyword")
+    dirty_warns = [w for w in out["WARNING"] if "DIRTY_TREE" in w]
+    assert len(dirty_warns) == 1  # one warning per clone, not per source
+
+
+def test_reindex_linked_typo_ref_warns(home, tmp_path):
+    """A linked ref that doesn't resolve is a summary warning (never an error),
+    with advice covering both a typo and a ref not yet fetched into the clone."""
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
+    (seed / "a.md").write_text("v1\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), "main", dest, timeout=30)
+
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+                      url=str(remote), ref="matser")
+    summary = rtfm.reindex_source(conn, src)
+    assert "error" not in summary
+    assert "does not resolve" in summary["warning"]
+    assert "fetch --tags" in summary["warning"]
+
+
+def test_git_clone_hex_ref_bad_url_single_attempt(home, tmp_path, monkeypatch):
+    """A hex-shaped ref with a bad URL: exactly one clone attempt — the fallback
+    retry only fires on git's 'Remote branch not found' signature."""
+    calls = []
+    real_git = rtfm._git
+
+    def counting_git(args, cwd, timeout=None, allow_exit_codes=()):
+        if args[:1] == ["clone"]:
+            calls.append(args)
+        return real_git(args, cwd=cwd, timeout=timeout, allow_exit_codes=allow_exit_codes)
+
+    monkeypatch.setattr(rtfm, "_git", counting_git)
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="specs", type="git_repo",
+                      url=str(tmp_path / "no-such-remote.git"), ref="a" * 40)
+    summary = rtfm.reindex_source(conn, src)
+    assert "CLONE_FAILED" in summary["error"]
+    assert len(calls) == 1
+
+
+def test_reindex_malformed_manifest_does_not_purge(home, tmp_path):
+    """A malformed manifest must not wipe the index — the purge only runs on a
+    parsed manifest (SQLite's `NOT IN ()` is true for every row; round 3's wipe)."""
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "a.md").write_text("survivor keyword\n")
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, rtfm.Source(name="docs", type="dir", path=d))
+    mp = rtfm.manifest_path()
+    mp.write_text("[[source\nbroken")  # unparseable TOML
+    resp = rtfm.reindex()
+    assert "purged_sources" not in resp
+    assert rtfm.search_index(conn, "survivor keyword")  # rows survived
+
+
+def test_search_sources_searched_respects_filter(home, tmp_path):
+    """sources_searched reflects the sources actually iterated, not the whole
+    manifest — a filtered search must not claim it searched everything."""
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "a.md").write_text("filtered keyword body\n")
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, rtfm.Source(name="docs", type="dir", path=d))
+    rtfm.load_manifest()
+    mp = rtfm.manifest_path()
+    mp.write_text(
+        f'[[source]]\nname="docs"\ntype="dir"\npath="{d}"\n'
+        '[[source]]\nname="typoed"\ntype="Git_Repo"\nurl="https://example.com/r.git"\n'
+    )
+    out = rtfm.search(query="filtered keyword", source="docs")
+    assert out["sources_searched"] == ["docs"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
+def test_reindex_unreadable_clone_is_git_failed(home, tmp_path):
+    """A chmod-000 linked clone: the OSError wrap classifies GIT_FAILED instead
+    of leaking a raw PermissionError past the RuntimeError-only guards."""
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
+    seed = tmp_path / "seed"
+    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
+    (seed / "a.md").write_text("v1\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), "main", dest, timeout=30)
+    dest.chmod(0o000)
+    try:
+        conn = rtfm.get_index_db()
+        src = rtfm.Source(name="specs", type="git_repo", path=dest,
+                          url=str(remote), ref="main")
+        summary = rtfm.reindex_source(conn, src)
+        assert "GIT_FAILED" in summary["error"]
+    finally:
+        dest.chmod(0o755)  # let pytest clean up the tmp dir

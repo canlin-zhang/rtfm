@@ -65,7 +65,8 @@ def _git_timeout() -> int:
 
 def _git(args: list[str], cwd: Path, timeout: int | None = None,
          allow_exit_codes: tuple[int, ...] = ()) -> subprocess.CompletedProcess:
-    """Run a git command. Raises RuntimeError on non-zero exit or timeout.
+    """Run a git command. Raises RuntimeError on non-zero exit, timeout, or
+    subprocess failure (missing/untraversable cwd, missing git binary, permissions).
     `allow_exit_codes` are non-zero exits that are legitimate answers, not failures
     (git merge-base --is-ancestor exits 1 for a genuine 'not an ancestor')."""
     t = timeout if timeout is not None else _git_timeout()
@@ -199,8 +200,9 @@ def _git_clone(url: str, ref: str | None, dest: Path, timeout: int | None = None
     except RuntimeError as e:
         # A hex-shaped ref might be a branch named like a SHA (git treats it as a
         # branch name — the --branch form above already succeeded for those) or a
-        # true pinned SHA, which git rejects in --branch. Clone the default branch
-        # and let _git_checkout perform the detached checkout of the pinned SHA.
+        # true pinned SHA, which git rejects in --branch (its error: "Remote branch
+        # <sha> not found"). Only THAT failure retries — a bad URL or network error
+        # must raise immediately, not pay for a second full clone.
         if not (ref and _is_sha(ref)) or "Remote branch" not in str(e):
             raise
         args[1:3] = []                       # drop --branch <ref>, keep url + dest
@@ -803,7 +805,7 @@ def _reindex_git_repo(conn: sqlite3.Connection, src: Source) -> dict:
         "git_commit=excluded.git_commit, git_commit_date=excluded.git_commit_date",
         (src.name, commit, commit_date))
     conn.commit()
-    _staleness_cache.pop(src.name, None)  # a fresh index makes the cached verdict stale
+    _staleness_cache.pop((src.name, src.ref), None)  # a fresh index makes the cached verdict stale
 
     # Now run the file-level indexing (shared core with dir sources)
     summary = {"source": src.name, "commit": commit, "commit_date": commit_date}
@@ -815,7 +817,9 @@ def _reindex_git_repo(conn: sqlite3.Connection, src: Source) -> dict:
             # the typo where the work happens, not only in list_sources' 'unknown'.
             summary["warning"] = (
                 f"ref '{src.ref}' does not resolve in the clone — check the ref "
-                f"spelling in the manifest (list_sources reports 'unknown').")
+                f"spelling in the manifest, or the ref may not be fetched into the "
+                f"clone yet (run 'git fetch --tags' there); list_sources reports "
+                f"'unknown'.")
     summary.update(_index_files(conn, src.name, repo_path))
     return summary
 
@@ -843,41 +847,43 @@ def reindex_source(conn: sqlite3.Connection, src: Source) -> dict:
 STALENESS_TTL = 30  # seconds: git_repo verdicts are memoized in-process for this long
 
 
-def _stale_delta(conn: sqlite3.Connection, src: Source) -> tuple[int, bool]:
+def _stale_delta(conn: sqlite3.Connection, src: Source) -> tuple[int, bool, bool]:
     """Cheap staleness check. Dispatches on source type.
-    Returns (changed, stale):
+    Returns (changed, stale, cached):
       changed  count of new/changed items (files for dir, always 0 for git_repo)
       stale    whether the index differs from reality
+      cached   True when a git_repo verdict came from the memo (<= STALENESS_TTL old)
 
     git_repo verdicts cost git subprocesses (and a fetch for managed sources) and
-    feed the auto-reindex failure warning, which would otherwise repeat on every
-    query for a persistently broken or dirty source — they are memoized per source
-    for STALENESS_TTL seconds (ADR 0013: staleness is checked at most every 30 s,
-    not on every query).
+    feed the auto-reindex attempt and its failure warning — both are memoized per
+    source+ref for STALENESS_TTL seconds (ADR 0013): the check runs at most every
+    30 s, and search re-attempts a stale source at most every 30 s, so a
+    persistently broken or dirty source warns on the first query of each window,
+    not on every query.
     """
     if src.type == "git_repo":
         now = time.monotonic()
-        hit = _staleness_cache.get(src.name)
+        hit = _staleness_cache.get((src.name, src.ref))
         if hit and now - hit[0] < STALENESS_TTL:
-            return 0, hit[1]
+            return 0, hit[1], True
         _, stale = _stale_delta_git_repo(conn, src)
-        _staleness_cache[src.name] = (now, stale)
-        return 0, stale
+        _staleness_cache[(src.name, src.ref)] = (now, stale)
+        return 0, stale, False
     # dir sources: stat + (relpath, mtime) compare — no hashing or extraction.
     # `changed` counts files that would need fresh extraction and bounds the cost of an
     # inline auto-reindex (see _auto_reindex_max); `stale` also catches files that vanished
     # on disk (a reindex purges them essentially for free, so they don't inflate `changed`).
     if src.path is None or not src.path.exists():
-        return 0, False
+        return 0, False, False
     indexed = {r[0]: r[1] for r in conn.execute(
         "SELECT relpath, mtime FROM locations WHERE source=?", (src.name,))}
     on_disk = {str(f.relative_to(src.path)): f.stat().st_mtime for f in iter_source_files(src)}
     changed = sum(1 for rel, mtime in on_disk.items() if indexed.get(rel) != mtime)
     stale = changed > 0 or set(indexed) != set(on_disk)   # latter catches vanished files
-    return changed, stale
+    return changed, stale, False
 
 
-_staleness_cache: dict[str, tuple[float, bool]] = {}
+_staleness_cache: dict[tuple[str, str | None], tuple[float, bool]] = {}
 
 
 def _stale_delta_git_repo(conn: sqlite3.Connection, src: Source) -> tuple[int, bool]:
@@ -1060,7 +1066,11 @@ def _validate_source(s: Source) -> str | None:
                         f"origin with 'git remote set-url origin {s.url}'.")
         return None
     if s.type != "dir":
-        return None
+        # An unknown type is a config error like any other — silent skipping made a
+        # typo'd source invisible AND made sources_searched claim it was searched.
+        return (f"!!! INVALID SOURCE '{s.name}' !!! unknown type '{s.type}' — "
+                f"expected 'dir' or 'git_repo'. Recover: fix 'type' in "
+                f"{manifest_path()}.")
     if s.path is None:
         return (f"!!! INVALID SOURCE '{s.name}' !!! dir source has no 'path' — skipping it. "
                 f"Recover: add path = \"...\" in {manifest_path()}.")
@@ -1366,7 +1376,7 @@ def search(query: str, source: str | None = None, max_files: int = 20,
         if s.type not in ("dir", "git_repo"):
             continue
         try:                                         # one source's refresh never fails the query
-            changed, stale = _stale_delta(conn, s)
+            changed, stale, cached = _stale_delta(conn, s)
             if not stale:
                 continue
             if s.type == "dir":
@@ -1377,20 +1387,32 @@ def search(query: str, source: str | None = None, max_files: int = 20,
                         f"!!! STALE SOURCE '{s.name}' !!! {changed} new/changed files exceed the "
                         f"auto-reindex budget ({budget}) — searching previously indexed content "
                         f"only. Recover: run reindex('{s.name}').")
+            elif cached:
+                # The verdict came from the memo (<= STALENESS_TTL old): the reindex
+                # attempt and its failure warning run once per window, not on every
+                # query — a persistently broken or dirty source must not block or
+                # spam every search (ADR 0013).
+                continue
             else:  # git_repo — always auto-reindex, budget doesn't apply
                 result = reindex_source(conn, s)
+                # Multiple sources on one clone (or one broken remote) would
+                # otherwise repeat the identical warning once per source.
+                key = (s.path if s.path is not None
+                       else str(_managed_repo_path(s.name)))
+                message = None
                 if isinstance(result, dict) and result.get("error"):
-                    # Multiple sources on one clone (or one broken remote) would
-                    # otherwise repeat the identical warning once per source.
-                    key = (s.path if s.path is not None
-                           else str(_managed_repo_path(s.name)))
+                    message = (f"!!! AUTO-REINDEX FAILED '{s.name}' !!! {result['error']} — "
+                               f"searching previously indexed content only. "
+                               f"Recover: run reindex('{s.name}').")
+                elif isinstance(result, dict) and result.get("warning"):
+                    # A non-blocking warning (e.g. a linked ref that doesn't
+                    # resolve) — surface it when a refresh does run.
+                    message = f"!!! SOURCE WARNING '{s.name}' !!! {result['warning']}"
+                if message:
                     if key in warned_repo_paths:
                         continue
                     warned_repo_paths.add(key)
-                    warnings.append(
-                        f"!!! AUTO-REINDEX FAILED '{s.name}' !!! {result['error']} — "
-                        f"searching previously indexed content only. "
-                        f"Recover: run reindex('{s.name}').")
+                    warnings.append(message)
         except Exception as e:
             warnings.append(
                 f"!!! AUTO-REINDEX FAILED '{s.name}' !!! {type(e).__name__}: {e} — searching "
@@ -1403,7 +1425,9 @@ def search(query: str, source: str | None = None, max_files: int = 20,
         warnings.append(
             f"!!! INDEX ERROR !!! {e} — the search index looks corrupt or busy. "
             f"Recover: run reindex() to rebuild it.")
-    resp: dict = {"results": hits, "sources_searched": [s.name for s in sources]}
+    resp: dict = {"results": hits,
+                  "sources_searched": [s.name for s in sources if s.type in ("dir", "git_repo")
+                                       and (source is None or s.name == source)]}
     if any(h.get("fuzzy") for h in hits):                # OR/BM25 fallback — terms didn't co-occur
         resp["fuzzy"] = True
     if warnings:
@@ -1425,18 +1449,26 @@ def reindex(source: str | None = None) -> dict:
     if source is not None and not targets:
         return {"error": f"source '{source}' not found. Call list_sources()."}
     # Rebuild semantics: sources removed from the manifest (or dropped at load, e.g.
-    # url-less git_repo) must not keep serving their leftover index rows.
+    # url-less git_repo) must not keep serving their leftover index rows. Guarded on
+    # a non-empty manifest: with none (unparseable, or all sources commented out)
+    # the purge must NOT run — `x NOT IN ()` is true for every row in SQLite, so an
+    # unguarded purge wipes the whole index exactly when the user is mid-edit.
     manifest_names = {s.name for s in sources}
-    dropped = [r[0] for r in conn.execute(
-        "SELECT DISTINCT source FROM locations WHERE source NOT IN "
-        f"({','.join('?' * len(manifest_names))})", tuple(manifest_names))]
-    for name in dropped:
-        conn.execute("DELETE FROM locations WHERE source=?", (name,))
-        conn.execute("DELETE FROM source_meta WHERE source=?", (name,))
-        _staleness_cache.pop(name, None)
-    if dropped:
-        conn.commit()
+    dropped: list[str] = []
+    if manifest_names:
+        dropped = [r[0] for r in conn.execute(
+            "SELECT DISTINCT source FROM locations WHERE source NOT IN "
+            f"({','.join('?' * len(manifest_names))})", tuple(manifest_names))]
+        for name in dropped:
+            conn.execute("DELETE FROM locations WHERE source=?", (name,))
+            conn.execute("DELETE FROM source_meta WHERE source=?", (name,))
+            for key in [k for k in _staleness_cache if k[0] == name]:
+                _staleness_cache.pop(key, None)
+        if dropped:
+            conn.commit()
     resp: dict = {"reindexed": [reindex_source(conn, s) for s in targets]}
+    if dropped:
+        resp["purged_sources"] = dropped
     if warnings:
         resp["WARNING"] = warnings
     return resp
