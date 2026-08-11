@@ -37,21 +37,26 @@ def _fail(msg: str) -> int:
     return 1
 
 
-def _read(name: str, loader: Callable[[str], dict]) -> dict:
-    """Read + parse a config file, or exit with a clean error instead of a traceback."""
-    path = ROOT / name
+def _read_text(path: Path) -> str:
+    """Read a repo file, or exit with a clean error instead of a traceback."""
     try:
         # The repo files are UTF-8 by contract; an explicit encoding keeps the
         # failure message honest under ASCII locales.
-        return loader(path.read_text(encoding="utf-8"))
+        return path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        sys.exit(f"ERROR: {name} not found")
+        sys.exit(f"ERROR: {path} not found")
     except OSError as e:
-        sys.exit(f"ERROR: {name}: {e}")
+        sys.exit(f"ERROR: {path}: {e}")
+    except UnicodeDecodeError as e:
+        sys.exit(f"ERROR: {path} not UTF-8 text: {e}")
+
+
+def _read(name: str, loader: Callable[[str], dict]) -> dict:
+    """Read + parse a config file, or exit with a clean error instead of a traceback."""
+    try:
+        return loader(_read_text(ROOT / name))
     except (tomllib.TOMLDecodeError, json.JSONDecodeError) as e:
         sys.exit(f"ERROR: {name} unparseable: {e}")
-    except UnicodeDecodeError as e:
-        sys.exit(f"ERROR: {name} not UTF-8 text: {e}")
 
 
 def _key(name: str, container: object, *keys: str):
@@ -66,14 +71,7 @@ def _key(name: str, container: object, *keys: str):
 
 
 def _read_pep723_deps(server: Path) -> list[str]:
-    try:
-        lines = server.read_text(encoding="utf-8").splitlines()
-    except FileNotFoundError:
-        sys.exit(f"ERROR: {server} not found")
-    except OSError as e:
-        sys.exit(f"ERROR: {server}: {e}")
-    except UnicodeDecodeError as e:
-        sys.exit(f"ERROR: {server}: not UTF-8 text: {e}")
+    lines = _read_text(server).splitlines()
     start = next((i for i, line in enumerate(lines) if line == "# /// script"), None)
     end = next((i for i, line in enumerate(lines) if line == "# ///"), None)
     if start is None or end is None or end <= start:
@@ -133,7 +131,11 @@ def main() -> int:
     if len(set(versions.values())) > 1:
         for name, v in versions.items():
             print(f"  {name}: {v}")
-        return _fail("release version differs across files; run scripts/bump_version.py")
+        return _fail(
+            "release version differs across files; run scripts/bump_version.py once "
+            "pyproject.toml and plugin.json agree (it refuses while they disagree), "
+            "or align the versions by hand"
+        )
 
     # Guard against a bare-string deps list: set() would iterate its characters
     # and compare equal for any matching strings. uv itself rejects this, so the
