@@ -367,7 +367,7 @@ def test_checker_and_launcher_parsers_agree_on_real_server():
 # discriminate a strip-removal regression. "\\t" is written as the escape so
 # both TOML and JSON parse it to a tab (a raw tab would break the JSON case).
 @pytest.mark.parametrize("blank_version", ["", "   ", "\\t"])
-def test_check_blank_versions_are_clean_error(tmp_path, monkeypatch, blank_version):
+def test_check_blank_versions_are_clean_error(tmp_path, monkeypatch, capsys, blank_version):
     """Blank versions (empty or whitespace-only) in all three files would
     pass the isinstance guard and set-equality as 'OK' — the guard must
     refuse the shape and name the offending files."""
@@ -387,6 +387,7 @@ def test_check_blank_versions_are_clean_error(tmp_path, monkeypatch, blank_versi
         encoding="utf-8",
     )
     assert run_check(tmp_path, monkeypatch) == 1
+    assert "offending:" in capsys.readouterr().err  # the guard names the files
 
 
 def test_check_prints_drift_under_ascii_locale(tmp_path):
@@ -813,28 +814,44 @@ def test_bump_write_failure_is_clean_error_with_revert_instructions(tmp_path, mo
 
 
 def test_bump_self_check_failure_aborts(tmp_path, monkeypatch):
+    """The gate's ran-and-failed class: the bump's own edits are consistent
+    (the check only compares declared strings, which the bump kept in sync),
+    so the advice restores nothing of the bump's — it names the drift or the
+    check script and points at verification. Same advice in both modes, so
+    this one pin covers the lock-only path too."""
     make_tree(tmp_path)
     fake, _ = make_runner(self_check_ok=1)
     with pytest.raises(SystemExit) as exc:
         run_bump(tmp_path, monkeypatch, runner=fake)
     msg = str(exc.value.code)
     assert "post-bump consistency check" in msg
-    assert "Restore the bump's edits with: git checkout pyproject.toml" in msg
-    assert "fix the drift" in msg
-    assert "retry: python3 scripts/bump_version.py 0.5.2" in msg  # the normal-path gate retry
-
-
-def test_bump_self_check_failure_lock_only_advice(tmp_path, monkeypatch):
-    """The lock-only gate's ran-and-failed class: the advice restores only
-    uv.lock (the bump's edits in this mode) and never the unmodified files."""
-    make_tree(tmp_path, version="0.5.2", lock_version="0.5.1")
-    fake, _ = make_runner(self_check_ok=1)
-    with pytest.raises(SystemExit) as exc:
-        run_bump(tmp_path, monkeypatch, new_version="0.5.2", runner=fake)
-    msg = str(exc.value.code)
-    assert "Restore the bump's edits with: git checkout uv.lock" in msg
-    assert "fix the drift" in msg
+    assert "The bump's own edits are consistent" in msg
+    assert "Fix the drift" in msg
+    assert "git checkout scripts/check_version_consistency.py" in msg
     assert "git checkout pyproject.toml" not in msg
+    assert "verify with" in msg
+
+
+def test_bump_interrupt_mid_write_lock_only_hedge(tmp_path, monkeypatch):
+    """A Ctrl-C during the writes in the lock-only path is a real truncation
+    hazard (open('w') truncates before writing): the files are byte-identical
+    only after BOTH writes complete, so the interrupt message must keep the
+    'may be edited' hedge with the full restore — never claim the files were
+    NOT modified."""
+    make_tree(tmp_path, version="0.5.2", lock_version="0.5.1")
+    real_write_text = Path.write_text
+
+    def interrupt_on_first_write(self, *args, **kwargs):
+        real_write_text(self, *args, **kwargs)
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(bump.Path, "write_text", interrupt_on_first_write)
+    with pytest.raises(SystemExit) as exc:
+        run_bump(tmp_path, monkeypatch, new_version="0.5.2")
+    msg = str(exc.value.code)
+    assert "may be edited" in msg
+    assert "were NOT modified" not in msg
+    assert "git checkout pyproject.toml" in msg
 
 
 def test_bump_self_check_exit0_without_ok_line_exits_1(tmp_path, monkeypatch):

@@ -163,6 +163,7 @@ def main() -> int:
     new_plugin = _plan_edit(
         plugin_json, plugin_text, re.compile(r'^(\s*"version": ")[^"]+(",?)$', re.M), new_version
     )
+    writes_completed = False
     try:
         try:
             # Explicit UTF-8 on the writes too: the files carry em-dashes, and
@@ -171,10 +172,15 @@ def main() -> int:
             # handler.
             pyproject.write_text(new_pyproject, encoding="utf-8")
             plugin_json.write_text(new_plugin, encoding="utf-8")
+            writes_completed = True
         except OSError as e:
+            # A failed write can leave a file truncated — the restore must
+            # cover pyproject/plugin.json here even in the lock-only path,
+            # where the shared `restore` names only uv.lock (both writes
+            # succeeded before the uv-phase branches fire).
             sys.exit(
                 f"ERROR: write failed: {e}; pyproject.toml and plugin.json may be "
-                f"half-edited. Restore and retry: {restore} && {retry}"
+                f"half-edited. Restore and retry: {RESTORE} && {retry}"
             )
 
         try:
@@ -203,15 +209,21 @@ def main() -> int:
                 f"Restore and retry: {restore} && {retry}"
             )
     except KeyboardInterrupt:
-        # Lock-only: the files are never modified (byte-identical writes), so
-        # state_clause is the honest claim. Normal path: an interrupt can land
-        # mid-write, so hedge.
-        state = (
-            state_clause
-            if lock_only
-            else "pyproject.toml and plugin.json may be edited and uv.lock stale"
+        # Lock-only after both writes: the files are byte-identical, so the
+        # claim and the uv.lock-only restore are honest. Anywhere else — the
+        # mid-write window (open('w') truncates before writing; a Ctrl-C
+        # there is a real truncation hazard) or the normal path — hedge with
+        # the full restore.
+        if lock_only and writes_completed:
+            sys.exit(
+                "ERROR: interrupted; uv.lock may be stale and "
+                "pyproject.toml/plugin.json were NOT modified. Restore and "
+                f"retry: {restore} && {retry}"
+            )
+        sys.exit(
+            "ERROR: interrupted; pyproject.toml and plugin.json may be edited "
+            f"and uv.lock stale. Restore and retry: {RESTORE} && {retry}"
         )
-        sys.exit(f"ERROR: interrupted; {state}. Restore and retry: {restore} && {retry}")
 
     # Reject a FIFO before running: open() on one blocks until a writer
     # appears, and the run would hang until the timeout. stat() + S_ISREG
@@ -258,15 +270,25 @@ def main() -> int:
         )
 
     if check.returncode != 0:
-        # The check ran and reported drift; its report is echoed above.
+        # The check ran and exited nonzero: it reported drift, or it crashed
+        # (a broken script's traceback lands here too — the echoed report
+        # above shows which). Either way the bump's own edits are consistent
+        # with each other — the check only compares declared strings, which
+        # the bump kept in sync and uv lock regenerated — so restoring or
+        # re-running the bump is never the fix.
         _echo(check.stdout)
         sys.exit(
-            f"ERROR: post-bump consistency check did not pass. Restore the bump's "
-            f"edits with: {restore}, fix the drift reported above, then retry: {retry}"
+            "ERROR: post-bump consistency check did not pass (report above). The "
+            "bump's own edits are consistent; the check found a problem it did "
+            "not create. Fix the drift listed above, or if the report is not a "
+            "drift listing, restore the check script with: git checkout "
+            "scripts/check_version_consistency.py (discards any uncommitted "
+            "edits to that file); then verify with: "
+            "python3 scripts/check_version_consistency.py"
         )
     if "OK: version and dependency declarations are consistent" not in check.stdout:
-        # Exited 0 without the OK verdict — the check never really ran (a
-        # replaced or truncated script exits 0 silently). Requiring the verdict
+        # Exited 0 without the OK verdict — the check never really ran (an
+        # empty or replaced script exits 0 silently). Requiring the verdict
         # (the check script's exact success line — keep the two in sync)
         # catches that class; a replacement that prints the OK line is out of
         # scope for a local script.
