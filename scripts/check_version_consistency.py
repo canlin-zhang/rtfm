@@ -131,7 +131,11 @@ def main() -> int:
     if len(set(versions.values())) > 1:
         for name, v in versions.items():
             print(f"  {name}: {v}")
-        return _fail("release version differs across files; run scripts/bump_version.py")
+        return _fail(
+            "release version differs across files; run scripts/bump_version.py once "
+            "pyproject.toml and plugin.json agree (it refuses while they disagree), "
+            "or align the versions by hand"
+        )
 
     # Guard against a bare-string deps list: set() would iterate its characters
     # and compare equal for any matching strings. uv itself rejects this, so the
