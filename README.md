@@ -43,10 +43,13 @@ build it once:
 reindex("vendor-docs")
 ```
 
-Searches are instant afterward. Pointed-to sources are **not** indexed automatically — a search
-against an unbuilt source returns a warning telling you to `reindex` it. Byte-identical files
-that repeat across version subfolders are extracted once; `find_duplicates` lists every path a
-given content lives at.
+Searches are instant afterward. `dir` sources auto-reindex inline when the delta is small
+(`RTFM_AUTO_REINDEX_MAX`, default 10); a larger delta returns a warning telling you to run
+`reindex` once. `git_repo` sources are the exception to the budget: a stale or never-indexed
+source always auto-reindexes inline on search — no budget gate, warns loudly on failure —
+including the initial clone for managed sources, so the first search over a fresh corpus can
+take a while. Byte-identical files that repeat across version subfolders are extracted once;
+`find_duplicates` lists every path a given content lives at.
 
 ## Use
 

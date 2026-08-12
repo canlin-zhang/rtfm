@@ -1,10 +1,13 @@
 # rtfm source manifest. Copy to ~/.rtfm/manifest.toml and edit.
 # Each [[source]] is one place rtfm indexes, in place.
 #
-# search keeps sources current automatically: when a source has only a few new/changed files
-# (RTFM_AUTO_REINDEX_MAX, default 10) it is reindexed inline, so dropping or editing a handful of
-# files just works. A larger batch is NOT auto-indexed — that would block the query on extraction
-# — so search warns and you run `reindex("<name>")` once. Two modes follow from this:
+# search keeps sources current automatically: when a dir source has only a few new/changed
+# files (RTFM_AUTO_REINDEX_MAX, default 10) it is reindexed inline, so dropping or editing a
+# handful of files just works. A larger batch is NOT auto-indexed — that would block the query
+# on extraction — so search warns and you run `reindex("<name>")` once. git_repo sources are
+# different: a stale or never-indexed git_repo auto-reindexes inline on search (no budget
+# gate, warns loudly on failure), including the initial clone for managed sources. Two modes
+# follow from this:
 #
 #   1. The "default" drop-dir — quick-and-dirty scratch. Drop a few files in, search finds them.
 #      Created for you automatically; keep it small.
@@ -24,3 +27,21 @@ mutable = true
 # type    = "dir"
 # path    = "/path/to/vendor/Documentation"
 # mutable = false
+
+# Example: a git-tracked doc repo — linked mode (user provides the clone). Read-only:
+# rtfm verifies the remote URL and a clean tree, then indexes the checkout as-is —
+# it never fetches or resets the user's clone.
+# [[source]]
+# name    = "specs"
+# type    = "git_repo"
+# url     = "https://example.com/org/specs.git"
+# ref     = "main"
+# path    = "/path/to/specs"
+
+# Example: a git-tracked doc repo — managed mode (rtfm clones to ~/.rtfm/repos/<name>/
+# and fetches + resets on every reindex).
+# [[source]]
+# name    = "docs-managed"
+# type    = "git_repo"
+# url     = "https://example.com/org/specs.git"
+# ref     = "v2.1-stable"

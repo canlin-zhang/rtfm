@@ -1,6 +1,9 @@
 # tests/test_index.py
 import os
 import sqlite3
+import subprocess
+
+from conftest import make_git_repo
 
 import rtfm_server as rtfm
 
@@ -9,7 +12,7 @@ def test_schema_is_content_addressed(home):
     conn = rtfm.get_index_db()
     assert conn.execute("PRAGMA user_version").fetchone()[0] == rtfm.SCHEMA_VERSION
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert {"contents", "locations"} <= tables
+    assert {"contents", "locations", "source_meta"} <= tables
     assert conn.execute("SELECT COUNT(*) FROM content_fts").fetchone()[0] == 0
 
 
@@ -28,9 +31,11 @@ def test_migration_drops_old_schema(home):
     assert conn.execute("PRAGMA user_version").fetchone()[0] == rtfm.SCHEMA_VERSION
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "doc_meta" not in tables                        # legacy table dropped
-    assert {"contents", "locations", "doc_fts"} <= tables   # current v3 schema present
+    assert {"contents", "locations", "doc_fts", "source_meta"} <= tables  # current v4 schema
     cols = {r[1] for r in conn.execute("PRAGMA table_info(doc_fts)")}
-    assert {"title", "headings"} <= cols                    # old doc_fts(text) rebuilt for v3
+    assert {"title", "headings"} <= cols                    # old doc_fts(text) rebuilt for v4
+    # source_meta is empty but present
+    assert conn.execute("SELECT COUNT(*) FROM source_meta").fetchone()[0] == 0
 
 
 def test_reindex_dedups_identical_files(home, tmp_path):
@@ -281,3 +286,146 @@ def test_reindex_indexes_rst_files(home, tmp_path):
     assert rows and all(r[0] == "line" for r in rows)
     assert rtfm.search_index(conn, "widget protocol flits")
     assert rtfm.search_index(conn, "credits flit pipeline downstream")
+
+
+# --- _stale_delta for git_repo ---
+
+def test_stale_delta_git_repo_current_is_not_stale(home, tmp_path, git_branch):
+    """Exercises the linked not-stale path at a fresh clone (HEAD == origin/<ref>,
+    clean tree); the HEAD-vs-origin distinction is pinned by
+    test_stale_delta_git_repo_linked_head_moved_is_stale."""
+    remote, seed, branch = make_git_repo(tmp_path, git_branch,
+                                         filename="a.md", content="hello\n")
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), branch, dest, timeout=30)
+    commit = rtfm._git_current_commit(dest)
+    commit_date = rtfm._git_commit_date(dest, "HEAD")
+    conn = rtfm.get_index_db()
+    conn.execute(
+        "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?)",
+        ("specs", commit, commit_date))
+    conn.commit()
+    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+                       url=str(remote), ref=branch)
+    changed, stale = rtfm._stale_delta_git_repo(conn, src)
+    assert stale is False
+    assert changed == 0
+
+
+def test_stale_delta_linked_dirty_is_stale(home, tmp_path, git_branch):
+    """A linked git_repo with uncommitted edits at the indexed commit is stale —
+    the reindex refusal then warns loudly on search instead of serving silently
+    absent edits (ADR 0013: dirty = refuse)."""
+    remote, seed, branch = make_git_repo(tmp_path, git_branch,
+                                         filename="a.md", content="v1\n")
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), branch, dest, timeout=30)
+    commit = rtfm._git_current_commit(dest)
+    conn = rtfm.get_index_db()
+    conn.execute(
+        "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?)",
+        ("specs", commit, "2025-01-01T00:00:00+00:00"))
+    conn.commit()
+    (dest / "a.md").write_text("uncommitted v2\n")
+    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+                      url=str(remote), ref=branch)
+    changed, stale = rtfm._stale_delta_git_repo(conn, src)
+    assert stale is True
+
+
+def test_stale_delta_pinned_sha_never_stale(home, tmp_path, git_branch):
+    """A pinned-SHA source is never stale once indexed — the pin never moves,
+    staleness is undefined (ADR 0013)."""
+    remote, seed, branch = make_git_repo(tmp_path, git_branch,
+                                         filename="a.md", content="v1\n")
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), branch, dest, timeout=30)
+    sha = rtfm._git_current_commit(dest)
+    conn = rtfm.get_index_db()
+    conn.execute(
+        "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?)",
+        ("specs", sha, "2025-01-01T00:00:00+00:00"))
+    conn.commit()
+    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+                      url=str(remote), ref=sha)
+    changed, stale = rtfm._stale_delta_git_repo(conn, src)
+    assert stale is False
+
+
+def test_stale_delta_git_repo_behind_is_stale(home, tmp_path, git_branch):
+    """A managed git_repo whose indexed commit is behind origin/<ref> is stale —
+    rtfm owns the clone, so the fetch-and-compare applies. (Linked clones are
+    read-only: only the tree's HEAD or a dirty tree matters there — see
+    test_stale_delta_git_repo_linked_head_moved_is_stale.)"""
+    remote, seed, branch = make_git_repo(tmp_path, git_branch,
+                                         filename="a.md", content="v1\n")
+    dest = rtfm._managed_repo_path("specs")
+    rtfm._git_clone(str(remote), branch, dest, timeout=30)
+    old_commit = rtfm._git_current_commit(dest)
+    (seed / "a.md").write_text("v2\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "v2"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", branch], capture_output=True)
+    conn = rtfm.get_index_db()
+    conn.execute(
+        "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?)",
+        ("specs", old_commit, "2025-01-01T00:00:00+00:00"))
+    conn.commit()
+    src = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref=branch)
+    changed, stale = rtfm._stale_delta_git_repo(conn, src)
+    assert stale is True
+
+
+def test_stale_delta_git_repo_linked_head_moved_is_stale(home, tmp_path, git_branch):
+    """A linked git_repo is stale when its HEAD moves (the user's checkout changed)
+    — and NOT stale when only the remote moved (rtfm never fetches linked clones,
+    so it cannot know; the tree is unchanged)."""
+    remote, seed, branch = make_git_repo(tmp_path, git_branch,
+                                         filename="a.md", content="v1\n")
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), branch, dest, timeout=30)
+    old_commit = rtfm._git_current_commit(dest)
+
+    # Remote moves on; the linked tree does not — not stale
+    (seed / "a.md").write_text("v2\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "v2"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", branch], capture_output=True)
+    conn = rtfm.get_index_db()
+    conn.execute(
+        "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?)",
+        ("specs", old_commit, "2025-01-01T00:00:00+00:00"))
+    conn.commit()
+    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+                      url=str(remote), ref=branch)
+    changed, stale = rtfm._stale_delta_git_repo(conn, src)
+    assert stale is False  # remote moved, tree didn't — nothing to reindex
+
+    # The USER refreshes their own clone (their fetch + checkout) — stale now
+    subprocess.run(["git", "-C", str(dest), "fetch", "origin"], capture_output=True)
+    subprocess.run(["git", "-C", str(dest), "checkout", "-B", branch, f"origin/{branch}"],
+                    capture_output=True)
+    changed, stale = rtfm._stale_delta_git_repo(conn, src)
+    assert stale is True
+
+
+def test_stale_delta_git_repo_no_source_meta_is_stale(home, tmp_path, git_branch):
+    """A git_repo with no source_meta row is always stale (never been indexed)."""
+    remote, seed, branch = make_git_repo(tmp_path, git_branch,
+                                         filename="a.md", content="hello\n")
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), branch, dest, timeout=30)
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+                       url=str(remote), ref=branch)
+    changed, stale = rtfm._stale_delta_git_repo(conn, src)
+    assert stale is True
+
+
+def test_default_branch_parses_remote_head(home, tmp_path, git_branch):
+    """_default_branch reads the remote's HEAD branch, not a hardcoded guess."""
+    remote, seed, branch = make_git_repo(tmp_path, git_branch,
+                                         filename="a.md", content="hello\n")
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), branch, dest, timeout=30)
+    assert rtfm._default_branch(dest) == branch

@@ -1,5 +1,54 @@
+import subprocess
 
 import pytest
+
+import rtfm_server as rtfm
+
+
+@pytest.fixture(autouse=True)
+def _clear_staleness_cache():
+    """The git_repo staleness memo is module-level and TTL'd — a verdict cached by
+    one test must not leak into the next (or the same test's later assertions)."""
+    rtfm._staleness_cache.clear()
+    yield
+    rtfm._staleness_cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def _git_identity(monkeypatch):
+    """Ensure every git subprocess has an identity — CI runners lack a global config."""
+    for key, val in [
+        ("GIT_AUTHOR_NAME", "rtfm-test"),
+        ("GIT_AUTHOR_EMAIL", "rtfm@test"),
+        ("GIT_COMMITTER_NAME", "rtfm-test"),
+        ("GIT_COMMITTER_EMAIL", "rtfm@test"),
+    ]:
+        monkeypatch.setenv(key, val)
+
+
+@pytest.fixture(params=["main", "master", "feat-x", "v2.0-rc1"])
+def git_branch(request):
+    """Branch names to test against — covers common defaults and edge cases."""
+    return request.param
+
+
+def make_git_repo(tmp_path, branch, remote_name="remote.git", seed_name="seed",
+                  filename="f.md", content="placeholder\n"):
+    """Create a bare remote, seed it with one commit on `branch`, push, return
+    (remote_path, seed_path, branch)."""
+    remote = tmp_path / remote_name
+    subprocess.run(
+        ["git", "-c", f"init.defaultBranch={branch}", "init", "--bare", str(remote)],
+        capture_output=True)
+    seed = tmp_path / seed_name
+    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
+    (seed / filename).write_text(content)
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "seed"],
+                   capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", branch],
+                   capture_output=True)
+    return remote, seed, branch
 
 
 @pytest.fixture
