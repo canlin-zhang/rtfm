@@ -208,3 +208,89 @@ def test_http_get_fetch_failed(monkeypatch):
 def test_throttle_delay_constant(monkeypatch):
     monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)   # fast in tests
     rtfm._throttle()                                      # must not raise
+
+
+def test_html_hrefs_extracts_all():
+    hrefs = rtfm._html_hrefs(RTD_INDEX)
+    assert "tutorial/index.html" in hrefs and "guide.html" in hrefs
+
+
+def test_llms_links_parses_markdown():
+    assert rtfm._llms_links("[Intro](index.html)\n[Guide](guide.html)") == \
+        ["index.html", "guide.html"]
+
+
+INDEX_URL = "https://docs.example.com/projects/widget/latest/index.html"
+
+
+def test_web_pages_filters_same_version():
+    hrefs = ["tutorial/index.html", "guide.html", "search.html",
+             "https://docs.example.com/projects/widget/v1.0/old.html",
+             "https://elsewhere.example.com/x.html",
+             "_static/theme.css", "genindex.html", "index.html",
+             "tutorial/"]
+    pages = rtfm._web_pages(INDEX_URL, hrefs)
+    assert pages == ["guide.html", "index.html", "tutorial/index.html"]
+
+
+def test_web_pages_normalizes_and_dedupes():
+    pages = rtfm._web_pages(INDEX_URL, ["tutorial/", "tutorial/index.html", "tutorial"])
+    assert pages == ["tutorial/index.html"]
+
+
+def _fake_fetch(pages: dict[str, str], errors: dict[str, str] | None = None) -> callable:
+    """_fetch_page-shaped fake. `pages` maps url → body; `errors` maps url → a
+    classified error string (simulating what the real fetch layer returns for
+    BLOCKED/RATE_LIMITED/etc.). `errors` is read at call time, so tests can
+    mutate it between runs."""
+    calls: list[str] = []
+    errors = errors or {}
+
+    def fetch(url: str):
+        calls.append(url)
+        if url in errors:
+            return None, errors[url]
+        body = pages.get(url)
+        if body is None:
+            return None, "ERROR:FETCH_FAILED: no fixture for " + url
+        return body.encode(), None
+
+    fetch.calls = calls
+    fetch.pages = pages        # exposed so tests can mutate the maps between runs
+    fetch.errors = errors
+    return fetch
+
+
+def test_discover_llms_txt_fast_path():
+    fetch = _fake_fetch({
+        "https://docs.example.com/projects/widget/latest/llms.txt":
+            "# Widget docs\n\n[Guide](guide.html)\n[Intro](index.html)\n",
+    })
+    pages, err = rtfm._web_discover(fetch, INDEX_URL)
+    assert err is None
+    assert pages == ["guide.html", "index.html"]
+    assert fetch.calls == ["https://docs.example.com/projects/widget/latest/llms.txt"]
+
+
+def test_discover_falls_back_to_nav_crawl():
+    fetch = _fake_fetch({INDEX_URL: RTD_INDEX})
+    pages, err = rtfm._web_discover(fetch, INDEX_URL)
+    assert err is None
+    assert pages == ["guide.html", "tutorial/index.html"]   # seed itself excluded
+
+
+def test_discover_not_readthedocs_marks_failure():
+    fetch = _fake_fetch({INDEX_URL: "<html><body><p>not docs at all</p></body></html>"})
+    pages, err = rtfm._web_discover(fetch, INDEX_URL)
+    assert pages == []
+    assert err is not None and err.startswith("ERROR:NOT_READTHEDOCS:")
+
+
+def test_discover_llms_404_falls_back_to_crawl():
+    fetch = _fake_fetch({
+        INDEX_URL: RTD_INDEX,
+        "https://docs.example.com/projects/widget/latest/llms.txt": "404 page",
+    })
+    pages, err = rtfm._web_discover(fetch, INDEX_URL)
+    assert err is None
+    assert pages == ["guide.html", "tutorial/index.html"]

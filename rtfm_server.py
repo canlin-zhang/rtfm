@@ -161,6 +161,99 @@ def _fetch_page(url: str) -> tuple[bytes | None, str | None]:
     _throttle()
     return _http_get(url)
 
+
+_WEB_EXCLUDED_NAMES = {"search.html", "genindex.html", "py-modindex.html", "404.html", "llms.txt"}
+
+
+def _html_hrefs(html_text: str) -> list[str]:
+    # Parameter deliberately NOT named `html` — it would shadow the html module
+    # and break `html.parser.HTMLParser` inside the class body.
+    class _Links(html.parser.HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.hrefs: list[str] = []
+
+        def handle_starttag(self, tag: str, attrs: list) -> None:
+            if tag == "a":
+                for k, v in attrs:
+                    if k == "href" and v:
+                        self.hrefs.append(v)
+
+    p = _Links()
+    p.feed(html_text)
+    p.close()
+    return p.hrefs
+
+
+def _llms_links(text: str) -> list[str]:
+    """Markdown link destinations from an llms.txt body."""
+    return re.findall(r"\[[^\]]*\]\(([^)]+)\)", text)
+
+
+def _web_pages(index_url: str, hrefs: list[str]) -> list[str]:
+    """Same-version page paths (relative to the version root) from hrefs.
+
+    A link is a page iff it resolves (urljoin against the index URL) to the same
+    netloc, its path starts with the version root, and its basename is not an
+    excluded artifact (search/genindex/etc.). Paths normalize to cache-relative
+    form: '/projects/widget/latest/tutorial/' → 'tutorial/index.html',
+    '/projects/widget/latest/' → 'index.html', 'guide.html' stays. Deduped,
+    sorted."""
+    scheme, netloc, root = _web_url_parts(index_url)
+    out: list[str] = []
+    seen: set[str] = set()
+    for href in hrefs:
+        u = urllib.parse.urljoin(index_url, href.strip())
+        p = urllib.parse.urlsplit(u)
+        if p.scheme not in ("http", "https") or p.netloc != netloc:
+            continue
+        path = p.path
+        if not path.startswith(root):
+            continue
+        if "/_static/" in path or "/_sources/" in path:
+            continue
+        if path.rsplit("/", 1)[-1] in _WEB_EXCLUDED_NAMES:
+            continue
+        canon = path[len(root):].rstrip("/")
+        if canon.endswith(".html"):
+            pass
+        elif canon == "":
+            canon = "index.html"
+        else:
+            canon = canon + "/index.html"
+        if canon not in seen:
+            seen.add(canon)
+            out.append(canon)
+    return sorted(out)
+
+
+def _web_discover(fetch, index_url: str) -> tuple[list[str], str | None]:
+    """Page list for a readthedocs flavor source. llms.txt fast-path first: one
+    fetch yields the complete page list when the project opts in (most don't —
+    all probes 404'd, so the crawl is the common path). The crawl harvests the
+    index page's links (the RTD sidebar carries the full toctree) and verifies
+    the index page is actually RTD-shaped: a page with no div[role="main"] is
+    the trust-the-URL failure signal (NOT_READTHEDOCS), and we refuse to crawl
+    an arbitrary site."""
+    llms_url = urllib.parse.urljoin(index_url, "llms.txt")
+    data, err = fetch(llms_url)
+    if err is None and data:
+        pages = _web_pages(index_url, _llms_links(data.decode(errors="replace")))
+        if pages:
+            return pages, None
+    data, err = fetch(index_url)
+    if err is not None:
+        return [], err
+    html = data.decode(errors="replace")
+    title, _, lines = _html_to_text(html)
+    if not lines:
+        return [], (
+            "ERROR:NOT_READTHEDOCS: the page has no div[role=\"main\"] content — "
+            "this doesn't look like a ReadTheDocs site. Recover: check the url in "
+            "the manifest, or use a different source type.")
+    pages = _web_pages(index_url, _html_hrefs(html))
+    return [p for p in pages if p != "index.html"], None
+
 # --- git operations ----------------------------------------------------------
 
 def _git(args: list[str], cwd: Path, timeout: int | None = None,
