@@ -33,7 +33,7 @@ _log = logging.getLogger("rtfm")
 
 TEXT_EXTS = {".txt", ".md", ".rst", ".rest", ".html"}   # text → line locators; html → main-region text
 CHUNK_LINES = 50
-SCHEMA_VERSION = 4                   # index DB is a cache; mismatch ⇒ drop & rebuild
+SCHEMA_VERSION = 5                   # index DB is a cache; mismatch ⇒ drop & rebuild
 MAX_LOCATIONS = 5                    # default cap on locations listed per search hit
 
 
@@ -253,6 +253,137 @@ def _web_discover(fetch, index_url: str) -> tuple[list[str], str | None]:
             "the manifest, or use a different source type.")
     pages = _web_pages(index_url, _html_hrefs(html))
     return [p for p in pages if p != "index.html"], None
+
+
+def _sitemap_lastmod(data: bytes, version_root: str) -> str | None:
+    """The <lastmod> of the version-index sitemap entry whose <loc> path matches
+    version_root — a cheap 'upstream built at' timestamp. None when the sitemap
+    doesn't parse or has no matching entry (custom sitemaps; the skip-optimization
+    degrades to always-crawl)."""
+    text = data.decode(errors="replace")
+    for block in re.findall(r"<url>(.*?)</url>", text, re.S):
+        loc = re.search(r"<loc>(.*?)</loc>", block, re.S)
+        lm = re.search(r"<lastmod>(.*?)</lastmod>", block, re.S)
+        if loc and lm:
+            path = urllib.parse.urlsplit(loc.group(1).strip()).path.rstrip("/") + "/"
+            if path == version_root:
+                return lm.group(1).strip()
+    return None
+
+
+def _web_version(version_root: str) -> str:
+    """Best-effort version name: the last path segment of the version root
+    ('/projects/ansible/latest/' → 'latest'). The URL is the identity; this is
+    display metadata only."""
+    return version_root.rstrip("/").rsplit("/", 1)[-1]
+
+
+def _web_meta(conn: sqlite3.Connection, name: str) -> dict | None:
+    row = conn.execute(
+        "SELECT url, version, fetched_at, page_count, total_pages, lastmod, status, error "
+        "FROM web_meta WHERE source=?", (name,)).fetchone()
+    if row is None:
+        return None
+    return {"url": row[0], "version": row[1], "fetched_at": row[2], "page_count": row[3],
+            "total_pages": row[4], "lastmod": row[5], "status": row[6], "error": row[7]}
+
+
+def _web_meta_write(conn: sqlite3.Connection, src: Source, *, version: str,
+                    fetched_at: float, page_count: int, total_pages: int,
+                    lastmod: str | None, status: str, error: str | None) -> None:
+    conn.execute(
+        "INSERT INTO web_meta(source, url, version, fetched_at, page_count, total_pages, "
+        "lastmod, status, error) VALUES(?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(source) DO UPDATE SET url=excluded.url, version=excluded.version, "
+        "fetched_at=excluded.fetched_at, page_count=excluded.page_count, "
+        "total_pages=excluded.total_pages, lastmod=excluded.lastmod, "
+        "status=excluded.status, error=excluded.error",
+        (src.name, src.url or "", version, fetched_at, page_count, total_pages,
+         lastmod, status, error))
+    conn.commit()
+
+
+def _web_fail(conn: sqlite3.Connection, src: Source, error: str) -> dict:
+    """Record a failed reindex (status='error') and return the error summary. Prior
+    cache and index rows are left untouched — prior content stays searchable and
+    the failure is loud via web_status and search's sources_failed/warning."""
+    try:
+        _, _, root = _web_url_parts(src.url or "")
+    except ValueError:
+        root = "/"
+    _web_meta_write(conn, src, version=_web_version(root), fetched_at=time.time(),
+                    page_count=0, total_pages=0, lastmod=None, status="error", error=error)
+    return {"source": src.name, "error": error}
+
+
+def _reindex_web(conn: sqlite3.Connection, src: Source) -> dict:
+    """Fetch + index a web source. Flow:
+    1. Probe the domain-root sitemap's per-version lastmod. If the previous run
+       completed (status ok/truncated) and lastmod is unchanged → "up to date",
+       skip the crawl entirely. CDN-lagged or unparseable sitemaps degrade to crawl.
+    2. Discover the page list (llms.txt fast-path, else the index-page nav crawl).
+    3. Fetch each page (throttled, capped at _web_max_pages); a host-level failure
+       (BLOCKED/RATE_LIMITED) aborts; an individual page 404/failure is skipped and
+       counted. Write raw HTML into the cache mirroring the URL tree.
+    4. Purge cache files no longer in the page set; hand the cache to the shared
+       _index_files core (content-addressed → unchanged pages cost nothing).
+    5. Record web_meta: version, page_count, total_pages, lastmod, status."""
+    try:
+        scheme, netloc, root = _web_url_parts(src.url or "")
+    except ValueError as e:
+        return _web_fail(conn, src, f"ERROR:FETCH_FAILED: {e}. Recover: fix 'url' "
+                                      f"in the manifest.")
+    cache = _web_cache_path(src.name)
+    cache.mkdir(parents=True, exist_ok=True)
+    meta = _web_meta(conn, src.name)
+
+    data, err = _fetch_page(f"{scheme}://{netloc}/sitemap.xml")
+    lastmod = _sitemap_lastmod(data, root) if err is None and data else None
+    if (err is None and meta and meta["status"] in ("ok", "truncated")
+            and lastmod is not None and lastmod == meta["lastmod"]):
+        return {"source": src.name, "status": "up to date", "lastmod": lastmod}
+
+    pages, err = _web_discover(_fetch_page, src.url or "")
+    if err is not None:
+        return _web_fail(conn, src, err)
+
+    total = len(set(pages) | {"index.html"})   # the seed page is part of the site
+    limit = _web_max_pages()
+    truncated = total > limit
+    targets = sorted(set(pages) | {"index.html"})[:limit]
+
+    written: set[str] = set()
+    failed_pages = 0
+    for rel in targets:
+        page_url = urllib.parse.urljoin(src.url or "", rel)
+        data, ferr = _fetch_page(page_url)
+        if ferr is not None:
+            if ferr.startswith(("ERROR:BLOCKED:", "ERROR:RATE_LIMITED:")):
+                return _web_fail(conn, src, ferr)   # host-level condition — abort
+            failed_pages += 1                        # per-page flake — skip, count
+            continue
+        out_path = cache / rel
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(data)
+        written.add(rel)
+
+    # Purge cache files from previous runs that are no longer in the page set.
+    if written:
+        for f in cache.rglob("*"):
+            if f.is_file() and f.relative_to(cache).as_posix() not in written:
+                f.unlink()
+
+    summary: dict = {"source": src.name, "pages_fetched": len(written),
+                     "pages_failed": failed_pages, "truncated": truncated,
+                     "total_pages": total}
+    if failed_pages:
+        summary["warning"] = (f"{failed_pages} page(s) failed to fetch and were "
+                              f"skipped — the index may be missing some pages.")
+    summary.update(_index_files(conn, src.name, cache))
+    _web_meta_write(conn, src, version=_web_version(root), fetched_at=time.time(),
+                    page_count=len(written), total_pages=total, lastmod=lastmod,
+                    status="truncated" if truncated else "ok", error=None)
+    return summary
 
 # --- git operations ----------------------------------------------------------
 
@@ -569,6 +700,17 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             source          TEXT PRIMARY KEY,
             git_commit      TEXT NOT NULL,
             git_commit_date TEXT NOT NULL
+        );
+        CREATE TABLE web_meta (
+            source     TEXT PRIMARY KEY,
+            url        TEXT NOT NULL,
+            version    TEXT NOT NULL,
+            fetched_at REAL NOT NULL,
+            page_count INTEGER NOT NULL,
+            total_pages INTEGER NOT NULL,
+            lastmod    TEXT,
+            status     TEXT NOT NULL,
+            error      TEXT
         );
         """
     )
@@ -1140,6 +1282,8 @@ def reindex_source(conn: sqlite3.Connection, src: Source) -> dict:
     """
     if src.type == "git_repo":
         return _reindex_git_repo(conn, src)
+    if src.type == "web":
+        return _reindex_web(conn, src)
     summary = {"source": src.name, "files_seen": 0, "unique_contents": 0,
                "newly_extracted": 0, "extraction_skips": 0, "purged": 0, "errors": 0}
     if src.path is None or not src.path.exists():
@@ -1644,6 +1788,11 @@ def read_document_text(src: Source, relpath: str, start: int = 1, end: int | Non
         root = _managed_repo_path(src.name)
         if not root.exists():
             return (f"!!! ERROR !!! source '{src.name}' has no clone yet — "
+                    f"run reindex('{src.name}') first.")
+    elif src.type == "web":
+        root = _web_cache_path(src.name)
+        if not root.exists():
+            return (f"!!! ERROR !!! source '{src.name}' has no cache yet — "
                     f"run reindex('{src.name}') first.")
     else:
         return f"!!! ERROR !!! source '{src.name}' has no local path."

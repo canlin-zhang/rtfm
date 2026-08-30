@@ -294,3 +294,162 @@ def test_discover_llms_404_falls_back_to_crawl():
     pages, err = rtfm._web_discover(fetch, INDEX_URL)
     assert err is None
     assert pages == ["guide.html", "tutorial/index.html"]
+
+
+SITEMAP = """<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+<url><loc>https://docs.example.com/projects/widget/latest/</loc>
+<lastmod>2026-08-26T14:54:05+00:00</lastmod></url>
+<url><loc>https://docs.example.com/projects/widget/stable/</loc>
+<lastmod>2026-07-01T00:00:00+00:00</lastmod></url>
+</urlset>"""
+
+PAGE_TUT = """<html><head><title>Tutorial</title></head><body>
+<div role="main" class="document"><h1>Tutorial</h1>
+<p>The widget tutorial covers flits deeply.</p></div></body></html>"""
+
+
+def test_sitemap_lastmod_matches_version_root():
+    assert rtfm._sitemap_lastmod(SITEMAP.encode(), "/projects/widget/latest/") == \
+        "2026-08-26T14:54:05+00:00"
+    assert rtfm._sitemap_lastmod(SITEMAP.encode(), "/projects/widget/stable/") == \
+        "2026-07-01T00:00:00+00:00"
+    assert rtfm._sitemap_lastmod(SITEMAP.encode(), "/projects/widget/v1.0/") is None
+    assert rtfm._sitemap_lastmod(b"<html>custom sitemap</html>", "/projects/widget/latest/") \
+        is None
+
+
+def _web_source(name="widget"):
+    return rtfm.Source(name=name, type="web", flavor="readthedocs",
+                       url="https://docs.example.com/projects/widget/latest/index.html")
+
+
+def _full_fetch():
+    """A fetch map for a complete small site: sitemap + index + 2 pages."""
+    idx = "https://docs.example.com/projects/widget/latest/index.html"
+    sitemap_url = "https://docs.example.com/sitemap.xml"
+    return _fake_fetch({
+        sitemap_url: SITEMAP,
+        idx: RTD_INDEX,
+        "https://docs.example.com/projects/widget/latest/guide.html": RTD_PAGE,
+        "https://docs.example.com/projects/widget/latest/tutorial/index.html": PAGE_TUT,
+    })
+
+
+def test_reindex_web_happy_path(home, monkeypatch):
+    fetch = _full_fetch()
+    monkeypatch.setattr(rtfm, "_fetch_page", fetch)
+    monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)
+    conn = rtfm.get_index_db()
+    out = rtfm.reindex_source(conn, _web_source())
+    assert "error" not in out, out
+    assert out["pages_fetched"] == 3
+    cache = rtfm._web_cache_path("widget")
+    assert (cache / "index.html").exists()
+    assert (cache / "guide.html").exists()
+    assert (cache / "tutorial" / "index.html").exists()
+    hits = rtfm.search_index(conn, "flits")
+    assert any(h["title"] == "Guide" for h in hits)   # both pages mention flits; order not fixed
+    meta = rtfm._web_meta(conn, "widget")
+    assert meta["status"] == "ok"
+    assert meta["page_count"] == 3
+    assert meta["lastmod"] == "2026-08-26T14:54:05+00:00"
+    assert meta["version"] == "latest"
+
+
+def test_reindex_web_skips_when_lastmod_unchanged(home, monkeypatch):
+    # First run indexes the site; second run must fetch nothing but its sitemap
+    # probe (same lastmod + previous run completed → skip the crawl).
+    fetch = _full_fetch()
+    monkeypatch.setattr(rtfm, "_fetch_page", fetch)
+    monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, _web_source())
+    after_run1 = len(fetch.calls)
+    out = rtfm.reindex_source(conn, _web_source())
+    assert out["status"] == "up to date"
+    assert len(fetch.calls) == after_run1 + 1    # exactly one more call: the probe
+
+
+def test_reindex_web_recrawls_when_lastmod_changed(home, monkeypatch):
+    fetch = _full_fetch()
+    monkeypatch.setattr(rtfm, "_fetch_page", fetch)
+    monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, _web_source())
+    fetch.pages["https://docs.example.com/sitemap.xml"] = \
+        SITEMAP.replace("2026-08-26", "2026-09-01")
+    out = rtfm.reindex_source(conn, _web_source())
+    assert out["pages_fetched"] == 3
+
+
+def test_reindex_web_truncated_by_cap(home, monkeypatch):
+    fetch = _full_fetch()
+    monkeypatch.setattr(rtfm, "_fetch_page", fetch)
+    monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)
+    monkeypatch.setenv("RTFM_WEB_MAX_PAGES", "2")
+    conn = rtfm.get_index_db()
+    out = rtfm.reindex_source(conn, _web_source())
+    assert out["truncated"] is True
+    assert out["total_pages"] == 3
+    meta = rtfm._web_meta(conn, "widget")
+    assert meta["status"] == "truncated"
+    assert meta["page_count"] == 2
+
+
+def test_reindex_web_blocked_aborts(home, monkeypatch):
+    # The index URL's fetch returns the CLASSIFIED error (what the real fetch
+    # layer produces for a Cloudflare wall) — discovery must surface it as a
+    # failed reindex, not a crawl of the challenge page.
+    fetch = _fake_fetch(
+        {"https://docs.example.com/sitemap.xml": SITEMAP},
+        errors={"https://docs.example.com/projects/widget/latest/index.html":
+                "ERROR:BLOCKED: bot-protection challenge"},
+    )
+    monkeypatch.setattr(rtfm, "_fetch_page", fetch)
+    monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)
+    conn = rtfm.get_index_db()
+    out = rtfm.reindex_source(conn, _web_source())
+    assert "error" in out and out["error"].startswith("ERROR:BLOCKED:")
+    meta = rtfm._web_meta(conn, "widget")
+    assert meta is not None and meta["status"] == "error"
+    assert conn.execute("SELECT COUNT(*) FROM locations WHERE source='widget'") \
+        .fetchone()[0] == 0
+
+
+def test_reindex_web_not_readthedocs(home, monkeypatch):
+    fetch = _fake_fetch({
+        "https://docs.example.com/sitemap.xml": SITEMAP,
+        "https://docs.example.com/projects/widget/latest/index.html":
+            "<html><body><p>not docs</p></body></html>"})
+    monkeypatch.setattr(rtfm, "_fetch_page", fetch)
+    monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)
+    conn = rtfm.get_index_db()
+    out = rtfm.reindex_source(conn, _web_source())
+    assert out["error"].startswith("ERROR:NOT_READTHEDOCS:")
+
+
+def test_reindex_web_read_from_cache(home, monkeypatch):
+    fetch = _full_fetch()
+    monkeypatch.setattr(rtfm, "_fetch_page", fetch)
+    monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, _web_source())
+    text = rtfm.read_document_text(_web_source(), "guide.html", 1, 5)
+    assert "flits" in text and "<html>" not in text
+
+
+def test_reindex_web_purges_stale_cache_pages(home, monkeypatch):
+    # A page that vanishes from the crawl (link removed upstream) leaves the cache;
+    # its index row must go, and the file must not linger.
+    fetch = _full_fetch()
+    monkeypatch.setattr(rtfm, "_fetch_page", fetch)
+    monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, _web_source())
+    del fetch.pages["https://docs.example.com/projects/widget/latest/tutorial/index.html"]
+    fetch.pages["https://docs.example.com/sitemap.xml"] = \
+        SITEMAP.replace("2026-08-26", "2026-09-01")
+    out = rtfm.reindex_source(conn, _web_source())
+    assert out["purged"] == 1
+    assert not (rtfm._web_cache_path("widget") / "tutorial" / "index.html").exists()
