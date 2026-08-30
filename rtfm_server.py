@@ -31,7 +31,7 @@ from mcp.server.fastmcp import FastMCP
 # --- config -----------------------------------------------------------------
 _log = logging.getLogger("rtfm")
 
-TEXT_EXTS = {".txt", ".md", ".rst", ".rest", ".html"}   # text → line locators; html → main-region text
+TEXT_EXTS = {".txt", ".md", ".rst", ".rest", ".html"}   # text → line locators; html → main text
 CHUNK_LINES = 50
 SCHEMA_VERSION = 5                   # index DB is a cache; mismatch ⇒ drop & rebuild
 MAX_LOCATIONS = 5                    # default cap on locations listed per search hit

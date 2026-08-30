@@ -45,3 +45,13 @@ mutable = true
 # type    = "git_repo"
 # url     = "https://example.com/org/specs.git"
 # ref     = "v2.1-stable"
+
+# Example: a ReadTheDocs-hosted doc site whose project offers no PDF download.
+# `url` is the index page of the version to track ("latest" is mutable; paste a
+# versioned URL to pin). The flavor trusts the URL and crawls the site; failure
+# (bot walls, rate limits) is reported per source, never at load time.
+# [[source]]
+# name    = "ansible"
+# type    = "web"
+# flavor  = "readthedocs"
+# url     = "https://docs.ansible.com/projects/ansible/latest/index.html"
