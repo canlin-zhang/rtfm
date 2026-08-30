@@ -1902,9 +1902,41 @@ def search(query: str, source: str | None = None, max_files: int = 20,
         warnings.append(
             f"!!! INDEX ERROR !!! {e} — the search index looks corrupt or busy. "
             f"Recover: run reindex() to rebuild it.")
-    resp: dict = {"results": hits,
-                  "sources_searched": [s.name for s in sources if s.type in ("dir", "git_repo")
-                                       and (source is None or s.name == source)]}
+    # Web sources never auto-refresh (ADR 0014 — no network in the query path), so
+    # their presence in the corpus is decided by what the last reindex left behind:
+    # indexed content → listed as searched; nothing → listed under sources_failed
+    # with the reason, so a declared-but-absent source can never look covered.
+    web_state: dict[str, tuple[int, dict | None]] = {}
+    for s in sources:
+        if s.type != "web" or (source is not None and s.name != source):
+            continue
+        n = conn.execute("SELECT COUNT(*) FROM locations WHERE source=?",
+                         (s.name,)).fetchone()[0]
+        web_state[s.name] = (n, _web_meta(conn, s.name))
+    searched = [s.name for s in sources
+                if (source is None or s.name == source)
+                and (s.type in ("dir", "git_repo")
+                     or (s.type == "web" and web_state.get(s.name, (0, None))[0] > 0))]
+    failed: list[dict] = []
+    for s in sources:
+        if s.type != "web" or (source is not None and s.name != source):
+            continue
+        n, meta = web_state[s.name]
+        if n > 0:
+            if meta is not None and meta["status"] == "error":
+                # Failed reindex, but prior content is served — warn loudly, the
+                # same shape as git_repo's AUTO-REINDEX FAILED.
+                warnings.append(
+                    f"!!! SOURCE FAILED '{s.name}' !!! {meta['error']} — serving "
+                    f"previously indexed content. Recover: run reindex('{s.name}').")
+        else:
+            state = "never indexed"
+            if meta is not None and meta["status"] == "error":
+                state = f"last index FAILED: {meta['error']}"
+            failed.append({"name": s.name, "state": state})
+    resp: dict = {"results": hits, "sources_searched": searched}
+    if failed:
+        resp["sources_failed"] = failed
     if any(h.get("fuzzy") for h in hits):                # OR/BM25 fallback — terms didn't co-occur
         resp["fuzzy"] = True
     if warnings:
@@ -1921,7 +1953,7 @@ def reindex(source: str | None = None) -> dict:
     summary."""
     sources, warnings = load_manifest()
     conn = get_index_db()
-    targets = [s for s in sources if s.type in ("dir", "git_repo")
+    targets = [s for s in sources if s.type in ("dir", "git_repo", "web")
                and (source is None or s.name == source)]
     if source is not None and not targets:
         return {"error": f"source '{source}' not found. Call list_sources()."}
@@ -2021,7 +2053,9 @@ def list_sources() -> dict:
     out = []
     for s in sources:
         item: dict = {"name": s.name, "type": s.type,
-                      "path": str(s.path) if s.path else str(_managed_repo_path(s.name)),
+                      "path": str(s.path) if s.path else str(
+                          _web_cache_path(s.name) if s.type == "web"
+                          else _managed_repo_path(s.name)),
                       "mutable": s.mutable,
                       "indexed_files": conn.execute(
                           "SELECT COUNT(*) FROM locations WHERE source=?",
@@ -2055,6 +2089,26 @@ def list_sources() -> dict:
                         item["git_status"] = _managed_git_status(repo_path, s, meta[0])
                 except Exception as e:
                     item["git_status"] = f"error: {e}"
+        if s.type == "web":
+            item["url"] = s.url
+            item["flavor"] = s.flavor
+            meta = conn.execute(
+                "SELECT url, version, fetched_at, page_count, total_pages, lastmod, "
+                "status, error FROM web_meta WHERE source=?", (s.name,)).fetchone()
+            if meta is None:
+                item["web_status"] = "never indexed"
+            elif meta[6] == "ok":
+                item["web_status"] = "indexed"
+                item["tracking_version"] = meta[1]
+                item["fetched_at"] = meta[2]
+                item["page_count"] = meta[3]
+                item["upstream_lastmod"] = meta[5]
+            elif meta[6] == "truncated":
+                item["web_status"] = f"TRUNCATED ({meta[3]}/{meta[4]} pages)"
+                item["tracking_version"] = meta[1]
+                item["fetched_at"] = meta[2]
+            else:
+                item["web_status"] = f"last index FAILED: {meta[7]}"
         out.append(item)
     resp = {"sources": out}
     if warnings:

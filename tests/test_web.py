@@ -324,6 +324,14 @@ def _web_source(name="widget"):
                        url="https://docs.example.com/projects/widget/latest/index.html")
 
 
+def _manifest_with_widget() -> None:
+    """Declare the widget web source in the manifest — needed by the tool-level
+    tests (search/list_sources/reindex load the manifest; reindex_source does not)."""
+    rtfm.manifest_path().write_text(
+        '[[source]]\nname="widget"\ntype="web"\nflavor="readthedocs"\n'
+        'url="https://docs.example.com/projects/widget/latest/index.html"\n')
+
+
 def _full_fetch():
     """A fetch map for a complete small site: sitemap + index + 2 pages."""
     idx = "https://docs.example.com/projects/widget/latest/index.html"
@@ -453,3 +461,97 @@ def test_reindex_web_purges_stale_cache_pages(home, monkeypatch):
     out = rtfm.reindex_source(conn, _web_source())
     assert out["purged"] == 1
     assert not (rtfm._web_cache_path("widget") / "tutorial" / "index.html").exists()
+
+
+def test_search_sources_failed_lists_never_indexed_web(home, monkeypatch):
+    rtfm.manifest_path().write_text(
+        '[[source]]\nname="w"\ntype="web"\nflavor="readthedocs"\n'
+        'url="https://docs.example.com/projects/widget/latest/index.html"\n')
+    monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)
+    out = rtfm.search(query="widget protocol")
+    failed = {s["name"]: s["state"] for s in out.get("sources_failed", [])}
+    assert failed.get("w") == "never indexed"
+    assert "w" not in out["sources_searched"]
+
+
+def test_search_sources_failed_lists_failed_web(home, monkeypatch):
+    fetch = _fake_fetch(
+        {"https://docs.example.com/sitemap.xml": SITEMAP},
+        errors={"https://docs.example.com/projects/widget/latest/index.html":
+                "ERROR:BLOCKED: bot-protection challenge"})
+    monkeypatch.setattr(rtfm, "_fetch_page", fetch)
+    monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)
+    _manifest_with_widget()
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, _web_source())
+    out = rtfm.search(query="widget protocol")
+    failed = {s["name"]: s["state"] for s in out.get("sources_failed", [])}
+    assert "last index FAILED" in failed.get("widget", "") and "BLOCKED" in failed["widget"]
+    assert "widget" not in out["sources_searched"]
+
+
+def test_search_indexed_web_in_sources_searched(home, monkeypatch):
+    fetch = _full_fetch()
+    monkeypatch.setattr(rtfm, "_fetch_page", fetch)
+    monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)
+    _manifest_with_widget()
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, _web_source())
+    out = rtfm.search(query="widget protocol")
+    assert "widget" in out["sources_searched"]
+    assert out.get("sources_failed") in (None, [])
+
+
+def test_search_warns_when_failed_reindex_leaves_content(home, monkeypatch):
+    fetch = _full_fetch()
+    monkeypatch.setattr(rtfm, "_fetch_page", fetch)
+    monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)
+    _manifest_with_widget()
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, _web_source())
+    # Second run fails at the host level; prior content stays searchable, and
+    # search must say so loudly.
+    fetch.errors["https://docs.example.com/projects/widget/latest/index.html"] = \
+        "ERROR:BLOCKED: bot-protection challenge"
+    fetch.pages["https://docs.example.com/sitemap.xml"] = \
+        SITEMAP.replace("2026-08-26", "2026-09-01")
+    rtfm.reindex_source(conn, _web_source())
+    out = rtfm.search(query="widget protocol")
+    assert any("SOURCE FAILED" in w and "BLOCKED" in w for w in out.get("WARNING", []))
+    assert "widget" in out["sources_searched"]          # prior content still searched
+
+
+def test_list_sources_web_status(home, monkeypatch):
+    fetch = _full_fetch()
+    monkeypatch.setattr(rtfm, "_fetch_page", fetch)
+    monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)
+    _manifest_with_widget()
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, _web_source())
+    out = rtfm.list_sources()
+    item = next(i for i in out["sources"] if i["name"] == "widget")
+    assert item["web_status"] == "indexed"
+    assert item["tracking_version"] == "latest"
+    assert item["page_count"] == 3
+    assert item["url"] == "https://docs.example.com/projects/widget/latest/index.html"
+    assert item["flavor"] == "readthedocs"
+
+
+def test_list_sources_web_status_never_indexed(home):
+    rtfm.manifest_path().write_text(
+        '[[source]]\nname="w"\ntype="web"\nflavor="readthedocs"\n'
+        'url="https://docs.example.com/en/latest/index.html"\n')
+    out = rtfm.list_sources()
+    item = next(i for i in out["sources"] if i["name"] == "w")
+    assert item["web_status"] == "never indexed"
+
+
+def test_reindex_tool_targets_web(home, monkeypatch):
+    fetch = _full_fetch()
+    monkeypatch.setattr(rtfm, "_fetch_page", fetch)
+    monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)
+    rtfm.manifest_path().write_text(
+        '[[source]]\nname="widget"\ntype="web"\nflavor="readthedocs"\n'
+        'url="https://docs.example.com/projects/widget/latest/index.html"\n')
+    out = rtfm.reindex(source="widget")
+    assert any(r.get("pages_fetched") == 3 for r in out["reindexed"])
