@@ -46,3 +46,31 @@ def test_unknown_type_message_mentions_web(home):
     _manifest_with('[[source]]\nname="w"\ntype="wobble"\n')
     _, warnings = rtfm.load_manifest()
     assert any("expected 'dir', 'git_repo', or 'web'" in w for w in warnings)
+
+
+def test_web_cache_path(home):
+    assert str(rtfm._web_cache_path("ansible")).endswith("web/ansible")
+
+
+def test_web_max_pages_default_and_env(monkeypatch):
+    assert rtfm._web_max_pages() == 2000
+    monkeypatch.setenv("RTFM_WEB_MAX_PAGES", "42")
+    assert rtfm._web_max_pages() == 42
+    monkeypatch.setenv("RTFM_WEB_MAX_PAGES", "nope")
+    assert rtfm._web_max_pages() == 2000
+
+
+def test_web_url_parts_three_shapes():
+    assert rtfm._web_url_parts("https://slug.readthedocs.io/en/latest/index.html") == \
+        ("https", "slug.readthedocs.io", "/en/latest/")
+    assert rtfm._web_url_parts("https://docs.ansible.com/projects/ansible/latest/index.html") == \
+        ("https", "docs.ansible.com", "/projects/ansible/latest/")
+    assert rtfm._web_url_parts("https://docs.example.com/en/stable/") == \
+        ("https", "docs.example.com", "/en/stable/")
+
+
+def test_web_url_parts_rejects_non_http(home):
+    with pytest.raises(ValueError):
+        rtfm._web_url_parts("file:///tmp/x.html")
+    with pytest.raises(ValueError):
+        rtfm._web_url_parts("not a url")

@@ -18,6 +18,7 @@ import sqlite3
 import subprocess
 import time
 import tomllib
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
@@ -60,6 +61,42 @@ def _git_timeout() -> int:
     if env and env.isdigit():
         return int(env)
     return 60
+
+# --- web ---------------------------------------------------------------------
+
+_WEB_FETCH_DELAY = 1.0        # politeness gap between page fetches (tests set 0)
+_WEB_TIMEOUT = 20             # socket timeout per request, seconds
+_WEB_MAX_PAGES_DEFAULT = 2000
+
+
+def _web_cache_path(name: str) -> Path:
+    """Cache dir for a web source: raw HTML mirroring the URL tree under the version root."""
+    return corpus_home() / "web" / name
+
+
+def _web_max_pages() -> int:
+    """Hard cap on pages fetched per web reindex. RTFM_WEB_MAX_PAGES overrides."""
+    env = os.environ.get("RTFM_WEB_MAX_PAGES")
+    if env and env.isdigit():
+        return int(env)
+    return _WEB_MAX_PAGES_DEFAULT
+
+
+def _web_url_parts(url: str) -> tuple[str, str, str]:
+    """(scheme, netloc, version_root_path) for a web source's index URL.
+
+    The version root is the index URL's directory, normalized to end with '/':
+    'https://docs.ansible.com/projects/ansible/latest/index.html' →
+    ('https', 'docs.ansible.com', '/projects/ansible/latest/'). The crawl scope
+    is everything under it. Raises ValueError for a non-http(s) or malformed URL
+    (reported as FETCH_FAILED at reindex time, never a load-time gate)."""
+    u = urllib.parse.urlsplit(url)
+    if u.scheme not in ("http", "https") or not u.netloc:
+        raise ValueError(f"not an http(s) URL: {url!r}")
+    if "/" not in u.path:
+        raise ValueError(f"URL has no path: {url!r}")
+    root = u.path.rsplit("/", 1)[0].rstrip("/") + "/"
+    return u.scheme, u.netloc, root
 
 # --- git operations ----------------------------------------------------------
 
