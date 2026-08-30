@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import hashlib
+import html.parser
 import logging
 import os
 import re
@@ -28,7 +29,7 @@ from mcp.server.fastmcp import FastMCP
 # --- config -----------------------------------------------------------------
 _log = logging.getLogger("rtfm")
 
-TEXT_EXTS = {".txt", ".md", ".rst", ".rest"}   # plain text → line locators (.html later)
+TEXT_EXTS = {".txt", ".md", ".rst", ".rest", ".html"}   # text → line locators; html → main-region text
 CHUNK_LINES = 50
 SCHEMA_VERSION = 4                   # index DB is a cache; mismatch ⇒ drop & rebuild
 MAX_LOCATIONS = 5                    # default cap on locations listed per search hit
@@ -451,6 +452,8 @@ def _rows_for_file(path: Path) -> list[tuple[str, str, str]]:
             content = "\n".join(ln.strip() for ln in page_text.splitlines() if ln.strip())
             if content:
                 rows.append(("page", str(page_num), content))
+    elif ext == ".html":
+        rows = _html_rows(path)
     elif ext in TEXT_EXTS:
         lines = path.read_text(errors="replace").splitlines()
         for i in range(0, max(1, len(lines)), CHUNK_LINES):
@@ -521,6 +524,113 @@ def _text_doc_signal(path: Path) -> tuple[str, str]:
     return (headings[0] if headings else ""), "\n".join(headings)
 
 
+_BLOCK_TAGS = {"p", "div", "li", "tr", "ul", "ol", "table", "section", "dt", "dd"}
+
+
+class _MainExtractor(html.parser.HTMLParser):
+    """Extract (title, headings, text_lines) from the div[role="main"] region of an
+    RTD-style page. Everything outside that region (nav, footer, search, breadcrumbs)
+    is chrome and never emitted. Code inside <pre> stays verbatim. <script>/<style>
+    are dropped even inside main. Deterministic: same input, same output — read-tool
+    locators (line numbers in the extracted text) depend on it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.title = ""
+        self.headings: list[str] = []
+        self._lines: list[str] = []
+        self._buf: list[str] = []
+        self._main_depth = -1      # -1 outside main; >= 0 inside
+        self._heading_tag = ""     # "h1".."h3" while inside a heading element
+        self._pre = False          # inside <pre>: text verbatim, block-newline on </pre>
+        self._skip = 0             # depth inside script/style
+
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        attrs = dict(attrs)
+        if self._main_depth < 0:
+            if tag == "div" and attrs.get("role") == "main":
+                self._main_depth = 0
+            return
+        self._main_depth += 1
+        if tag in ("script", "style"):
+            self._skip += 1
+        elif self._skip == 0:
+            if tag == "pre":
+                self._emit_block()
+                self._pre = True
+            elif tag in ("h1", "h2", "h3"):
+                self._emit_block()
+                self._heading_tag = tag
+            elif tag == "br":
+                self._emit_block()
+            elif tag in _BLOCK_TAGS:
+                self._emit_block()
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._main_depth < 0:
+            return
+        if self._skip > 0:
+            if tag in ("script", "style"):
+                self._skip -= 1
+        elif self._pre:
+            if tag == "pre":
+                self._emit_block()
+                self._pre = False
+        elif self._heading_tag and tag == self._heading_tag:
+            self._heading_tag = ""
+        self._main_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self._main_depth < 0 or self._skip > 0:
+            return
+        if self._heading_tag:
+            text = " ".join(data.split())
+            if text:
+                if self._heading_tag == "h1" and not self.title:
+                    self.title = text
+                self.headings.append(text)
+        self._buf.append(data)
+
+    def _emit_block(self) -> None:
+        line = "".join(self._buf)
+        self._buf = []
+        if self._pre:
+            self._lines.extend(ln.strip() for ln in line.splitlines())
+        elif line.strip():
+            self._lines.append(" ".join(line.split()))
+
+    def result(self) -> tuple[str, str, list[str]]:
+        self._emit_block()
+        return self.title, "\n".join(self.headings), self._lines
+
+
+def _html_to_text(html: str) -> tuple[str, str, list[str]]:
+    """(title, headings, text_lines) from a page's div[role="main"]. ("", "", []) when
+    the page has no main region (the trust-the-URL failure signal: NOT_READTHEDOCS)."""
+    p = _MainExtractor()
+    p.feed(html)
+    p.close()
+    return p.result()
+
+
+def _html_doc_signal(path: Path) -> tuple[str, str]:
+    title, headings, _ = _html_to_text(path.read_text(errors="replace"))
+    return title, headings
+
+
+def _html_rows(path: Path) -> list[tuple[str, str, str]]:
+    """Line-chunked rows for an .html file. Locator line numbers index the EXTRACTED
+    text (read re-extracts, so hit locators and read() stay consistent)."""
+    _, _, lines = _html_to_text(path.read_text(errors="replace"))
+    if not lines:
+        return []
+    rows: list[tuple[str, str, str]] = []
+    for i in range(0, len(lines), CHUNK_LINES):
+        chunk = "\n".join(lines[i:i + CHUNK_LINES])
+        rows.append(("line", str(i + 1), chunk))
+    return rows
+
+
 def _doc_signal_for_file(path: Path) -> tuple[str, str]:
     """Doc-level (title, headings) for ranking. Best-effort — a failure yields ("", "") so the
     document still ranks on body text and signal extraction never blocks body extraction. The
@@ -530,6 +640,8 @@ def _doc_signal_for_file(path: Path) -> tuple[str, str]:
     try:
         if ext == ".pdf":
             return _pdf_doc_signal(path)
+        if ext == ".html":
+            return _html_doc_signal(path)
         if ext in TEXT_EXTS:
             return _text_doc_signal(path)
     except ImportError as e:
@@ -1389,6 +1501,12 @@ def read_document_text(src: Source, relpath: str, start: int = 1, end: int | Non
         return f"!!! ERROR !!! '{relpath}' not found in source '{src.name}'."
     if path.suffix.lower() == ".pdf":
         return extract_pdf_text(path, start=start, end=end)
+    if path.suffix.lower() == ".html":
+        # Locator line numbers index the EXTRACTED text (not the raw markup) — read
+        # must re-extract so hits and reads stay consistent (ADR 0014).
+        _, _, lines = _html_to_text(path.read_text(errors="replace"))
+        e = end if end is not None else len(lines)
+        return "\n".join(lines[max(0, start - 1):e])
     lines = path.read_text(errors="replace").splitlines()
     e = end if end is not None else len(lines)
     return "\n".join(lines[max(0, start - 1):e])

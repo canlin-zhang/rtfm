@@ -74,3 +74,71 @@ def test_web_url_parts_rejects_non_http(home):
         rtfm._web_url_parts("file:///tmp/x.html")
     with pytest.raises(ValueError):
         rtfm._web_url_parts("not a url")
+
+
+RTD_INDEX = """<!DOCTYPE html><html><head><title>Widget docs &mdash; Project docs</title></head>
+<body class="wy-body-for-nav"><div class="wy-grid-for-nav"><nav class="wy-nav-side">
+<div class="wy-menu wy-menu-vertical"><ul>
+<li><a href="tutorial/index.html">Tutorial</a></li>
+<li><a href="guide.html">Guide</a></li>
+<li><a href="https://docs.example.com/projects/widget/v1.0/old.html">Old version</a></li>
+<li><a href="https://elsewhere.example.com/x.html">Elsewhere</a></li>
+<li><a href="search.html">Search</a></li>
+</ul></div></nav>
+<div class="wy-nav-content"><div class="rst-content">
+<div role="main" class="document"><h1>Widget docs</h1>
+<p>Widgets define the widget protocol.</p>
+<h2>Usage</h2><p>Run <code>widget run</code>.</p>
+<pre>widget init --force
+widget run</pre>
+<script>var x = "not searchable";</script>
+</div></div></div></body></html>"""
+
+RTD_PAGE = """<html><head><title>Guide</title></head><body>
+<div class="wy-nav-side"><nav><a href="index.html">Home</a></nav></div>
+<div role="main" class="document"><h1>Guide</h1>
+<p>The widget protocol defines flits.</p>
+<h3>Sub</h3><p>Detail here.</p></div></body></html>"""
+
+
+def test_html_to_text_extracts_main_only():
+    title, headings, lines = rtfm._html_to_text(RTD_PAGE)
+    assert title == "Guide"
+    assert "flits" in " ".join(lines)
+    assert "Home" not in " ".join(lines)          # nav chrome dropped
+    assert "Sub" in headings and "Guide" in headings
+
+
+def test_html_to_text_keeps_code_verbatim():
+    title, headings, lines = rtfm._html_to_text(RTD_INDEX)
+    joined = "\n".join(lines)
+    assert "widget init --force" in joined        # <pre> verbatim, not collapsed
+    assert "widget run" in joined
+    assert "not searchable" not in joined         # <script> dropped
+    assert "Old version" not in joined            # nav dropped
+
+
+def test_html_to_text_no_main_region():
+    assert rtfm._html_to_text("<html><body><p>plain</p></body></html>") == ("", "", [])
+
+
+def test_html_rows_chunk_lines(home, tmp_path):
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "guide.html").write_text(RTD_PAGE)
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, rtfm.Source(name="docs", type="dir", path=d))
+    hits = rtfm.search_index(conn, "flits")
+    assert hits and hits[0]["title"] == "Guide"
+    assert hits[0]["locator_kind"] == "line"
+
+
+def test_read_html_returns_extracted_text_not_raw(home, tmp_path):
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "guide.html").write_text(RTD_PAGE)
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, rtfm.Source(name="docs", type="dir", path=d))
+    text = rtfm.read_document_text(rtfm.Source("docs", "dir", d), "guide.html", 1, 5)
+    assert "flits" in text
+    assert "<html>" not in text                  # extracted text, not raw markup
