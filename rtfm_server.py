@@ -959,10 +959,11 @@ def iter_source_files(src: Source) -> list[Path]:
 @dataclass
 class Source:
     name: str
-    type: str                       # "dir" or "git_repo"
+    type: str                       # "dir", "git_repo", or "web"
     path: Path | None = None
     url: str | None = None
     ref: str | None = None          # git refspec (branch, tag, SHA); None for dir
+    flavor: str | None = None       # hosting-family parsing strategy ("readthedocs"); web only
     mutable: bool = False
 
 
@@ -1010,6 +1011,7 @@ def _source_from_table(t: dict) -> Source:
         path=Path(path).expanduser() if path else None,
         url=url,
         ref=t.get("ref"),                        # None if absent → default to remote HEAD later
+        flavor=t.get("flavor"),                  # None for dir/git_repo
         mutable=bool(t.get("mutable", False)),
     )
 
@@ -1018,8 +1020,23 @@ def _validate_source(s: Source) -> str | None:
     """Loud warning if a source is misconfigured, else None. A dir source needs an existing,
     readable directory; a `path`-less dir source is unusable (the caller drops it). A git_repo
     source needs a url; in linked mode (`path` set) the path must be a git working tree whose
-    origin remote matches the declared url. The point is that one bad entry never silently
-    disappears and never breaks the others."""
+    origin remote matches the declared url. A web source needs a url and a known flavor. The
+    point is that one bad entry never silently disappears and never breaks the others. The URL
+    itself is trusted as given — no shape gate (ADR 0014): a non-RTD URL fails at index time
+    with NOT_READTHEDOCS, never at load."""
+    if s.type == "web":
+        if not s.url:
+            return (f"!!! INVALID SOURCE '{s.name}' !!! web source has no 'url' — "
+                    f"the index page URL is required. Recover: add url = \"...\" in "
+                    f"{manifest_path()}.")
+        if not s.flavor:
+            return (f"!!! INVALID SOURCE '{s.name}' !!! web source has no 'flavor' — "
+                    f"expected 'readthedocs'. Recover: add flavor = \"readthedocs\" in "
+                    f"{manifest_path()}.")
+        if s.flavor not in ("readthedocs",):
+            return (f"!!! INVALID SOURCE '{s.name}' !!! unknown flavor '{s.flavor}' — "
+                    f"expected 'readthedocs'. Recover: fix 'flavor' in {manifest_path()}.")
+        return None
     if s.type == "git_repo":
         if not s.url:
             return (f"!!! INVALID SOURCE '{s.name}' !!! git_repo source has no 'url' — "
@@ -1069,7 +1086,7 @@ def _validate_source(s: Source) -> str | None:
         # An unknown type is a config error like any other — silent skipping made a
         # typo'd source invisible AND made sources_searched claim it was searched.
         return (f"!!! INVALID SOURCE '{s.name}' !!! unknown type '{s.type}' — "
-                f"expected 'dir' or 'git_repo'. Recover: fix 'type' in "
+                f"expected 'dir', 'git_repo', or 'web'. Recover: fix 'type' in "
                 f"{manifest_path()}.")
     if s.path is None:
         return (f"!!! INVALID SOURCE '{s.name}' !!! dir source has no 'path' — skipping it. "
@@ -1122,7 +1139,8 @@ def load_manifest() -> tuple[list[Source], list[str]]:
         warn = _validate_source(s)
         if warn:
             warnings.append(warn)
-            if (s.type == "dir" and s.path is None) or (s.type == "git_repo" and not s.url):
+            if (s.type == "dir" and s.path is None) or (s.type == "git_repo" and not s.url) \
+                    or (s.type == "web" and not s.url):
                 continue                       # unusable — drop it (loudly, above)
         seen[s.name] = s
         sources.append(s)
