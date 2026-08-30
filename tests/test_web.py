@@ -1,4 +1,7 @@
 """web source type — validation, discovery, extraction, fetch, reindex, agent contract."""
+import io
+import urllib.error
+
 import pytest
 
 import rtfm_server as rtfm
@@ -142,3 +145,66 @@ def test_read_html_returns_extracted_text_not_raw(home, tmp_path):
     text = rtfm.read_document_text(rtfm.Source("docs", "dir", d), "guide.html", 1, 5)
     assert "flits" in text
     assert "<html>" not in text                  # extracted text, not raw markup
+
+
+class _FakeResp:
+    def __init__(self, body: bytes, code: int = 200):
+        self.body = body
+        self.code = code
+
+    def read(self) -> bytes:
+        return self.body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class _FakeHTTPError(urllib.error.HTTPError):
+    """Subclasses the real exception so it flows through _http_get's except path."""
+
+    def __init__(self, code: int, body: bytes = b""):
+        super().__init__("http://x.example.com/", code, "msg", {}, io.BytesIO(body))
+
+
+def _fake_urlopen(fail: _FakeHTTPError | None = None, body: bytes = b"ok"):
+    def urlopen(req, **kwargs):
+        if fail is not None:
+            raise fail
+        return _FakeResp(body)
+    return urlopen
+
+
+def test_http_get_success(monkeypatch):
+    monkeypatch.setattr(rtfm, "_urlopen", _fake_urlopen(body=b"hello"))
+    body, err = rtfm._http_get("https://x.example.com/")
+    assert body == b"hello" and err is None
+
+
+def test_http_get_rate_limited(monkeypatch):
+    monkeypatch.setattr(rtfm, "_urlopen", _fake_urlopen(
+        fail=_FakeHTTPError(429, b"slow down")))
+    body, err = rtfm._http_get("https://x.example.com/")
+    assert body is None and err.startswith("ERROR:RATE_LIMITED:")
+
+
+def test_http_get_blocked_challenge_detected(monkeypatch):
+    # Cloudflare walls come back 403 or 429 with a challenge body — the body wins.
+    for code in (403, 429):
+        monkeypatch.setattr(rtfm, "_urlopen", _fake_urlopen(
+            fail=_FakeHTTPError(code, b"<title>Just a moment...</title> cf_chl x")))
+        _, err = rtfm._http_get("https://x.example.com/")
+        assert err is not None and err.startswith("ERROR:BLOCKED:"), code
+
+
+def test_http_get_fetch_failed(monkeypatch):
+    monkeypatch.setattr(rtfm, "_urlopen", _fake_urlopen(fail=_FakeHTTPError(404, b"nope")))
+    _, err = rtfm._http_get("https://x.example.com/")
+    assert err is not None and err.startswith("ERROR:FETCH_FAILED:")
+
+
+def test_throttle_delay_constant(monkeypatch):
+    monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)   # fast in tests
+    rtfm._throttle()                                      # must not raise

@@ -19,7 +19,9 @@ import sqlite3
 import subprocess
 import time
 import tomllib
+import urllib.error
 import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
@@ -98,6 +100,66 @@ def _web_url_parts(url: str) -> tuple[str, str, str]:
         raise ValueError(f"URL has no path: {url!r}")
     root = u.path.rsplit("/", 1)[0].rstrip("/") + "/"
     return u.scheme, u.netloc, root
+
+
+_last_fetch = 0.0
+
+
+def _throttle() -> None:
+    """Enforce at least _WEB_FETCH_DELAY seconds between fetches (politeness: RTD
+    custom domains rate-limit aggressively — docs.ansible.com 429s under light load)."""
+    global _last_fetch
+    now = time.monotonic()
+    gap = _WEB_FETCH_DELAY - (now - _last_fetch)
+    if gap > 0:
+        time.sleep(gap)
+    _last_fetch = time.monotonic()
+
+
+_urlopen = urllib.request.urlopen          # seam for tests
+
+
+def _http_get(url: str) -> tuple[bytes | None, str | None]:
+    """Fetch one URL. (body, None) on success; (None, classified error) on failure.
+    Classification order matters: a Cloudflare challenge body ('Just a moment...',
+    'cf_chl', 'challenge-platform') marks BLOCKED regardless of status code — the
+    real wall returns both 403 and 429; RATE_LIMITED is the bare-429 case; anything
+    else 4xx/5xx and transport failures are FETCH_FAILED."""
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "rtfm (doc corpus fetcher; cooperative-only)"})
+    try:
+        with _urlopen(req, timeout=_WEB_TIMEOUT) as resp:
+            return resp.read(), None
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode(errors="replace")
+        except Exception:
+            pass
+        low = body.lower()
+        if "just a moment" in low or "cf_chl" in low or "challenge-platform" in low:
+            return None, (
+                "ERROR:BLOCKED: the host serves a bot-protection challenge "
+                "(Cloudflare-style) instead of content. Recover: this host walls off "
+                "scripted fetching — try a git_repo source for the project's docs "
+                "repo, or remove the source.")
+        if e.code == 429:
+            return None, (
+                f"ERROR:RATE_LIMITED: HTTP 429 from {url}. Recover: wait a while, "
+                f"then reindex this source again.")
+        return None, (
+            f"ERROR:FETCH_FAILED: HTTP {e.code} from {url}. Recover: check the URL "
+            f"and network, then reindex.")
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        return None, (
+            f"ERROR:FETCH_FAILED: {e} fetching {url}. Recover: check the URL and "
+            f"network, then reindex.")
+
+
+def _fetch_page(url: str) -> tuple[bytes | None, str | None]:
+    """Throttled page fetch — the one seam discovery/reindex use."""
+    _throttle()
+    return _http_get(url)
 
 # --- git operations ----------------------------------------------------------
 
