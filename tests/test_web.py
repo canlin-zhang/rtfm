@@ -1,6 +1,7 @@
 """web source type — validation, discovery, extraction, fetch, reindex, agent contract."""
 import io
 import sqlite3
+import time
 import urllib.error
 
 import pytest
@@ -61,6 +62,8 @@ def test_web_max_pages_default_and_env(monkeypatch):
     monkeypatch.setenv("RTFM_WEB_MAX_PAGES", "42")
     assert rtfm._web_max_pages() == 42
     monkeypatch.setenv("RTFM_WEB_MAX_PAGES", "nope")
+    assert rtfm._web_max_pages() == 2000
+    monkeypatch.setenv("RTFM_WEB_MAX_PAGES", "0")   # 0 is nonsense — reject to default
     assert rtfm._web_max_pages() == 2000
 
 
@@ -234,6 +237,16 @@ def test_throttle_delay_constant(monkeypatch):
     rtfm._throttle()                                      # must not raise
 
 
+def test_throttle_enforces_delay(monkeypatch):
+    # The 1s politeness delay is load-bearing (RTD custom domains rate-limit) —
+    # pin that _throttle actually sleeps, not just that it doesn't raise.
+    monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.05)
+    rtfm._throttle()
+    t0 = time.monotonic()
+    rtfm._throttle()
+    assert time.monotonic() - t0 >= 0.05
+
+
 def test_http_get_incomplete_read_fetch_failed(monkeypatch):
     # A truncated response (hostile CDN) must classify, not crash the tool call.
     import http.client
@@ -295,12 +308,20 @@ def _fake_fetch(pages: dict[str, str], errors: dict[str, str] | None = None) -> 
     """_fetch_page-shaped fake. `pages` maps url → body; `errors` maps url → a
     classified error string (simulating what the real fetch layer returns for
     BLOCKED/RATE_LIMITED/etc.). `errors` is read at call time, so tests can
-    mutate it between runs."""
+    mutate it between runs. `fail_after` maps url → call number (counted from
+    when the url enters the map) at which fetches start failing — used to make
+    a URL succeed during discovery but fail when the crawl re-fetches it."""
     calls: list[str] = []
     errors = errors or {}
+    fail_after: dict[str, int] = {}
+    fcounts: dict[str, int] = {}
 
     def fetch(url: str):
         calls.append(url)
+        if url in fail_after:
+            fcounts[url] = fcounts.get(url, 0) + 1
+            if fcounts[url] >= fail_after[url]:
+                return None, "ERROR:FETCH_FAILED: fail_after " + url
         if url in errors:
             return None, errors[url]
         body = pages.get(url)
@@ -311,6 +332,7 @@ def _fake_fetch(pages: dict[str, str], errors: dict[str, str] | None = None) -> 
     fetch.calls = calls
     fetch.pages = pages        # exposed so tests can mutate the maps between runs
     fetch.errors = errors
+    fetch.fail_after = fail_after
     return fetch
 
 
@@ -535,7 +557,7 @@ def test_reindex_web_partial_failure_preserves_content(home, monkeypatch):
     assert any(h["title"] == "Tutorial" for h in rtfm.search_index(conn, "tutorial"))
     meta = rtfm._web_meta(conn, "widget")
     assert meta["status"] == "error"
-    assert "1 of 3 page(s) failed" in meta["error"]
+    assert "1 of 3 pages failed" in meta["error"]
 
 
 def test_reindex_web_failed_run_never_skips(home, monkeypatch):
@@ -556,6 +578,98 @@ def test_reindex_web_failed_run_never_skips(home, monkeypatch):
     out = rtfm.reindex_source(conn, _web_source())    # run 3: clean again
     assert out.get("pages_fetched") == 3              # crawled — never "up to date"
     assert rtfm._web_meta(conn, "widget")["status"] == "ok"
+
+
+def test_reindex_web_bare_url_fetches_from_version_root(home, monkeypatch):
+    # A bare entry URL ('.../latest' with no trailing slash) must fetch pages from
+    # the VERSION ROOT — urljoin against the raw URL treats 'latest' as a file and
+    # drops the version segment, 404ing every page fetch.
+    src = rtfm.Source(name="widget", type="web", flavor="readthedocs",
+                      url="https://docs.example.com/projects/widget/latest")
+    fetch = _full_fetch()
+    monkeypatch.setattr(rtfm, "_fetch_page", fetch)
+    monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)
+    conn = rtfm.get_index_db()
+    out = rtfm.reindex_source(conn, src)
+    assert "error" not in out, out
+    assert out["pages_fetched"] == 3
+    assert any(c.endswith("/projects/widget/latest/guide.html") for c in fetch.calls)
+    # the parent-scope URL (version segment dropped) must never be fetched
+    assert not any(c.endswith("/projects/widget/guide.html") for c in fetch.calls)
+
+
+def test_reindex_web_skip_gate_checks_url_identity(home, monkeypatch):
+    # Same source name, DIFFERENT url, same lastmod → the skip gate must not fire:
+    # 'up to date' while serving the old URL's content is the silent-loss mode.
+    fetch = _full_fetch()
+    monkeypatch.setattr(rtfm, "_fetch_page", fetch)
+    monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, _web_source())
+    other = rtfm.Source(name="widget", type="web", flavor="readthedocs",
+                        url="https://docs.example.com/projects/widget/latest/stable.html")
+    out = rtfm.reindex_source(conn, other)
+    assert out.get("pages_fetched") == 3          # crawled — not "up to date"
+
+
+def test_reindex_web_crash_routes_to_failed_state(home, monkeypatch):
+    # A crash mid-reindex (disk full, sqlite, extraction) must land in web_meta as
+    # 'error' — swallowed by the tool wrapper with the old 'ok' standing is the
+    # healthy-while-degraded failure mode.
+    fetch = _full_fetch()
+    monkeypatch.setattr(rtfm, "_fetch_page", fetch)
+    monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)
+    _manifest_with_widget()
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, _web_source())      # run 1: ok
+
+    def boom(url):
+        raise RuntimeError("disk full")
+    monkeypatch.setattr(rtfm, "_fetch_page", boom)
+    out = rtfm.reindex_source(conn, _web_source())
+    assert "error" in out and "disk full" in out["error"]
+    meta = rtfm._web_meta(conn, "widget")
+    assert meta["status"] == "error"
+    assert any("SOURCE FAILED" in w for w in rtfm.search(query="widget protocol")
+               .get("WARNING", []))
+
+
+def test_reindex_web_aborts_on_page_blocked(home, monkeypatch):
+    # A host-level wall hit MID-CRAWL (a page, not the index) must abort with the
+    # classified error — dead code to the suite until this pins it.
+    fetch = _full_fetch()
+    monkeypatch.setattr(rtfm, "_fetch_page", fetch)
+    monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)
+    _manifest_with_widget()
+    conn = rtfm.get_index_db()
+    fetch.errors["https://docs.example.com/projects/widget/latest/guide.html"] = \
+        "ERROR:BLOCKED: bot-protection challenge"
+    out = rtfm.reindex_source(conn, _web_source())
+    assert out["error"].startswith("ERROR:BLOCKED:")
+    assert rtfm._web_meta(conn, "widget")["status"] == "error"
+
+
+def test_reindex_web_all_targets_fail_after_discovery(home, monkeypatch):
+    # Discovery succeeds; every TARGET page fails (index fails on its second
+    # fetch — the crawl re-fetches what discovery already saw). Prior content is
+    # preserved and the run is 'error', never 'ok'.
+    fetch = _full_fetch()
+    monkeypatch.setattr(rtfm, "_fetch_page", fetch)
+    monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, _web_source())
+    # in-place mutation — the fake's closure reads the original dicts
+    fetch.errors["https://docs.example.com/projects/widget/latest/guide.html"] = \
+        "ERROR:FETCH_FAILED: HTTP 500"
+    fetch.errors["https://docs.example.com/projects/widget/latest/tutorial/index.html"] = \
+        "ERROR:FETCH_FAILED: HTTP 500"
+    fetch.fail_after["https://docs.example.com/projects/widget/latest/index.html"] = 2
+    fetch.pages["https://docs.example.com/sitemap.xml"] = \
+        SITEMAP.replace("2026-08-26", "2026-09-01")
+    out = rtfm.reindex_source(conn, _web_source())
+    assert out["pages_failed"] == 3
+    assert rtfm._web_meta(conn, "widget")["status"] == "error"
+    assert any(h["title"] == "Guide" for h in rtfm.search_index(conn, "flits"))
 
 
 def test_reindex_web_total_failure_preserves_prior(home, monkeypatch):

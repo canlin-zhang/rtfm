@@ -81,7 +81,7 @@ def _web_cache_path(name: str) -> Path:
 def _web_max_pages() -> int:
     """Hard cap on pages fetched per web reindex. RTFM_WEB_MAX_PAGES overrides."""
     env = os.environ.get("RTFM_WEB_MAX_PAGES")
-    if env and env.isdigit():
+    if env and env.isdigit() and int(env) > 0:   # 0 is nonsense — reject to default
         return int(env)
     return _WEB_MAX_PAGES_DEFAULT
 
@@ -110,6 +110,19 @@ def _web_url_parts(url: str) -> tuple[str, str, str]:
         # to its parent would sweep every version of the site into the crawl.
         root = path.rstrip("/") + "/"
     return u.scheme, u.netloc, root
+
+
+def _web_base_url(index_url: str) -> str:
+    """scheme://netloc + version root (trailing slash). Every page URL is built
+    from this base — urljoin against the RAW entry URL treats a bare version
+    segment as a file and drops it ('…/en/latest' + 'guide.html' → '…/guide.html')."""
+    scheme, netloc, root = _web_url_parts(index_url)
+    return f"{scheme}://{netloc}{root}"
+
+
+def _web_page_url(index_url: str, rel: str) -> str:
+    """The fetch URL for a cache-relative page path under the version root."""
+    return _web_base_url(index_url) + rel.lstrip("/")
 
 
 _last_fetch = 0.0
@@ -212,10 +225,11 @@ def _web_pages(index_url: str, hrefs: list[str]) -> list[str]:
     '/projects/widget/latest/' → 'index.html', 'guide.html' stays. Deduped,
     sorted."""
     scheme, netloc, root = _web_url_parts(index_url)
-    out: list[str] = []
+    base = _web_base_url(index_url)      # not urljoin against the raw URL — a bare
+    out: list[str] = []                  # version segment would be treated as a file
     seen: set[str] = set()
     for href in hrefs:
-        u = urllib.parse.urljoin(index_url, href.strip())
+        u = urllib.parse.urljoin(base, href.strip())
         p = urllib.parse.urlsplit(u)
         if p.scheme not in ("http", "https") or p.netloc != netloc:
             continue
@@ -247,7 +261,8 @@ def _web_discover(fetch, index_url: str) -> tuple[list[str], str | None]:
     the index page is actually RTD-shaped: a page with no div[role="main"] is
     the trust-the-URL failure signal (NOT_READTHEDOCS), and we refuse to crawl
     an arbitrary site."""
-    llms_url = urllib.parse.urljoin(index_url, "llms.txt")
+    llms_url = _web_page_url(index_url, "llms.txt")
+    index_page = _web_page_url(index_url, "index.html")
     data, err = fetch(llms_url)
     if err is None and data:
         pages = _web_pages(index_url, _llms_links(data.decode(errors="replace")))
@@ -255,7 +270,7 @@ def _web_discover(fetch, index_url: str) -> tuple[list[str], str | None]:
             # The fast path must NOT bypass the RTD-shape guard: verify the index
             # page has a main region before trusting an llms.txt, or a non-RTD
             # site publishing one would be indexed as an empty "ok" source.
-            idx, ierr = fetch(index_url)
+            idx, ierr = fetch(index_page)
             if ierr is not None:
                 return [], ierr
             _, _, lines = _html_to_text(idx.decode(errors="replace"))
@@ -265,7 +280,7 @@ def _web_discover(fetch, index_url: str) -> tuple[list[str], str | None]:
                     "this doesn't look like a ReadTheDocs site. Recover: check the url "
                     "in the manifest, or use a different source type.")
             return pages, None
-    data, err = fetch(index_url)
+    data, err = fetch(index_page)
     if err is not None:
         return [], err
     html = data.decode(errors="replace")
@@ -374,7 +389,9 @@ def _reindex_web(conn: sqlite3.Connection, src: Source) -> dict:
     data, err = _fetch_page(f"{scheme}://{netloc}/sitemap.xml")
     lastmod = _sitemap_lastmod(data, root) if err is None and data else None
     if (err is None and meta and meta["status"] in ("ok", "truncated")
-            and lastmod is not None and lastmod == meta["lastmod"]):
+            and meta["url"] == src.url              # URL identity: a changed url
+            and lastmod is not None                 # must never skip on a coincidental
+            and lastmod == meta["lastmod"]):        # lastmod match
         return {"source": src.name, "status": "up to date", "lastmod": lastmod}
 
     pages, err = _web_discover(_fetch_page, src.url or "")
@@ -390,7 +407,7 @@ def _reindex_web(conn: sqlite3.Connection, src: Source) -> dict:
     written: set[str] = set()
     failed_pages = 0
     for rel in targets:
-        page_url = urllib.parse.urljoin(src.url or "", rel)
+        page_url = _web_page_url(src.url or "", rel)
         data, ferr = _fetch_page(page_url)
         if ferr is not None:
             if ferr.startswith(("ERROR:BLOCKED:", "ERROR:RATE_LIMITED:")):
@@ -418,7 +435,7 @@ def _reindex_web(conn: sqlite3.Connection, src: Source) -> dict:
                      "pages_failed": failed_pages, "truncated": truncated,
                      "total_pages": total}
     if failed_pages:
-        summary["warning"] = (f"{failed_pages} page(s) failed to fetch — prior "
+        summary["warning"] = (f"{failed_pages} pages failed to fetch — prior "
                               f"content preserved; run reindex again to retry.")
     summary.update(_index_files(conn, src.name, cache))
     # status is 'ok' ONLY with zero failures: any failed page makes the run
@@ -427,7 +444,7 @@ def _reindex_web(conn: sqlite3.Connection, src: Source) -> dict:
     status = "error" if failed_pages else ("truncated" if truncated else "ok")
     error = None
     if failed_pages:
-        error = (f"ERROR:FETCH_FAILED: {failed_pages} of {len(targets)} page(s) failed "
+        error = (f"ERROR:FETCH_FAILED: {failed_pages} of {len(targets)} pages failed "
                  f"to fetch ({total} pages discovered, cap {limit}) — indexed "
                  f"{len(written)}; prior content preserved. Recover: run "
                  f"reindex('{src.name}') again.")
@@ -1351,7 +1368,16 @@ def reindex_source(conn: sqlite3.Connection, src: Source) -> dict:
     if src.type == "git_repo":
         return _reindex_git_repo(conn, src)
     if src.type == "web":
-        return _reindex_web(conn, src)
+        try:
+            return _reindex_web(conn, src)
+        except Exception as e:
+            # A crash (disk full, sqlite, extraction) must land in web_meta as
+            # 'error' — the tool-level isolation wrapper cannot do that, and the
+            # prior 'ok' standing forever is the healthy-while-degraded failure.
+            _log.exception("web reindex '%s' crashed: %s", src.name, e)
+            return _web_fail(conn, src,
+                             f"ERROR:FETCH_FAILED: {type(e).__name__}: {e}. "
+                             f"Recover: fix the cause and run reindex('{src.name}') again.")
     summary = {"source": src.name, "files_seen": 0, "unique_contents": 0,
                "newly_extracted": 0, "extraction_skips": 0, "purged": 0, "errors": 0}
     if src.path is None or not src.path.exists():
