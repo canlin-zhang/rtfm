@@ -240,6 +240,18 @@ def _web_discover(fetch, index_url: str) -> tuple[list[str], str | None]:
     if err is None and data:
         pages = _web_pages(index_url, _llms_links(data.decode(errors="replace")))
         if pages:
+            # The fast path must NOT bypass the RTD-shape guard: verify the index
+            # page has a main region before trusting an llms.txt, or a non-RTD
+            # site publishing one would be indexed as an empty "ok" source.
+            idx, ierr = fetch(index_url)
+            if ierr is not None:
+                return [], ierr
+            _, _, lines = _html_to_text(idx.decode(errors="replace"))
+            if not lines:
+                return [], (
+                    "ERROR:NOT_READTHEDOCS: the page has no div[role=\"main\"] content — "
+                    "this doesn't look like a ReadTheDocs site. Recover: check the url "
+                    "in the manifest, or use a different source type.")
             return pages, None
     data, err = fetch(index_url)
     if err is not None:
@@ -846,6 +858,11 @@ def _text_doc_signal(path: Path) -> tuple[str, str]:
 
 
 _BLOCK_TAGS = {"p", "div", "li", "tr", "ul", "ol", "table", "section", "dt", "dd"}
+# Void elements emit no end tag — the parser must never count them as open depth
+# levels, or the main-region boundary leaks (footer/nav chrome after </div
+# role=main> would be processed as if inside main).
+_WEB_VOID_TAGS = {"br", "img", "hr", "meta", "link", "input", "area", "base", "col",
+                  "embed", "source", "track", "wbr"}
 
 
 class _MainExtractor(html.parser.HTMLParser):
@@ -870,8 +887,12 @@ class _MainExtractor(html.parser.HTMLParser):
         attrs = dict(attrs)
         if self._main_depth < 0:
             if tag == "div" and attrs.get("role") == "main":
-                self._main_depth = 0
+                self._main_depth = 1      # counts the main div itself; its endtag → 0 → -1
             return
+        if tag in _WEB_VOID_TAGS:
+            if self._skip == 0 and tag == "br":
+                self._emit_block()
+            return                           # void: no depth level to track
         self._main_depth += 1
         if tag in ("script", "style"):
             self._skip += 1
@@ -882,14 +903,14 @@ class _MainExtractor(html.parser.HTMLParser):
             elif tag in ("h1", "h2", "h3"):
                 self._emit_block()
                 self._heading_tag = tag
-            elif tag == "br":
-                self._emit_block()
             elif tag in _BLOCK_TAGS:
                 self._emit_block()
 
     def handle_endtag(self, tag: str) -> None:
         if self._main_depth < 0:
             return
+        if tag in _WEB_VOID_TAGS:
+            return                           # `<br/>`-style startendtags pair with no depth
         if self._skip > 0:
             if tag in ("script", "style"):
                 self._skip -= 1
@@ -900,6 +921,8 @@ class _MainExtractor(html.parser.HTMLParser):
         elif self._heading_tag and tag == self._heading_tag:
             self._heading_tag = ""
         self._main_depth -= 1
+        if self._main_depth == 0:
+            self._main_depth = -1         # the main div's own end tag: back outside
 
     def handle_data(self, data: str) -> None:
         if self._main_depth < 0 or self._skip > 0:

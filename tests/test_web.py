@@ -125,6 +125,19 @@ def test_html_to_text_no_main_region():
     assert rtfm._html_to_text("<html><body><p>plain</p></body></html>") == ("", "", [])
 
 
+def test_html_to_text_void_elements_do_not_leak_depth():
+    # Void elements (<img>/<br>/<hr>) emit no end tags — they must not push the
+    # main-region depth, or chrome after </div role=main> leaks into the text.
+    html = ('<html><body><div role="main" class="document"><h1>T</h1>'
+            '<p>before<img src="x.png" alt="pic">after<br>line2</p><hr>'
+            '</div><footer>FOOTER CHROME</footer></body></html>')
+    title, headings, lines = rtfm._html_to_text(html)
+    joined = "\n".join(lines)
+    assert "FOOTER CHROME" not in joined
+    assert "line2" in joined
+    assert title == "T"
+
+
 def test_html_rows_chunk_lines(home, tmp_path):
     d = tmp_path / "docs"
     d.mkdir()
@@ -265,11 +278,26 @@ def test_discover_llms_txt_fast_path():
     fetch = _fake_fetch({
         "https://docs.example.com/projects/widget/latest/llms.txt":
             "# Widget docs\n\n[Guide](guide.html)\n[Intro](index.html)\n",
+        INDEX_URL: RTD_INDEX,   # the fast path still shape-checks the index page
     })
     pages, err = rtfm._web_discover(fetch, INDEX_URL)
     assert err is None
     assert pages == ["guide.html", "index.html"]
-    assert fetch.calls == ["https://docs.example.com/projects/widget/latest/llms.txt"]
+    assert fetch.calls == ["https://docs.example.com/projects/widget/latest/llms.txt",
+                           INDEX_URL]
+
+
+def test_discover_llms_txt_still_shape_checks_index():
+    # A non-RTD site publishing llms.txt must not be indexed: the fast path cannot
+    # bypass the NOT_READTHEDOCS guard.
+    fetch = _fake_fetch({
+        "https://docs.example.com/projects/widget/latest/llms.txt":
+            "# Not docs\n\n[Guide](guide.html)\n",
+        INDEX_URL: "<html><body><p>not docs at all</p></body></html>",
+    })
+    pages, err = rtfm._web_discover(fetch, INDEX_URL)
+    assert pages == []
+    assert err is not None and err.startswith("ERROR:NOT_READTHEDOCS:")
 
 
 def test_discover_falls_back_to_nav_crawl():
