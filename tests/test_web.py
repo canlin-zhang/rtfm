@@ -79,6 +79,16 @@ def test_web_url_parts_rejects_non_http(home):
         rtfm._web_url_parts("not a url")
 
 
+def test_web_url_parts_bare_version_segment():
+    # A URL whose last path segment IS the version (no trailing slash, no file)
+    # must scope to that version — NOT to its parent directory, or the
+    # same-version filter would sweep every version of the site.
+    assert rtfm._web_url_parts("https://slug.readthedocs.io/en/latest") == \
+        ("https", "slug.readthedocs.io", "/en/latest/")
+    assert rtfm._web_url_parts("https://docs.example.com/projects/widget/v2.18") == \
+        ("https", "docs.example.com", "/projects/widget/v2.18/")
+
+
 RTD_INDEX = """<!DOCTYPE html><html><head><title>Widget docs &mdash; Project docs</title></head>
 <body class="wy-body-for-nav"><div class="wy-grid-for-nav"><nav class="wy-nav-side">
 <div class="wy-menu wy-menu-vertical"><ul>
@@ -221,6 +231,35 @@ def test_http_get_fetch_failed(monkeypatch):
 def test_throttle_delay_constant(monkeypatch):
     monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)   # fast in tests
     rtfm._throttle()                                      # must not raise
+
+
+def test_http_get_incomplete_read_fetch_failed(monkeypatch):
+    # A truncated response (hostile CDN) must classify, not crash the tool call.
+    import http.client
+
+    def boom(req, **kwargs):
+        raise http.client.IncompleteRead(b"partial")
+    monkeypatch.setattr(rtfm, "_urlopen", boom)
+    _, err = rtfm._http_get("https://x.example.com/")
+    assert err is not None and err.startswith("ERROR:FETCH_FAILED:")
+
+
+def test_reindex_tool_isolates_source_failures(home, monkeypatch):
+    # One source's reindex raising must not abort the others (ADR 0014: one bad
+    # source never breaks the rest).
+    rtfm.manifest_path().write_text(
+        f'[[source]]\nname="default"\ntype="dir"\npath="{rtfm.default_source_dir()}"\n'
+        '[[source]]\nname="widget"\ntype="web"\nflavor="readthedocs"\n'
+        'url="https://docs.example.com/projects/widget/latest/index.html"\n')
+
+    def boom(url):
+        raise RuntimeError("network exploded")
+    monkeypatch.setattr(rtfm, "_fetch_page", boom)
+    monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)
+    out = rtfm.reindex()   # all sources: default dir (ok) + widget (raises)
+    entries = {e.get("source"): e for e in out["reindexed"]}
+    assert "error" in entries["widget"]
+    assert "error" not in entries["default"]
 
 
 def test_html_hrefs_extracts_all():

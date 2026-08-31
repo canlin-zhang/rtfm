@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import html.parser
+import http.client
 import logging
 import os
 import re
@@ -96,9 +97,18 @@ def _web_url_parts(url: str) -> tuple[str, str, str]:
     u = urllib.parse.urlsplit(url)
     if u.scheme not in ("http", "https") or not u.netloc:
         raise ValueError(f"not an http(s) URL: {url!r}")
-    if "/" not in u.path:
+    path = u.path
+    if not path:
         raise ValueError(f"URL has no path: {url!r}")
-    root = u.path.rsplit("/", 1)[0].rstrip("/") + "/"
+    if path.endswith("/"):
+        root = path
+    elif path.rsplit("/", 1)[-1].endswith(".html"):
+        # '…/en/latest/index.html' → the version root is its directory.
+        root = path.rsplit("/", 1)[0].rstrip("/") + "/"
+    else:
+        # A bare last segment IS the version ('…/en/latest', '…/v2.18') — scoping
+        # to its parent would sweep every version of the site into the crawl.
+        root = path.rstrip("/") + "/"
     return u.scheme, u.netloc, root
 
 
@@ -150,7 +160,9 @@ def _http_get(url: str) -> tuple[bytes | None, str | None]:
         return None, (
             f"ERROR:FETCH_FAILED: HTTP {e.code} from {url}. Recover: check the URL "
             f"and network, then reindex.")
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
+    except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as e:
+        # HTTPException covers IncompleteRead/BadStatusLine from a hostile or
+        # truncated connection — they must classify, not crash the tool call.
         return None, (
             f"ERROR:FETCH_FAILED: {e} fetching {url}. Recover: check the URL and "
             f"network, then reindex.")
@@ -2022,7 +2034,15 @@ def reindex(source: str | None = None) -> dict:
                 _staleness_cache.pop(key, None)
         if dropped:
             conn.commit()
-    resp: dict = {"reindexed": [reindex_source(conn, s) for s in targets]}
+    results = []
+    for s in targets:
+        try:
+            results.append(reindex_source(conn, s))
+        except Exception as e:
+            # One source's reindex never aborts the others (ADR 0014: one bad
+            # source never breaks the rest) — the failure is a per-source entry.
+            results.append({"source": s.name, "error": f"{type(e).__name__}: {e}"})
+    resp: dict = {"reindexed": results}
     if dropped:
         resp["purged_sources"] = dropped
     if warnings:
