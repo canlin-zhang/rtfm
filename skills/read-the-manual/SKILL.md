@@ -20,6 +20,8 @@ Call `mcp__plugin_rtfm_rtfm__search(query)` with the key terms from the question
 
 If the response carries a `sources_failed` list, each named source has NO indexed content (never indexed, or the last index attempt failed — the state string says which). It is not part of the corpus: do not claim coverage for it. You may attempt `mcp__plugin_rtfm_rtfm__reindex('<name>')` once; if it fails again, state the gap to the user.
 
+Two other web-source states matter for coverage honesty: a `SOURCE FAILED` warning means the last reindex failed and search is serving previously indexed content — treat it as stale and reindex before relying on it. A `SOURCE TRUNCATED` warning means the page cap (`RTFM_WEB_MAX_PAGES`) cut the crawl short — coverage is partial, so a "no hits" answer is not a "not covered" answer; say the corpus covers only N of M pages.
+
 If the first query returns nothing useful, try narrower or alternative terms — don't give up after one miss.
 
 ### 2. Read

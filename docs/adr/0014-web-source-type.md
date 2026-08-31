@@ -80,7 +80,8 @@ The locator is line numbers in the *extracted* text under the cache-relative
 path; `read` re-extracts, so hit locators and reads stay consistent. The
 page's public URL is derivable (the source's index `url` up to its last `/`,
 plus `relpath`) — the skill documents the derivation, so no URL column in the
-index.
+index. This amends ADR 0004's locator scheme: HTML locators are extracted-text
+line numbers (plus the derivable page URL), not anchors.
 
 ### Cache + incremental reindex
 
@@ -88,9 +89,16 @@ Fetched pages are cached as raw HTML at `~/.rtfm/web/<name>/`, mirroring the
 URL tree under the version root. Reindex hands the cache to the shared
 `_index_files` core: the content-addressed store dedups on file bytes, so an
 unchanged page costs nothing at extract time — refetch-all with cheap dedup,
-the same model as git_repo's full-checkout-then-diff. Cache files no longer in
-the page set are purged; on failure the prior cache and index rows are left
-untouched, so prior content stays searchable.
+the same model as git_repo's full-checkout-then-diff.
+
+Purge semantics are precise about *why* a page left the corpus: only pages
+**not in this run's target set** (their link vanished upstream) are purged. A
+page that **failed to fetch** stays in the target set, so its prior cache file
+and index rows survive — a fetch failure never silently deletes content, and
+the run is recorded as `status="error"` (which never skips), so the skip gate
+cannot lock such a loss in. `status="ok"` is written only when every target
+page fetched; on any failure the prior page counts are preserved, never
+zeroed.
 
 ### Skip-optimization: the version-index lastmod
 
@@ -99,8 +107,9 @@ tracked version's `lastmod`. If the previous run *completed* (status `ok` or
 `truncated`) and lastmod is unchanged, reindex reports "up to date" and skips
 the crawl — on a 20-minute site this makes reindex a casual call. The
 optimization is conservative: a CDN-lagged lastmod re-crawls, and an
-unparseable sitemap (custom sitemaps exist) always crawls. A truncated or
-failed run never skips.
+unparseable sitemap (custom sitemaps exist) always crawls. A **failed** run
+never skips (its status is `error`, outside the gate); a `truncated` run may
+skip, since its crawl did run and its lastmod is valid.
 
 ### Cooperative-only; bot walls are a classified state
 
@@ -119,6 +128,11 @@ Five failure classes, message-style consistent with git_repo's classified
 errors: `ERROR:BLOCKED:`, `ERROR:RATE_LIMITED:`, `ERROR:FETCH_FAILED:`,
 `ERROR:NOT_READTHEDOCS:` (the trust-the-URL case: the page fetched but has no
 `div[role="main"]`), and `TRUNCATED (N/M)` (a warning state, not a failure).
+
+Partial failure is not a success: a reindex in which any page failed to fetch
+writes `status="error"` with a message naming the count, preserves prior
+content, and is surfaced by search's `SOURCE FAILED` warning — a partial crawl
+never presents as a complete one, and never feeds the skip gate.
 
 Agent-facing contract — a declared-but-failed source must not look covered:
 

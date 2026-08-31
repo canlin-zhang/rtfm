@@ -2,10 +2,23 @@
 
 Deferred scope, each with the decision that parked it. Not yet implemented.
 
-- **Web sources** — index public doc sites as a third sync type alongside `dir` and `repo`
-  (`web`, Refreshed by re-fetch). Experimental and cooperative-only: no OCR, no JS
-  execution. See [ADR 0002](adr/0002-source-types-by-sync-method.md) (reserves the type) and
-  [ADR 0005](adr/0005-text-extraction-only-no-ocr.md) (the boundary).
+- **Web sources — ✅ SHIPPED in 0.7.0 (ADR 0014).** The `web` source type with the
+  `readthedocs` flavor: indexes ReadTheDocs-hosted doc sites whose projects build no PDF.
+  Cooperative-only: no OCR, no JS execution. See
+  [ADR 0002](adr/0002-source-types-by-sync-method.md) (reserves the type),
+  [ADR 0005](adr/0005-text-extraction-only-no-ocr.md) (the boundary), and
+  [ADR 0014](adr/0014-web-source-type.md).
+
+  - **Browser escalation (planned, opt-in)** — per-source opt-in "try harder" mode for web
+    Sources whose cooperative fetch fails (bot wall, rate limit, client-rendered shell page):
+    the user asks the agent to index the site anyway, the agent flips a manifest flag, and the
+    failed source re-fetches through a headless browser. The browser is never the default fetch
+    path — escalation fires only after the cooperative fetch failed, and the browser is lazily
+    installed on first escalated run (no cold-start cost for everyone else). Extraction stays
+    unchanged (the rendered page still yields `role="main"`). Deferred: an arms-race dependency
+    (bot-detection bypasses rot), a heavy per-install browser binary, and a fetch-transport
+    that belongs to the web type generally, not to the readthedocs flavor. Wheel not reinvented:
+    Playwright is the designated implementation, when this lands.
 
 - **OCR** — extract text from image-only/scanned documents. **PDF-first** (scanned specs are
   the real demand), HTML/web image content only after. See

@@ -41,11 +41,15 @@ optional PDF-quality bonus (the `pymupdf`/`pypdf` fallback covers extraction wit
   audit/reorg skills run only on a Source explicitly marked `mutable: true` in the manifest,
   and **an agent must never set `mutable` itself** — that flag is the user's recorded consent.
   ([ADR 0001](docs/adr/0001-read-only-by-default.md))
-- **Source types split on sync method** (`dir` / `repo` / future `web`); file handling is
-  keyed by extension into one FTS index. ([ADR 0002](docs/adr/0002-source-types-by-sync-method.md))
-- **Refresh** is staleness-bounded `git pull --ff-only`, fail-soft with cause-distinguishing
-  messages. ([ADR 0003](docs/adr/0003-refresh-model.md))
-- **Format-native locators**: PDF→page, text→line, HTML→anchor.
+- **Source types split on sync method** (`dir` / `repo` / `web`, the last flavored by
+  hosting family); file handling is keyed by extension into one FTS index.
+  ([ADR 0002](docs/adr/0002-source-types-by-sync-method.md))
+- **Refresh** is staleness-bounded `git pull --ff-only` for repos; web sources refresh by
+  explicit `reindex` re-fetch only (search never fetches for web), fail-soft with
+  cause-distinguishing messages. ([ADR 0003](docs/adr/0003-refresh-model.md),
+  [ADR 0014](docs/adr/0014-web-source-type.md))
+- **Format-native locators**: PDF→page, text/HTML→line (web: page URL derivable from the
+  source `url` plus `relpath`).
   ([ADR 0004](docs/adr/0004-format-native-locators.md))
 - **Text-extraction only** — no OCR, no JS. ([ADR 0005](docs/adr/0005-text-extraction-only-no-ocr.md))
 - **The defining guardrail:** no vendor-, project-, or domain-specific tables in shipped

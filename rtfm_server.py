@@ -1907,8 +1907,11 @@ def search(query: str, source: str | None = None, max_files: int = 20,
     git_repo sources always auto-reindex when stale (a cheap commit comparison — after
     fetch for managed clones, against the tree's HEAD for linked) — the budget doesn't
     apply; a failed refresh is reported in WARNING and previously indexed content is
-    searched. This refreshes the search cache only — it never mutates user-owned files;
-    managed clones are rtfm's own and are refreshed by design.
+    searched. web sources are NEVER auto-refreshed (no network in the query path, ADR
+    0014) — reindex them explicitly; their presence in the corpus is reported via
+    sources_searched and sources_failed on every response. This refreshes the search
+    cache only — it never mutates user-owned files; managed clones are rtfm's own and
+    are refreshed by design.
 
     Args:
         query: text to search for.
@@ -2030,8 +2033,9 @@ def search(query: str, source: str | None = None, max_files: int = 20,
 @mcp.tool()
 def reindex(source: str | None = None) -> dict:
     """Build/refresh the index. The ONLY tool that extracts. Pass a source name to rebuild
-    just that source, or omit to rebuild all dir and git_repo sources. Returns a per-source
-    summary."""
+    just that source, or omit to rebuild all dir, git_repo, and web sources. Returns a
+    per-source summary. For web sources this is the ONLY way to refresh (search never
+    fetches) — a failed reindex is reported per source and never aborts the others."""
     sources, warnings = load_manifest()
     conn = get_index_db()
     targets = [s for s in sources if s.type in ("dir", "git_repo", "web")
@@ -2137,6 +2141,11 @@ def list_sources() -> dict:
     the detail names it). Linked clones are read-only: the comparison uses the clone's
     own local refs, never a fetch. One bad source never breaks the rest: git failures
     degrade to a status string, never an exception.
+
+    web sources report web_status — "never indexed" (no web_meta row yet), "indexed",
+    "TRUNCATED (N/M pages)" (the page cap cut the crawl short — coverage is partial),
+    or "last index FAILED: <classified error>" — plus the tracked version, page count,
+    fetched-at, and upstream lastmod where known.
     """
     sources, warnings = load_manifest()
     conn = get_index_db()
