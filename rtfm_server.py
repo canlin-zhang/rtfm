@@ -144,8 +144,8 @@ def _http_get(url: str) -> tuple[bytes | None, str | None]:
         body = ""
         try:
             body = e.read().decode(errors="replace")
-        except Exception:
-            pass
+        except Exception as e2:                  # error body read is best-effort
+            _log.debug("could not read error body from %s: %s", url, e2)
         low = body.lower()
         if "just a moment" in low or "cf_chl" in low or "challenge-platform" in low:
             return None, (
@@ -289,7 +289,11 @@ def _sitemap_lastmod(data: bytes, version_root: str) -> str | None:
         loc = re.search(r"<loc>(.*?)</loc>", block, re.S)
         lm = re.search(r"<lastmod>(.*?)</lastmod>", block, re.S)
         if loc and lm:
-            path = urllib.parse.urlsplit(loc.group(1).strip()).path.rstrip("/") + "/"
+            path = urllib.parse.urlsplit(loc.group(1).strip()).path
+            if path.endswith("/index.html"):       # some sitemaps name the file
+                path = path[:-len("/index.html")] + "/"
+            else:
+                path = path.rstrip("/") + "/"
             if path == version_root:
                 return lm.group(1).strip()
     return None
@@ -375,6 +379,7 @@ def _reindex_web(conn: sqlite3.Connection, src: Source) -> dict:
 
     pages, err = _web_discover(_fetch_page, src.url or "")
     if err is not None:
+        _log.warning("web reindex '%s' failed at discovery: %s", src.name, err)
         return _web_fail(conn, src, err)
 
     total = len(set(pages) | {"index.html"})   # the seed page is part of the site
@@ -389,8 +394,10 @@ def _reindex_web(conn: sqlite3.Connection, src: Source) -> dict:
         data, ferr = _fetch_page(page_url)
         if ferr is not None:
             if ferr.startswith(("ERROR:BLOCKED:", "ERROR:RATE_LIMITED:")):
+                _log.warning("web reindex '%s' aborted at %s: %s", src.name, rel, ferr)
                 return _web_fail(conn, src, ferr)   # host-level condition — abort
             failed_pages += 1                        # per-page flake — skip, count
+            _log.warning("web reindex '%s': %s failed: %s", src.name, rel, ferr)
             continue
         out_path = cache / rel
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -758,7 +765,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
             page_count INTEGER NOT NULL,
             total_pages INTEGER NOT NULL,
             lastmod    TEXT,
-            status     TEXT NOT NULL,
+            status     TEXT NOT NULL
+                       CHECK(status IN ('ok', 'truncated', 'error')),
             error      TEXT
         );
         """
@@ -1544,6 +1552,12 @@ def _validate_source(s: Source) -> str | None:
         if s.flavor not in ("readthedocs",):
             return (f"!!! INVALID SOURCE '{s.name}' !!! unknown flavor '{s.flavor}' — "
                     f"expected 'readthedocs'. Recover: fix 'flavor' in {manifest_path()}.")
+        if s.path is not None:
+            # A web source reads from its cache, never from a user path — a
+            # declared path silently doing nothing is a divergence trap.
+            return (f"!!! SOURCE PATH IGNORED '{s.name}' !!! web sources ignore 'path' — "
+                    f"fetched pages live in rtfm's cache. Recover: remove 'path' from "
+                    f"the source in {manifest_path()}.")
         return None
     if s.type == "git_repo":
         if not s.url:
@@ -2168,23 +2182,22 @@ def list_sources() -> dict:
         if s.type == "web":
             item["url"] = s.url
             item["flavor"] = s.flavor
-            meta = conn.execute(
-                "SELECT url, version, fetched_at, page_count, total_pages, lastmod, "
-                "status, error FROM web_meta WHERE source=?", (s.name,)).fetchone()
+            meta = _web_meta(conn, s.name)
             if meta is None:
                 item["web_status"] = "never indexed"
-            elif meta[6] == "ok":
+            elif meta["status"] == "ok":
                 item["web_status"] = "indexed"
-                item["tracking_version"] = meta[1]
-                item["fetched_at"] = meta[2]
-                item["page_count"] = meta[3]
-                item["upstream_lastmod"] = meta[5]
-            elif meta[6] == "truncated":
-                item["web_status"] = f"TRUNCATED ({meta[3]}/{meta[4]} pages)"
-                item["tracking_version"] = meta[1]
-                item["fetched_at"] = meta[2]
+                item["tracking_version"] = meta["version"]
+                item["fetched_at"] = meta["fetched_at"]
+                item["page_count"] = meta["page_count"]
+                item["upstream_lastmod"] = meta["lastmod"]
+            elif meta["status"] == "truncated":
+                item["web_status"] = (
+                    f"TRUNCATED ({meta['page_count']}/{meta['total_pages']} pages)")
+                item["tracking_version"] = meta["version"]
+                item["fetched_at"] = meta["fetched_at"]
             else:
-                item["web_status"] = f"last index FAILED: {meta[7]}"
+                item["web_status"] = f"last index FAILED: {meta['error']}"
         out.append(item)
     resp = {"sources": out}
     if warnings:

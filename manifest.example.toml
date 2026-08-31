@@ -54,4 +54,4 @@ mutable = true
 # name    = "ansible"
 # type    = "web"
 # flavor  = "readthedocs"
-# url     = "https://docs.ansible.com/projects/ansible/latest/index.html"
+# url     = "https://docs.example.com/en/latest/index.html"

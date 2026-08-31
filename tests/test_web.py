@@ -1,5 +1,6 @@
 """web source type — validation, discovery, extraction, fetch, reindex, agent contract."""
 import io
+import sqlite3
 import urllib.error
 
 import pytest
@@ -726,3 +727,27 @@ def test_migrate_schema_drops_web_meta(home):
                          page_count=1, total_pages=1, lastmod=None, status="ok", error=None)
     rtfm._migrate_schema(conn)
     assert conn.execute("SELECT COUNT(*) FROM web_meta").fetchone()[0] == 0
+
+
+def test_web_source_with_path_warns(home):
+    # A web source ignores 'path' — saying so loudly beats silent divergence
+    # between read (cache) and what the user expected (their path).
+    _manifest_with('[[source]]\nname="w"\ntype="web"\nflavor="readthedocs"\n'
+                   'url="https://x.example.com/en/latest/index.html"\npath="/tmp/x"\n')
+    _, warnings = rtfm.load_manifest()
+    assert any("ignore 'path'" in w for w in warnings)
+
+
+def test_sitemap_lastmod_matches_index_html_loc():
+    xml = ('<urlset><url><loc>https://docs.example.com/projects/widget/latest/index.html</loc>'
+           '<lastmod>2026-08-26T00:00:00+00:00</lastmod></url></urlset>')
+    assert rtfm._sitemap_lastmod(xml.encode(), "/projects/widget/latest/") == \
+        "2026-08-26T00:00:00+00:00"
+
+
+def test_web_meta_rejects_unknown_status(home):
+    conn = rtfm.get_index_db()
+    with pytest.raises(sqlite3.IntegrityError):
+        rtfm._web_meta_write(conn, _web_source(), version="latest", fetched_at=1.0,
+                             page_count=1, total_pages=1, lastmod=None,
+                             status="bogus", error=None)
