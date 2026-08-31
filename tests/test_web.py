@@ -686,3 +686,43 @@ def test_reindex_tool_targets_web(home, monkeypatch):
         'url="https://docs.example.com/projects/widget/latest/index.html"\n')
     out = rtfm.reindex(source="widget")
     assert any(r.get("pages_fetched") == 3 for r in out["reindexed"])
+
+
+def test_search_warns_on_truncated_source(home, monkeypatch):
+    # A truncated corpus is partial coverage — search must say so, or an agent
+    # reads a 2000-of-3500-page corpus as fully covered.
+    fetch = _full_fetch()
+    monkeypatch.setattr(rtfm, "_fetch_page", fetch)
+    monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)
+    monkeypatch.setenv("RTFM_WEB_MAX_PAGES", "2")
+    _manifest_with_widget()
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, _web_source())
+    out = rtfm.search(query="widget protocol")
+    assert any("SOURCE TRUNCATED" in w and "2 of 3" in w for w in out.get("WARNING", []))
+    assert "widget" in out["sources_searched"]
+
+
+def test_reindex_purges_web_meta_on_source_drop(home, monkeypatch):
+    # A dropped source must lose its web_meta row too — otherwise re-adding it
+    # reports a stale 'indexed' while search says 'never indexed'.
+    fetch = _full_fetch()
+    monkeypatch.setattr(rtfm, "_fetch_page", fetch)
+    monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)
+    _manifest_with_widget()
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, _web_source())
+    assert rtfm._web_meta(conn, "widget") is not None
+    rtfm.manifest_path().write_text(
+        f'[[source]]\nname="default"\ntype="dir"\npath="{rtfm.default_source_dir()}"\n')
+    out = rtfm.reindex()
+    assert "widget" in out.get("purged_sources", [])
+    assert rtfm._web_meta(conn, "widget") is None
+
+
+def test_migrate_schema_drops_web_meta(home):
+    conn = rtfm.get_index_db()
+    rtfm._web_meta_write(conn, _web_source(), version="latest", fetched_at=1.0,
+                         page_count=1, total_pages=1, lastmod=None, status="ok", error=None)
+    rtfm._migrate_schema(conn)
+    assert conn.execute("SELECT COUNT(*) FROM web_meta").fetchone()[0] == 0

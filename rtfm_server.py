@@ -725,6 +725,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         DROP TABLE IF EXISTS locations;
         DROP TABLE IF EXISTS content_fts;
         DROP TABLE IF EXISTS source_meta;
+        DROP TABLE IF EXISTS web_meta;
         CREATE VIRTUAL TABLE doc_fts USING fts5(sha256 UNINDEXED, title, headings);
         CREATE TABLE contents (
             sha256       TEXT PRIMARY KEY,
@@ -1988,6 +1989,13 @@ def search(query: str, source: str | None = None, max_files: int = 20,
                 warnings.append(
                     f"!!! SOURCE FAILED '{s.name}' !!! {meta['error']} — serving "
                     f"previously indexed content. Recover: run reindex('{s.name}').")
+            elif meta is not None and meta["status"] == "truncated":
+                # Partial coverage must not look like full coverage to an agent.
+                warnings.append(
+                    f"!!! SOURCE TRUNCATED '{s.name}' !!! indexed {meta['page_count']} "
+                    f"of {meta['total_pages']} pages (RTFM_WEB_MAX_PAGES cap) — coverage "
+                    f"is partial. Recover: raise RTFM_WEB_MAX_PAGES and run "
+                    f"reindex('{s.name}').")
         else:
             state = "never indexed"
             if meta is not None and meta["status"] == "error":
@@ -2030,6 +2038,7 @@ def reindex(source: str | None = None) -> dict:
         for name in dropped:
             conn.execute("DELETE FROM locations WHERE source=?", (name,))
             conn.execute("DELETE FROM source_meta WHERE source=?", (name,))
+            conn.execute("DELETE FROM web_meta WHERE source=?", (name,))
             for key in [k for k in _staleness_cache if k[0] == name]:
                 _staleness_cache.pop(key, None)
         if dropped:
