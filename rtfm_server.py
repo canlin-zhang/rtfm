@@ -306,13 +306,19 @@ def _web_meta_write(conn: sqlite3.Connection, src: Source, *, version: str,
 def _web_fail(conn: sqlite3.Connection, src: Source, error: str) -> dict:
     """Record a failed reindex (status='error') and return the error summary. Prior
     cache and index rows are left untouched — prior content stays searchable and
-    the failure is loud via web_status and search's sources_failed/warning."""
+    the failure is loud via web_status and search's sources_failed/warning. The
+    prior counts are preserved, not zeroed: list_sources must not report 'indexed'
+    with page_count 0 while content exists."""
     try:
         _, _, root = _web_url_parts(src.url or "")
     except ValueError:
         root = "/"
+    prior = _web_meta(conn, src.name)
+    page_count = prior["page_count"] if prior else 0
+    total_pages = prior["total_pages"] if prior else 0
     _web_meta_write(conn, src, version=_web_version(root), fetched_at=time.time(),
-                    page_count=0, total_pages=0, lastmod=None, status="error", error=error)
+                    page_count=page_count, total_pages=total_pages, lastmod=None,
+                    status="error", error=error)
     return {"source": src.name, "error": error}
 
 
@@ -367,22 +373,40 @@ def _reindex_web(conn: sqlite3.Connection, src: Source) -> dict:
         out_path.write_bytes(data)
         written.add(rel)
 
-    # Purge cache files from previous runs that are no longer in the page set.
+    # Purge cache files from previous runs that are NOT in this run's target set —
+    # pages that genuinely vanished upstream. A page that FAILED to fetch stays in
+    # the target set, so its prior cache file and index rows survive: a fetch
+    # failure must never silently delete content, and the skip gate must not be
+    # able to lock such a loss in (status is 'error' below, which never skips).
     if written:
         for f in cache.rglob("*"):
-            if f.is_file() and f.relative_to(cache).as_posix() not in written:
+            if f.is_file() and f.relative_to(cache).as_posix() not in targets:
                 f.unlink()
 
     summary: dict = {"source": src.name, "pages_fetched": len(written),
                      "pages_failed": failed_pages, "truncated": truncated,
                      "total_pages": total}
     if failed_pages:
-        summary["warning"] = (f"{failed_pages} page(s) failed to fetch and were "
-                              f"skipped — the index may be missing some pages.")
+        summary["warning"] = (f"{failed_pages} page(s) failed to fetch — prior "
+                              f"content preserved; run reindex again to retry.")
     summary.update(_index_files(conn, src.name, cache))
+    # status is 'ok' ONLY with zero failures: any failed page makes the run
+    # 'error' (loud on search, never skipped), so a partial crawl can never look
+    # like a complete one.
+    status = "error" if failed_pages else ("truncated" if truncated else "ok")
+    error = None
+    if failed_pages:
+        error = (f"ERROR:FETCH_FAILED: {failed_pages} of {len(targets)} page(s) failed "
+                 f"to fetch ({total} pages discovered, cap {limit}) — indexed "
+                 f"{len(written)}; prior content preserved. Recover: run "
+                 f"reindex('{src.name}') again.")
+    # Preserve the prior counts when nothing was written this run — zeroing them
+    # would let list_sources contradict search ('indexed' vs 'never indexed').
+    page_count = len(written) if written else (meta["page_count"] if meta else 0)
+    total_pages = total if written else (meta["total_pages"] if meta else 0)
     _web_meta_write(conn, src, version=_web_version(root), fetched_at=time.time(),
-                    page_count=len(written), total_pages=total, lastmod=lastmod,
-                    status="truncated" if truncated else "ok", error=None)
+                    page_count=page_count, total_pages=total_pages, lastmod=lastmod,
+                    status=status, error=error)
     return summary
 
 # --- git operations ----------------------------------------------------------

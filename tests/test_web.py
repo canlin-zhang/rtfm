@@ -447,15 +447,79 @@ def test_reindex_web_read_from_cache(home, monkeypatch):
     assert "flits" in text and "<html>" not in text
 
 
-def test_reindex_web_purges_stale_cache_pages(home, monkeypatch):
-    # A page that vanishes from the crawl (link removed upstream) leaves the cache;
-    # its index row must go, and the file must not linger.
+def test_reindex_web_partial_failure_preserves_content(home, monkeypatch):
+    # A page that fails mid-crawl (FETCH_FAILED) must NOT lose its prior content:
+    # the cache file and index rows stay, the run records the failure loudly, and
+    # a later skip must not lock the loss in.
     fetch = _full_fetch()
     monkeypatch.setattr(rtfm, "_fetch_page", fetch)
     monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)
     conn = rtfm.get_index_db()
     rtfm.reindex_source(conn, _web_source())
-    del fetch.pages["https://docs.example.com/projects/widget/latest/tutorial/index.html"]
+    fetch.errors["https://docs.example.com/projects/widget/latest/tutorial/index.html"] = \
+        "ERROR:FETCH_FAILED: HTTP 500"
+    fetch.pages["https://docs.example.com/sitemap.xml"] = \
+        SITEMAP.replace("2026-08-26", "2026-09-01")
+    out = rtfm.reindex_source(conn, _web_source())
+    assert out["pages_failed"] == 1
+    cache = rtfm._web_cache_path("widget")
+    assert (cache / "tutorial" / "index.html").exists()   # prior file preserved
+    assert any(h["title"] == "Tutorial" for h in rtfm.search_index(conn, "tutorial"))
+    meta = rtfm._web_meta(conn, "widget")
+    assert meta["status"] == "error"
+    assert "1 of 3 page(s) failed" in meta["error"]
+
+
+def test_reindex_web_failed_run_never_skips(home, monkeypatch):
+    # After a partial-failure run, the skip gate must NOT fire even when the sitemap
+    # lastmod later matches again — the loss must not be locked in silently. A later
+    # clean run recovers to 'ok'.
+    fetch = _full_fetch()
+    monkeypatch.setattr(rtfm, "_fetch_page", fetch)
+    monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, _web_source())
+    fetch.errors["https://docs.example.com/projects/widget/latest/tutorial/index.html"] = \
+        "ERROR:FETCH_FAILED: HTTP 500"
+    fetch.pages["https://docs.example.com/sitemap.xml"] = \
+        SITEMAP.replace("2026-08-26", "2026-09-01")
+    rtfm.reindex_source(conn, _web_source())          # run 2: partial failure
+    del fetch.errors["https://docs.example.com/projects/widget/latest/tutorial/index.html"]
+    out = rtfm.reindex_source(conn, _web_source())    # run 3: clean again
+    assert out.get("pages_fetched") == 3              # crawled — never "up to date"
+    assert rtfm._web_meta(conn, "widget")["status"] == "ok"
+
+
+def test_reindex_web_total_failure_preserves_prior(home, monkeypatch):
+    # Every fetch fails (the host is down): discovery itself fails, _web_fail
+    # records the error with the PRIOR counts preserved, and prior content stays
+    # searchable — list_sources must never report 'indexed' with page_count 0.
+    fetch = _full_fetch()
+    monkeypatch.setattr(rtfm, "_fetch_page", fetch)
+    monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, _web_source())
+    for url in list(fetch.pages):
+        fetch.errors[url] = "ERROR:FETCH_FAILED: host down"
+    out = rtfm.reindex_source(conn, _web_source())
+    assert "error" in out and out["error"].startswith("ERROR:FETCH_FAILED:")
+    meta = rtfm._web_meta(conn, "widget")
+    assert meta["status"] == "error"
+    assert meta["page_count"] == 3                    # prior count preserved, not zeroed
+    assert any(h["title"] == "Guide" for h in rtfm.search_index(conn, "flits"))
+
+
+def test_reindex_web_purges_pages_gone_upstream(home, monkeypatch):
+    # A page whose link vanished upstream (no longer discovered) leaves the cache
+    # and its index row — that purge is the genuine case, distinct from a fetch
+    # failure.
+    fetch = _full_fetch()
+    monkeypatch.setattr(rtfm, "_fetch_page", fetch)
+    monkeypatch.setattr(rtfm, "_WEB_FETCH_DELAY", 0.0)
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, _web_source())
+    fetch.pages["https://docs.example.com/projects/widget/latest/index.html"] = \
+        RTD_INDEX.replace("tutorial/index.html", "")  # link removed upstream
     fetch.pages["https://docs.example.com/sitemap.xml"] = \
         SITEMAP.replace("2026-08-26", "2026-09-01")
     out = rtfm.reindex_source(conn, _web_source())
