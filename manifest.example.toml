@@ -51,7 +51,7 @@ mutable = true
 # versioned URL to pin). The flavor trusts the URL and crawls the site; failure
 # (bot walls, rate limits) is reported per source, never at load time.
 # [[source]]
-# name    = "ansible"
+# name    = "example-docs"
 # type    = "web"
 # flavor  = "readthedocs"
-# url     = "https://docs.example.com/en/latest/index.html"
+# url     = "https://docs.example.invalid/en/latest/index.html"

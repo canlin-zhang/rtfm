@@ -28,7 +28,7 @@ If the first query returns nothing useful, try narrower or alternative terms —
 
 For each promising hit, call `mcp__plugin_rtfm_rtfm__read(source, relpath, start, end)` to retrieve the actual text around the hit's locator: read ±1–2 pages (PDF) or a surrounding line range (text) for full context. A hit's `locations` lists up to a few of the paths its content lives at (`total_locations` is the true count; `find_duplicates` gives the full list) — any one reads identically.
 
-For a web source, `relpath` is the page path under the version root; the page's public URL is the source's index `url` up to its last `/`, plus `relpath` (`list_sources` shows the index url).
+For a web source, `relpath` is the page path under the version root; the page's public URL is the version root (the source's `url` with any trailing `index.html` stripped and a trailing `/` ensured) plus `relpath` (`list_sources` shows the index url).
 
 ### 3. Answer
 

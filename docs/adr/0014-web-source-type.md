@@ -78,8 +78,9 @@ only (nav, footer, search, breadcrumbs dropped), code inside `<pre>` verbatim,
 title = first h1. No new runtime dependency — the PEP-723 block is unchanged.
 The locator is line numbers in the *extracted* text under the cache-relative
 path; `read` re-extracts, so hit locators and reads stay consistent. The
-page's public URL is derivable (the source's index `url` up to its last `/`,
-plus `relpath`) — the skill documents the derivation, so no URL column in the
+page's public URL is derivable: the source's `url` with any trailing
+`index.html` stripped and a trailing `/` ensured (the version root), plus
+`relpath` — the skill documents the derivation, so no URL column in the
 index. This amends ADR 0004's locator scheme: HTML locators are extracted-text
 line numbers (plus the derivable page URL), not anchors.
 
@@ -92,7 +93,8 @@ unchanged page costs nothing at extract time — refetch-all with cheap dedup,
 the same model as git_repo's full-checkout-then-diff.
 
 Purge semantics are precise about *why* a page left the corpus: only pages
-**not in this run's target set** (their link vanished upstream) are purged. A
+**not in this run's target set** (their link vanished upstream; a lowered page
+cap shrinks the target set the same way) are purged. A
 page that **failed to fetch** stays in the target set, so its prior cache file
 and index rows survive — a fetch failure never silently deletes content, and
 the run is recorded as `status="error"` (which never skips), so the skip gate

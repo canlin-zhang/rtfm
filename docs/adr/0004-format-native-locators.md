@@ -13,6 +13,8 @@ How a search hit reports its location is chosen per file format, not forced into
   point at tag soup, so the page's own anchors — which are also URL fragments — are the
   human-meaningful, deterministic locator.
 - **Web** _(planned)_ → URL + native anchor, reusing HTML's locator path unchanged.
+  (Shipped web sources supersede this: [ADR 0014](0014-web-source-type.md) — extracted-text
+  line numbers, with the page URL derivable from the source url plus relpath.)
 
 The hit-reporting layer therefore carries a typed locator (e.g. `{kind: page|line|anchor,
 value}`) rather than today's bare `p.N` / `L.N` strings.
@@ -33,4 +35,5 @@ value}`) rather than today's bare `p.N` / `L.N` strings.
 - Capturing native anchors needs a light DOM walk (track headings/ids during extraction) —
   a hair more than bare `get_text()`, but not main-content extraction: the full text,
   including boilerplate, is still indexed.
-- Web (planned) inherits the HTML locator path unchanged.
+- Web (planned) inherits the HTML locator path unchanged — superseded by
+  [ADR 0014](0014-web-source-type.md), which records the shipped web locator scheme.

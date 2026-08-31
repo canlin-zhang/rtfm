@@ -1358,7 +1358,9 @@ def _reindex_git_repo(conn: sqlite3.Connection, src: Source) -> dict:
 def reindex_source(conn: sqlite3.Connection, src: Source) -> dict:
     """Rebuild one source. Dispatches on type: git_repo sources go through the
     managed flow (fetch, dirty-check, checkout) or the linked flow (verify repo,
-    remote URL, clean tree only — read-only); dir sources index in place. Returns a summary.
+    remote URL, clean tree only — read-only); dir sources index in place; web
+    sources fetch into the cache, with failures classified per source (and a
+    crash routing to the failed state, never a silent 'ok'). Returns a summary.
 
     extraction_skips = files_seen - unique contents that required fresh extraction this run.
     Covers two cases: byte-identical duplicates within the same run (same sha, only one job

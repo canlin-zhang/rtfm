@@ -8,7 +8,9 @@ A Source Refreshes lazily: a `search`/`read` that touches it triggers a Refresh 
 the last Refresh is older than a configurable **staleness window** (default ~15 min);
 otherwise the cached index is served. This pays the network/IO cost at most once per window
 instead of once per query, and the policy generalizes unchanged to the planned Web source
-(no per-query re-scrape). A per-Source flag `refresh: true` (default) can be set `false` to
+(no per-query re-scrape). (Shipped web sources supersede the refresh part of this ADR: see
+[ADR 0014](0014-web-source-type.md) — explicit reindex only, no search-time refresh.) A
+per-Source flag `refresh: true` (default) can be set `false` to
 **pin** a Source — e.g. a Repo checked out at a release tag.
 
 For Repo sources, Refresh is `git pull --ff-only` — it never merges, stashes, or rewrites
@@ -29,7 +31,8 @@ concrete recovery — never a generic "pull failed."
 ## Consequences
 
 - The planned Web source reuses this exact policy; only the Refresh implementation differs
-  (re-fetch vs `git pull`).
+  (re-fetch vs `git pull`). Superseded for web by [ADR 0014](0014-web-source-type.md)
+  (re-fetch on explicit `reindex`, never on search).
 - Failure causes a Repo Refresh must distinguish in its message: diverged local commits,
   dirty working tree, detached HEAD / no upstream, auth failure, network failure.
 - The per-Source flag is named `refresh:` (not `pull:`) to match the polymorphic term.
