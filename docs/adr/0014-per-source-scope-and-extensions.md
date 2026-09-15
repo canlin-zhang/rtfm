@@ -92,8 +92,10 @@ everything else.
 
 ### File filtering and encoding support are separate concerns
 
-Recorded in full as [ADR 0015](0015-indexing-is-a-staged-pipeline.md); in brief, they
-answer different questions and must not substitute for each other.
+Recorded in full as [ADR 0015](0015-indexing-is-a-staged-pipeline.md), which splits
+indexing into four questions — access, select, read, handle — each owning its own
+failure and its own remedy. The extension lists in this ADR are step 2 of that
+sequence, and step 2 alone.
 
 - **Filtering** — "should a file of this kind be indexed at all?" Answered
   exclusively by the extension lists above. No content inspection, ever. A file
