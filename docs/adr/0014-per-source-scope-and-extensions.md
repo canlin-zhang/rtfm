@@ -92,7 +92,8 @@ everything else.
 
 ### File filtering and encoding support are separate concerns
 
-These answer different questions and must not substitute for each other.
+Recorded in full as [ADR 0015](0015-indexing-is-a-staged-pipeline.md); in brief, they
+answer different questions and must not substitute for each other.
 
 - **Filtering** — "should a file of this kind be indexed at all?" Answered
   exclusively by the extension lists above. No content inspection, ever. A file
