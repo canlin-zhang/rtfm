@@ -288,6 +288,23 @@ def test_reindex_indexes_rst_files(home, tmp_path):
     assert rtfm.search_index(conn, "credits flit pipeline downstream")
 
 
+def test_reindex_indexes_mdx_files(home, tmp_path):
+    """`.mdx` is markdown carrying JSX components — the page format of Docusaurus- and
+    Next.js-based doc sites, whose prose is otherwise unreachable. It indexes like `.md`,
+    with line locators; component tags are inert text. Fails before `.mdx` is in TEXT_EXTS
+    (the file is skipped, and the whole site indexes as nothing)."""
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "guide.mdx").write_text(
+        "---\ntitle: Widget Protocol\n---\n\n"
+        "import Tabs from '@theme/Tabs';\n\n"
+        "# Widget Protocol\n\nThe widget protocol defines flits and credits.\n")
+    conn = rtfm.get_index_db()
+    summary = rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    assert summary["files_seen"] == 1 and summary["newly_extracted"] == 1
+    assert rtfm.search_index(conn, "widget protocol flits")
+
+
 # --- _stale_delta for git_repo ---
 
 def test_stale_delta_git_repo_current_is_not_stale(home, tmp_path, git_branch):
