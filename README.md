@@ -53,7 +53,7 @@ take a while. Byte-identical files that repeat across version subfolders are ext
 
 ## Use
 
-Drop PDFs / `.md` / `.rst` / `.txt` into `~/.rtfm/default/`, then ask Claude to search them, or
+Drop PDFs / `.md` / `.mdx` / `.rst` / `.txt` into `~/.rtfm/default/`, then ask Claude to search them, or
 add more sources by editing `~/.rtfm/manifest.toml` (see `manifest.example.toml`).
 
 Or invoke the bundled **`read-the-manual`** skill (`/read-the-manual`) to have a question
