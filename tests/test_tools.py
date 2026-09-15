@@ -476,3 +476,48 @@ def test_health_check_reports_git_repo_sources(home, tmp_path):
     names = [s["name"] for s in out["sources"]]
     assert "specs" in names
     assert any(s["type"] == "git_repo" for s in out["sources"])
+
+
+def test_search_surfaces_selection_warnings_for_a_dir_source(home, tmp_path):
+    t = tmp_path / "c"
+    (t / "cc").mkdir(parents=True)
+    (t / "cc" / "a.md").write_text("alpha keyword\n")
+    (home / "manifest.toml").write_text(
+        f'[[source]]\nname="scoped"\ntype="dir"\npath="{t}"\n'
+        'ext_allowlist=[".md"]\npaths=["cc", "doc"]\n')
+    resp = rtfm.search("keyword")
+    assert resp["results"]
+    assert any("CONTRIBUTES NOTHING" in w and "'doc'" in w for w in resp.get("WARNING", []))
+
+
+def test_reindex_promotes_selection_warnings_to_the_top_level(home, tmp_path):
+    t = tmp_path / "c"
+    (t / "cc").mkdir(parents=True)
+    (t / "cc" / "a.md").write_text("alpha\n")
+    (home / "manifest.toml").write_text(
+        f'[[source]]\nname="scoped"\ntype="dir"\npath="{t}"\n'
+        'ext_allowlist=[".md"]\npaths=["cc", "doc"]\n')
+    resp = rtfm.reindex()
+    assert any("CONTRIBUTES NOTHING" in w for w in resp.get("WARNING", []))
+
+
+def test_reindex_reports_unreadable_files(home, tmp_path):
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "blob.dat").write_bytes(bytes(range(256)) * 20)
+    (home / "manifest.toml").write_text(
+        f'[[source]]\nname="b"\ntype="dir"\npath="{t}"\next_allowlist=[".dat"]\n')
+    resp = rtfm.reindex()
+    assert any("COULD NOT READ" in w for w in resp.get("WARNING", []))
+
+
+def test_health_check_reports_unreadable_files(home, tmp_path):
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "blob.dat").write_bytes(bytes(range(256)) * 20)
+    (home / "manifest.toml").write_text(
+        f'[[source]]\nname="b"\ntype="dir"\npath="{t}"\next_allowlist=[".dat"]\n')
+    rtfm.reindex()
+    health = rtfm.health_check()
+    assert health["ok"] is False
+    assert any("could not be read" in i for i in health["issues"])

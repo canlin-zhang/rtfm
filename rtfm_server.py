@@ -418,6 +418,17 @@ def _auto_reindex_max() -> int:
     return AUTO_REINDEX_MAX_FILES
 
 
+def _read_text(path: Path) -> str:
+    """Decode a file as UTF-8, strictly (ADR 0015 stage 2). rtfm supports UTF-8 text; a file
+    that does not decode is not a text serialization and is recorded as a failed extraction,
+    never silently mangled. `errors="replace"` used to substitute U+FFFD for undecodable
+    bytes, which is how a binary file indexed cleanly with errors: 0.
+
+    This is a supported-format boundary, not a filter — deciding WHETHER to index a file type
+    is stage 1's job alone, and using a decode failure to do it would report the wrong cause."""
+    return path.read_bytes().decode("utf-8")
+
+
 def _pdf_rows(path: Path) -> list[tuple[str, str, str]]:
     """Page locators, one row per page with text (ADR 0004)."""
     rows: list[tuple[str, str, str]] = []
@@ -431,7 +442,7 @@ def _pdf_rows(path: Path) -> list[tuple[str, str, str]]:
 def _text_rows(path: Path) -> list[tuple[str, str, str]]:
     """Line locators, CHUNK_LINES per row (ADR 0004)."""
     rows: list[tuple[str, str, str]] = []
-    lines = path.read_text(errors="replace").splitlines()
+    lines = _read_text(path).splitlines()
     for i in range(0, max(1, len(lines)), CHUNK_LINES):
         chunk = "\n".join(ln.rstrip() for ln in lines[i:i + CHUNK_LINES])
         if chunk.strip():
@@ -486,7 +497,7 @@ def _text_doc_signal(path: Path) -> tuple[str, str]:
     (`paragraph\\n---` is a heading; a `---` after a blank line is a horizontal rule, not a
     heading). A leading `---` YAML frontmatter block is skipped first so its closing fence isn't
     misread as an underline (which would make a frontmatter key the title)."""
-    lines = path.read_text(errors="replace").splitlines()
+    lines = _read_text(path).splitlines()
     start = 0
     if lines and lines[0].strip() == "---":
         for j in range(1, len(lines)):
@@ -835,7 +846,35 @@ def _index_files(conn: sqlite3.Connection, src: Source, root: Path) -> dict:
         conn.execute(
             f"DELETE FROM {tbl} WHERE sha256 NOT IN (SELECT DISTINCT sha256 FROM locations)")
     conn.commit()
+
+    # Stage 2's own zero (ADR 0015): selection let files through, but none of them are
+    # readable, so the source is configured, reports success and answers nothing.
+    if files:
+        readable = conn.execute(
+            "SELECT COUNT(*) FROM contents WHERE extracted_ok=1 AND sha256 IN "
+            "(SELECT sha256 FROM locations WHERE source=?)", (source_name,)).fetchone()[0]
+        if not readable:
+            summary["path_warnings"].append(
+                f"!!! NOTHING COULD BE READ '{source_name}' !!! all {len(files)} selected "
+                f"file(s) failed to decode as UTF-8, so this source contributes nothing to "
+                f"search. rtfm indexes UTF-8 text. Recover: convert them, or exclude their "
+                f"file types in {manifest_path()}.")
     return summary
+
+
+def _summary_warnings(src: Source, summary: dict) -> list[str]:
+    """Warnings a reindex summary owes the caller: the selection/decode stage reports, and a
+    count of files rtfm agreed to index but could not read. Both are silent otherwise — the
+    summary is nested inside reindex()'s response and was discarded entirely by search()."""
+    if not isinstance(summary, dict):
+        return []
+    out = list(summary.get("path_warnings", ()))
+    if summary.get("errors"):
+        out.append(
+            f"!!! COULD NOT READ '{src.name}' !!! {summary['errors']} file(s) are not valid "
+            f"UTF-8 and were not indexed. Recover: run health_check() to count them, then "
+            f"either convert them or exclude their file types in {manifest_path()}.")
+    return out
 
 
 def _reindex_git_repo(conn: sqlite3.Connection, src: Source) -> dict:
@@ -1577,7 +1616,7 @@ def read_document_text(src: Source, relpath: str, start: int = 1, end: int | Non
         return f"!!! ERROR !!! '{relpath}' not found in source '{src.name}'."
     if path.suffix.lower() == ".pdf":
         return extract_pdf_text(path, start=start, end=end)
-    lines = path.read_text(errors="replace").splitlines()
+    lines = _read_text(path).splitlines()
     e = end if end is not None else len(lines)
     return "\n".join(lines[max(0, start - 1):e])
 
@@ -1624,7 +1663,8 @@ def search(query: str, source: str | None = None, max_files: int = 20,
                 continue
             if s.type == "dir":
                 if changed <= budget:
-                    reindex_source(conn, s)          # inline: only `changed` files extract
+                    result = reindex_source(conn, s)  # inline: only `changed` files extract
+                    warnings.extend(_summary_warnings(s, result))
                 else:
                     warnings.append(
                         f"!!! STALE SOURCE '{s.name}' !!! {changed} new/changed files exceed the "
@@ -1642,6 +1682,7 @@ def search(query: str, source: str | None = None, max_files: int = 20,
                 # otherwise repeat the identical warning once per source.
                 key = (s.path if s.path is not None
                        else str(_managed_repo_path(s.name)))
+                warnings.extend(_summary_warnings(s, result))
                 message = None
                 if isinstance(result, dict) and result.get("error"):
                     message = (f"!!! AUTO-REINDEX FAILED '{s.name}' !!! {result['error']} — "
@@ -1709,7 +1750,10 @@ def reindex(source: str | None = None) -> dict:
                 _staleness_cache.pop(key, None)
         if dropped:
             conn.commit()
-    resp: dict = {"reindexed": [reindex_source(conn, s) for s in targets]}
+    summaries = [reindex_source(conn, s) for s in targets]
+    resp: dict = {"reindexed": summaries}
+    for tgt, summary in zip(targets, summaries, strict=True):
+        warnings.extend(_summary_warnings(tgt, summary))
     if dropped:
         resp["purged_sources"] = dropped
     if warnings:
@@ -1859,6 +1903,16 @@ def health_check() -> dict:
         status["sources"] = [{"name": s.name, "type": s.type,
                               **( {"url": s.url, "ref": s.ref} if s.type == "git_repo" else {})}
                              for s in sources]
+        unreadable = conn.execute(
+            "SELECT COUNT(*) FROM contents WHERE extracted_ok=0").fetchone()[0]
+        if unreadable:
+            # A stated format boundary is worthless if a user cannot hear that a file hit
+            # it — errors were counted and never surfaced anywhere (ADR 0015).
+            status["ok"] = False
+            status["issues"].append(
+                f"{unreadable} file(s) could not be read as UTF-8 and are not searchable. "
+                f"rtfm indexes UTF-8 text; inspect them with "
+                f"'SELECT sha256, error FROM contents WHERE extracted_ok=0'.")
         if not status.get("git") and any(s.type == "git_repo" for s in sources):
             # git_repo sources cannot be refreshed without git — a green 'ok' with
             # an impossible corpus is a silent failure.

@@ -776,3 +776,54 @@ def test_narrowing_purges_the_excluded_files(home, tmp_path):
     rtfm.reindex_source(conn, narrow)
     rels = {r[0] for r in conn.execute("SELECT relpath FROM locations WHERE source='n'")}
     assert not any(r.endswith(".bzl") for r in rels)
+
+
+# --- stage 2: decoding is strict, and its zero is reported (ADR 0015) --------
+
+def test_a_binary_file_is_an_extraction_error_not_garbage(home, tmp_path):
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "blob.dat").write_bytes(bytes(range(256)) * 20)
+    (t / "ok.md").write_text("alpha keyword\n")
+    s = rtfm.Source(name="b", type="dir", path=t,
+                    ext_allowlist=frozenset({".dat", ".md"}))
+    conn = rtfm.get_index_db()
+    summary = rtfm.reindex_source(conn, s)
+    assert summary["errors"] == 1
+    errs = [r[0] for r in conn.execute("SELECT error FROM contents WHERE extracted_ok=0")]
+    assert any("UnicodeDecodeError" in e for e in errs)
+    assert rtfm.search_index(conn, "keyword", source="b")   # one bad file blocks nothing
+
+
+def test_no_replacement_characters_reach_the_index(home, tmp_path):
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "blob.dat").write_bytes(b"\xff\xfe\x00text-like\x00\xff")
+    s = rtfm.Source(name="r", type="dir", path=t, ext_allowlist=frozenset({".dat"}))
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, s)
+    texts = [r[0] for r in conn.execute("SELECT text FROM content_fts")]
+    assert not any("�" in x for x in texts)
+
+
+def test_valid_utf8_with_non_ascii_still_indexes(home, tmp_path):
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "u.md").write_text("naïve café — em dash ✓ keyword\n", encoding="utf-8")
+    s = rtfm.Source(name="u", type="dir", path=t, ext_allowlist=frozenset({".md"}))
+    conn = rtfm.get_index_db()
+    assert rtfm.reindex_source(conn, s)["errors"] == 0
+    assert rtfm.search_index(conn, "keyword", source="u")
+
+
+def test_a_source_where_nothing_decodes_says_so(home, tmp_path):
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "a.dat").write_bytes(bytes(range(256)))
+    (t / "b.dat").write_bytes(bytes(range(256)))
+    s = rtfm.Source(name="allbad", type="dir", path=t, ext_allowlist=frozenset({".dat"}))
+    conn = rtfm.get_index_db()
+    summary = rtfm.reindex_source(conn, s)
+    # Stage 1 let files through; stage 2 emptied the source, so stage 2 names itself.
+    assert summary["files_seen"] == 2
+    assert any("NOTHING COULD BE READ" in w for w in summary["path_warnings"])
