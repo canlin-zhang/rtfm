@@ -277,7 +277,8 @@ def test_extraction_works_from_worker_thread_with_event_loop(home, tmp_path):
 
 def test_reindex_indexes_rst_files(home, tmp_path):
     """`.rst` and `.rest` (reStructuredText) are plain text — they index like `.md`, with line
-    locators. Unlocks Sphinx doc trees. Fails before they're in TEXT_EXTS (files skipped)."""
+    locators. Unlocks Sphinx doc trees. Fails unless `.rst` is in the source's
+    ext_allowlist (files skipped)."""
     d = tmp_path / "docs"
     d.mkdir()
     (d / "guide.rst").write_text(
@@ -296,8 +297,8 @@ def test_reindex_indexes_rst_files(home, tmp_path):
 def test_reindex_indexes_mdx_files(home, tmp_path):
     """`.mdx` is markdown carrying JSX components — the page format of Docusaurus- and
     Next.js-based doc sites, whose prose is otherwise unreachable. It indexes like `.md`,
-    with line locators; component tags are inert text. Fails before `.mdx` is in TEXT_EXTS
-    (the file is skipped, and the whole site indexes as nothing)."""
+    with line locators; component tags are inert text. Fails unless `.mdx` is in the
+    source's ext_allowlist (the file is skipped, and the whole site indexes as nothing)."""
     d = tmp_path / "docs"
     d.mkdir()
     (d / "guide.mdx").write_text(
@@ -611,7 +612,8 @@ def test_a_prefix_contributing_nothing_warns(home, tmp_path):
     conn = rtfm.get_index_db()
     summary = rtfm.reindex_source(conn, s)
     assert summary["files_seen"] == 1
-    assert any("'assets'" in w for w in summary["path_warnings"])
+    assert any("PATH CONTRIBUTES NOTHING" in w and "'assets'" in w
+               for w in summary["path_warnings"])
     assert not any("'cc'" in w for w in summary["path_warnings"])
 
 
@@ -620,7 +622,8 @@ def test_a_prefix_that_does_not_exist_warns(home, tmp_path):
     s = rtfm.Source(name="typo", type="dir", path=t, paths=("doc",),
                     ext_allowlist=frozenset({".md"}))
     conn = rtfm.get_index_db()
-    assert any("'doc'" in w for w in rtfm.reindex_source(conn, s)["path_warnings"])
+    assert any("PATH CONTRIBUTES NOTHING" in w and "'doc'" in w
+               for w in rtfm.reindex_source(conn, s)["path_warnings"])
 
 
 def test_no_path_warnings_when_every_prefix_contributes(home, tmp_path):
@@ -641,9 +644,10 @@ def test_routines_dispatch_pdf_markup_and_catch_all(tmp_path):
     assert rtfm._routine_for("").name == "text"           # extensionless
 
 
-def test_the_catch_all_routine_is_last_and_matches_everything():
-    assert rtfm.ROUTINES[-1].exts is None
-    assert all(r.exts is not None for r in rtfm.ROUTINES[:-1])
+def test_the_fallback_is_not_a_member_of_the_ordered_registry():
+    # Ordering cannot shadow a routine because the fallback is not in the sequence at all.
+    assert rtfm.DEFAULT_ROUTINE not in rtfm.ROUTINES
+    assert all(r.exts for r in rtfm.ROUTINES)        # every entry is a real match
 
 
 def test_body_and_signal_dispatch_agree_on_the_same_routine(tmp_path):
@@ -745,8 +749,8 @@ def test_scope_change_beats_a_managed_sha_pin(home, tmp_path, git_branch):
 
 def test_scope_change_beats_a_linked_sha_pin(home, tmp_path, git_branch):
     """The managed case never reaches the pin short-circuit — managed mode compares against
-    the pin itself for any ref. The short-circuit the scope check must be ordered ahead of
-    lives only in the linked branch, so pin it there."""
+    the pin itself for any ref. The short-circuit that the scope check must be
+    ordered ahead of exists only in the linked branch, so pin it there."""
     remote, _seed, branch = _seed_bzl_repo(tmp_path, git_branch)
     dest = tmp_path / "linked"
     rtfm._git_clone(str(remote), branch, dest, timeout=30)
@@ -827,3 +831,23 @@ def test_a_source_where_nothing_decodes_says_so(home, tmp_path):
     # Stage 1 let files through; stage 2 emptied the source, so stage 2 names itself.
     assert summary["files_seen"] == 2
     assert any("NOTHING COULD BE READ" in w for w in summary["path_warnings"])
+
+
+def test_an_exclude_prefix_that_excludes_nothing_warns(home, tmp_path):
+    """An include prefix that matches nothing warns; an exclude prefix that matches nothing
+    did not. A misspelled exclusion is a no-op, so the user believes a subtree is out of the
+    corpus when every file in it is still indexed — the wrong direction to be silent in."""
+    t = _tree(tmp_path / "c")
+    s = rtfm.Source(name="x", type="dir", path=t, exclude_paths=("docs/verisons",),
+                    ext_allowlist=frozenset({".md"}))
+    conn = rtfm.get_index_db()
+    warns = rtfm.reindex_source(conn, s)["path_warnings"]
+    assert any("EXCLUDES NOTHING" in w and "'!docs/verisons'" in w for w in warns)
+
+
+def test_an_exclude_prefix_that_works_does_not_warn(home, tmp_path):
+    t = _tree(tmp_path / "c")
+    s = rtfm.Source(name="y", type="dir", path=t, exclude_paths=("docs/versions",),
+                    ext_allowlist=frozenset({".md"}))
+    conn = rtfm.get_index_db()
+    assert rtfm.reindex_source(conn, s)["path_warnings"] == []

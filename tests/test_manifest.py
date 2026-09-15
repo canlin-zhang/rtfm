@@ -315,3 +315,32 @@ def test_bootstrap_default_source_declares_an_allowlist(home):
     assert warns == []
     d = next(s for s in sources if s.name == "default")
     assert {".pdf", ".md", ".mdx", ".rst", ".txt"} <= d.ext_allowlist
+
+
+def test_git_repo_with_both_extension_lists_is_refused(home):
+    """The both/neither gate covers git_repo too, and every git_repo manifest test declares a
+    valid list — so nothing exercised this branch. Deleting 'git_repo' from the drop condition
+    left the whole suite green."""
+    (home / "manifest.toml").write_text(
+        '[[source]]\nname="g"\ntype="git_repo"\nurl="https://example.com/r.git"\n'
+        'ext_allowlist=[".md"]\next_blocklist=[".png"]\n')
+    sources, warns = rtfm.load_manifest()
+    assert [s.name for s in sources] == []
+    assert any("BOTH EXTENSION LISTS" in w and "'g'" in w for w in warns)
+
+
+def test_git_repo_with_no_extension_list_is_skipped(home):
+    (home / "manifest.toml").write_text(
+        '[[source]]\nname="g"\ntype="git_repo"\nurl="https://example.com/r.git"\n')
+    sources, warns = rtfm.load_manifest()
+    assert [s.name for s in sources] == []
+    assert any("NO EXTENSION LIST" in w and "'g'" in w for w in warns)
+
+
+def test_wiring_errors_win_over_declaration_errors(home):
+    """A source with two problems reports the one that makes it unusable at all — naming it
+    as an extension-list problem would point at the wrong cause."""
+    (home / "manifest.toml").write_text('[[source]]\nname="nopath"\ntype="dir"\n')
+    _sources, warns = rtfm.load_manifest()
+    assert any("no 'path'" in w for w in warns)
+    assert not any("NO EXTENSION LIST" in w for w in warns)

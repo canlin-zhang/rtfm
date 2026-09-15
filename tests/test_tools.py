@@ -502,13 +502,15 @@ def test_reindex_promotes_selection_warnings_to_the_top_level(home, tmp_path):
 
 
 def test_reindex_reports_unreadable_files(home, tmp_path):
+    """One binary file and nothing else is the total-failure case, so stage 2 reports it and
+    the generic per-file count stays suppressed (they would say the same thing twice)."""
     t = tmp_path / "c"
     t.mkdir()
     (t / "blob.dat").write_bytes(bytes(range(256)) * 20)
     (home / "manifest.toml").write_text(
         f'[[source]]\nname="b"\ntype="dir"\npath="{t}"\next_allowlist=[".dat"]\n')
     resp = rtfm.reindex()
-    assert any("COULD NOT READ" in w for w in resp.get("WARNING", []))
+    assert any("NOTHING COULD BE READ" in w for w in resp.get("WARNING", []))
 
 
 def test_health_check_reports_unreadable_files(home, tmp_path):
@@ -521,3 +523,107 @@ def test_health_check_reports_unreadable_files(home, tmp_path):
     health = rtfm.health_check()
     assert health["ok"] is False
     assert any("could not be read" in i for i in health["issues"])
+
+
+def test_search_warns_about_a_from_scratch_empty_dir_source(home, tmp_path):
+    """The commonest misconfiguration: an extension list that matches nothing in the tree.
+    Nothing is indexed and nothing ever will be, so the relpath/mtime comparison that decides
+    dir staleness sees {} == {} and never fires. ADR 0015 requires the stage that emptied the
+    source to report, and to report through search()."""
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "a.md").write_text("hello keyword\n")
+    (home / "manifest.toml").write_text(
+        f'[[source]]\nname="typo"\ntype="dir"\npath="{t}"\next_allowlist=[".mdx"]\n')
+    resp = rtfm.search("keyword")
+    assert any("SOURCE SELECTED NOTHING" in w for w in resp.get("WARNING", []))
+
+
+def test_search_keeps_warning_about_an_empty_dir_source(home, tmp_path):
+    """Reporting once and then going quiet is the failure this whole design refuses."""
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "a.md").write_text("hello keyword\n")
+    (home / "manifest.toml").write_text(
+        f'[[source]]\nname="typo"\ntype="dir"\npath="{t}"\next_allowlist=[".mdx"]\n')
+    rtfm.search("keyword")
+    resp = rtfm.search("keyword")
+    assert any("SOURCE SELECTED NOTHING" in w for w in resp.get("WARNING", []))
+
+
+def test_read_on_a_non_utf8_file_returns_an_error_string(home, tmp_path):
+    """Every other failure branch in read_document_text returns a '!!! ERROR !!!' string;
+    this one let a raw UnicodeDecodeError crash the tool call."""
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "blob.dat").write_bytes(bytes(range(256)))
+    s = rtfm.Source(name="b", type="dir", path=t, ext_allowlist=frozenset({".dat"}))
+    out = rtfm.read_document_text(s, "blob.dat")
+    assert out.startswith("!!! ERROR !!!") and "UTF-8" in out
+
+
+def _binary_source(home, tmp_path, n_bad=1, n_good=0):
+    t = tmp_path / "c"
+    t.mkdir()
+    for i in range(n_bad):
+        (t / f"bad{i}.dat").write_bytes(bytes(range(256)) + bytes([i]))
+    for i in range(n_good):
+        (t / f"good{i}.dat").write_text(f"readable keyword {i}\n")
+    (home / "manifest.toml").write_text(
+        f'[[source]]\nname="b"\ntype="dir"\npath="{t}"\next_allowlist=[".dat"]\n')
+    return t
+
+
+def test_total_decode_failure_is_reported_once_not_twice(home, tmp_path):
+    """The stage-2 zero report and the generic error count state the same fact when every
+    file failed. The stage report is the more specific one, so it wins."""
+    _binary_source(home, tmp_path, n_bad=2)
+    warns = rtfm.reindex().get("WARNING", [])
+    assert sum("NOTHING COULD BE READ" in w for w in warns) == 1
+    assert sum("COULD NOT READ" in w and "NOTHING" not in w for w in warns) == 0
+
+
+def test_partial_decode_failure_keeps_reporting_on_every_run(home, tmp_path):
+    """errors is a per-run extraction delta, so a second reindex re-reported zero while the
+    files stayed broken — reporting once and going quiet is the failure this design refuses."""
+    _binary_source(home, tmp_path, n_bad=1, n_good=1)
+    first = rtfm.reindex().get("WARNING", [])
+    assert any("COULD NOT READ" in w for w in first)
+    second = rtfm.reindex().get("WARNING", [])
+    assert any("COULD NOT READ" in w for w in second)
+
+
+def test_health_check_reports_a_source_that_selects_nothing(home, tmp_path):
+    """ADR 0015: the stage report reaches search, reindex AND health_check. health_check is
+    the tool whose whole job is 'is my configuration right', so a scope that selects nothing
+    must not read as healthy — including before anything has ever indexed it."""
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "a.md").write_text("hello\n")
+    (home / "manifest.toml").write_text(
+        f'[[source]]\nname="typo"\ntype="dir"\npath="{t}"\next_allowlist=[".mdx"]\n')
+    health = rtfm.health_check()
+    assert health["ok"] is False
+    assert any("SELECTED NOTHING" in i for i in health["issues"])
+
+
+def test_health_check_reports_a_prefix_that_contributes_nothing(home, tmp_path):
+    t = tmp_path / "c"
+    (t / "cc").mkdir(parents=True)
+    (t / "cc" / "a.md").write_text("hello\n")
+    (home / "manifest.toml").write_text(
+        f'[[source]]\nname="p"\ntype="dir"\npath="{t}"\n'
+        'ext_allowlist=[".md"]\npaths=["cc", "doc"]\n')
+    health = rtfm.health_check()
+    assert health["ok"] is False
+    assert any("CONTRIBUTES NOTHING" in i and "'doc'" in i for i in health["issues"])
+
+
+def test_health_check_is_clean_for_a_well_configured_source(home, tmp_path):
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "a.md").write_text("hello\n")
+    (home / "manifest.toml").write_text(
+        f'[[source]]\nname="fine"\ntype="dir"\npath="{t}"\next_allowlist=[".md"]\n')
+    health = rtfm.health_check()
+    assert not any("NOTHING" in i for i in health["issues"])

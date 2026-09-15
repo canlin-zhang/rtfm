@@ -32,7 +32,11 @@ _log = logging.getLogger("rtfm")
 # manifest (ADR 0014) — nothing here decides that.
 MARKUP_EXTS = frozenset({".txt", ".md", ".mdx", ".rst", ".rest"})  # ATX/setext heading parsing
 # Safe to grow where a default allowlist would not be (ADR 0014): everything here is something
-# nobody wants indexed, so a later addition removes garbage, never content.
+# nobody wants indexed, so a later addition removes garbage, never content. Measured against
+# bazelbuild/bazel + rules_cc, 14 of these actually occur (.svg 799, .png 716, .jar 35, .gif 13,
+# .gz 7, .zip 3, .eot/.ttf/.woff 3 each, .bmp/.tar 2, .o/.7z/.jpg 1); the rest extend the same
+# families rather than being separately motivated. An entry that turns out to be wrong costs a
+# spurious decode error, not lost content — the user's own ext_blocklist is the escape.
 DEFAULT_EXT_BLOCKLIST = frozenset({
     ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".tif", ".tiff", ".webp", ".svg",
     ".woff", ".woff2", ".ttf", ".otf", ".eot",
@@ -527,12 +531,11 @@ class _Routine(NamedTuple):
     """One handling routine: how a family of files becomes searchable rows and a doc-level
     signal. Body and signal live in the same record so the two dispatches cannot disagree
     about which routine a file belongs to — they did, and a .bzl file was selected for
-    indexing and then extracted to nothing.
+    indexing and then extracted to nothing (ADR 0015).
 
-    Adding a format means adding a routine here; `exts=None` marks the catch-all, which must
-    stay last."""
+    Adding a format means adding a routine to ROUTINES."""
     name: str
-    exts: frozenset[str] | None
+    exts: frozenset[str]
     rows: Callable[[Path], list[tuple[str, str, str]]]
     signal: Callable[[Path], tuple[str, str]]
 
@@ -540,13 +543,18 @@ class _Routine(NamedTuple):
 ROUTINES: tuple[_Routine, ...] = (
     _Routine("pdf", frozenset({".pdf"}), _pdf_rows, _pdf_doc_signal),
     _Routine("markup", MARKUP_EXTS, _text_rows, _text_doc_signal),
-    _Routine("text", None, _text_rows, _no_doc_signal),        # catch-all, must be last
 )
+
+# The fallback sits outside ROUTINES rather than inside it behind a None sentinel. Inside, it
+# would match unconditionally, so placing it anywhere but last would silently shadow every
+# routine after it — .pdf quietly getting plain-text rows and no signal, with nothing raised.
+# Out here there is no ordering left to get wrong.
+DEFAULT_ROUTINE = _Routine("text", frozenset(), _text_rows, _no_doc_signal)
 
 
 def _routine_for(ext: str) -> _Routine:
-    """The routine handling `ext`. First match wins; the catch-all terminates the search."""
-    return next(r for r in ROUTINES if r.exts is None or ext in r.exts)
+    """The routine handling `ext`, else the plain-text fallback."""
+    return next((r for r in ROUTINES if ext in r.exts), DEFAULT_ROUTINE)
 
 
 def _doc_signal_for_file(path: Path) -> tuple[str, str]:
@@ -862,18 +870,35 @@ def _index_files(conn: sqlite3.Connection, src: Source, root: Path) -> dict:
     return summary
 
 
-def _summary_warnings(src: Source, summary: dict) -> list[str]:
+def _unreadable_count(conn: sqlite3.Connection, source_name: str) -> int:
+    """How many of this source's files are currently unreadable — a live query, not the
+    per-run extraction delta. `summary["errors"]` counts only shas extracted THIS run, and a
+    sha already in `contents` with extracted_ok=0 is never re-extracted, so the delta reverts
+    to zero on the next run while the files stay broken."""
+    return conn.execute(
+        "SELECT COUNT(DISTINCT c.sha256) FROM contents c JOIN locations l ON l.sha256=c.sha256 "
+        "WHERE c.extracted_ok=0 AND l.source=?", (source_name,)).fetchone()[0]
+
+
+def _summary_warnings(conn: sqlite3.Connection, src: Source, summary: dict) -> list[str]:
     """Warnings a reindex summary owes the caller: the selection/decode stage reports, and a
-    count of files rtfm agreed to index but could not read. Both are silent otherwise — the
-    summary is nested inside reindex()'s response and was discarded entirely by search()."""
+    count of files rtfm agreed to index but cannot read. Both are silent otherwise — the
+    summary is nested inside reindex()'s response and was discarded entirely by search().
+
+    The stage-2 zero report ("NOTHING COULD BE READ") already states the total-failure case,
+    so the partial count is suppressed when it fired — the two would otherwise say the same
+    thing twice in one response."""
     if not isinstance(summary, dict):
         return []
     out = list(summary.get("path_warnings", ()))
-    if summary.get("errors"):
+    if any("NOTHING COULD BE READ" in w for w in out):
+        return out
+    unreadable = _unreadable_count(conn, src.name)
+    if unreadable:
         out.append(
-            f"!!! COULD NOT READ '{src.name}' !!! {summary['errors']} file(s) are not valid "
-            f"UTF-8 and were not indexed. Recover: run health_check() to count them, then "
-            f"either convert them or exclude their file types in {manifest_path()}.")
+            f"!!! COULD NOT READ '{src.name}' !!! {unreadable} file(s) are not valid UTF-8 "
+            f"and are not searchable. Recover: convert them, or exclude their file types in "
+            f"{manifest_path()}.")
     return out
 
 
@@ -977,6 +1002,11 @@ def _stale_delta(conn: sqlite3.Connection, src: Source) -> tuple[int, bool, bool
     on_disk = {str(f.relative_to(src.path)): f.stat().st_mtime for f in iter_source_files(src)}
     changed = sum(1 for rel, mtime in on_disk.items() if indexed.get(rel) != mtime)
     stale = changed > 0 or set(indexed) != set(on_disk)   # latter catches vanished files
+    if not on_disk:
+        # A source that selects nothing has indexed == on_disk == {} and would read as fresh
+        # forever, so search() would skip it and its stage report (ADR 0015) would never be
+        # computed, let alone delivered. Re-walking an empty selection costs one rglob.
+        stale = True
     return changed, stale, False
 
 
@@ -1102,6 +1132,20 @@ def _source_scope(src: Source) -> str:
                  sorted(src.ext_allowlist), sorted(src.ext_blocklist)))
 
 
+def _has_any_file(root: Path, prefixes: tuple[str, ...]) -> bool:
+    """Whether the scoped tree holds any non-hidden file at all. Short-circuits on the first
+    one found. Selection only "emptied" a source if there was something to empty — an empty
+    drop-dir is legitimately empty, not misconfigured, and must not report as a config error
+    on a fresh install."""
+    for r in ([root / p for p in prefixes] if prefixes else [root]):
+        if not r.exists():
+            continue
+        for f in ([r] if r.is_file() else r.rglob("*")):
+            if f.is_file() and not any(part.startswith(".") for part in f.relative_to(root).parts):
+                return True
+    return False
+
+
 def _selection_warnings(src: Source, root: Path, selected: list[Path]) -> list[str]:
     """What the selection stage owes the caller when it lets nothing (or less than asked)
     through. A source that quietly selects nothing is the confident-but-empty failure
@@ -1113,7 +1157,7 @@ def _selection_warnings(src: Source, root: Path, selected: list[Path]) -> list[s
     out: list[str] = []
     scope = (f"ext_allowlist = {sorted(src.ext_allowlist)}" if src.ext_allowlist
              else f"ext_blocklist = {sorted(src.ext_blocklist)} plus rtfm's binary defaults")
-    if not selected:
+    if not selected and _has_any_file(root, src.paths):
         where = f" under {'/'.join(src.paths)}" if src.paths else ""
         out.append(
             f"!!! SOURCE SELECTED NOTHING '{src.name}' !!! no file{where} in {root} matched "
@@ -1126,6 +1170,13 @@ def _selection_warnings(src: Source, root: Path, selected: list[Path]) -> list[s
         f"under {root} — check its spelling, and check that its file types are in this "
         f"source's {scope}. Recover: fix or remove the entry in {manifest_path()}."
         for p in src.paths if not any(_under_any(r, (p,)) for r in rels))
+    # A misspelled exclusion is a no-op, so the user believes a subtree is out of the corpus
+    # while every file in it is still indexed. Silent in the wrong direction.
+    out.extend(
+        f"!!! PATH EXCLUDES NOTHING '{src.name}' !!! paths entry '!{p}' matched no directory "
+        f"under {root}, so it excludes nothing and everything it was meant to remove is "
+        f"still indexed. Recover: fix or remove the entry in {manifest_path()}."
+        for p in src.exclude_paths if not (root / p).exists())
     return out
 
 # --- manifest ---------------------------------------------------------------
@@ -1616,7 +1667,14 @@ def read_document_text(src: Source, relpath: str, start: int = 1, end: int | Non
         return f"!!! ERROR !!! '{relpath}' not found in source '{src.name}'."
     if path.suffix.lower() == ".pdf":
         return extract_pdf_text(path, start=start, end=end)
-    lines = _read_text(path).splitlines()
+    try:
+        lines = _read_text(path).splitlines()
+    except UnicodeDecodeError as e:
+        # Every other failure branch here returns a message; a raw exception would crash the
+        # tool call for a file search and health_check already report as unreadable.
+        return (f"!!! ERROR !!! '{relpath}' in source '{src.name}' is not valid UTF-8 "
+                f"({e.reason} at byte {e.start}). rtfm indexes UTF-8 text. If this file type "
+                f"should not be indexed, add it to this source's ext_blocklist.")
     e = end if end is not None else len(lines)
     return "\n".join(lines[max(0, start - 1):e])
 
@@ -1664,7 +1722,7 @@ def search(query: str, source: str | None = None, max_files: int = 20,
             if s.type == "dir":
                 if changed <= budget:
                     result = reindex_source(conn, s)  # inline: only `changed` files extract
-                    warnings.extend(_summary_warnings(s, result))
+                    warnings.extend(_summary_warnings(conn, s, result))
                 else:
                     warnings.append(
                         f"!!! STALE SOURCE '{s.name}' !!! {changed} new/changed files exceed the "
@@ -1682,7 +1740,7 @@ def search(query: str, source: str | None = None, max_files: int = 20,
                 # otherwise repeat the identical warning once per source.
                 key = (s.path if s.path is not None
                        else str(_managed_repo_path(s.name)))
-                warnings.extend(_summary_warnings(s, result))
+                warnings.extend(_summary_warnings(conn, s, result))
                 message = None
                 if isinstance(result, dict) and result.get("error"):
                     message = (f"!!! AUTO-REINDEX FAILED '{s.name}' !!! {result['error']} — "
@@ -1753,7 +1811,7 @@ def reindex(source: str | None = None) -> dict:
     summaries = [reindex_source(conn, s) for s in targets]
     resp: dict = {"reindexed": summaries}
     for tgt, summary in zip(targets, summaries, strict=True):
-        warnings.extend(_summary_warnings(tgt, summary))
+        warnings.extend(_summary_warnings(conn, tgt, summary))
     if dropped:
         resp["purged_sources"] = dropped
     if warnings:
@@ -1903,6 +1961,26 @@ def health_check() -> dict:
         status["sources"] = [{"name": s.name, "type": s.type,
                               **( {"url": s.url, "ref": s.ref} if s.type == "git_repo" else {})}
                              for s in sources]
+        # Stage 1 (ADR 0015): health_check is the tool whose job is "is my configuration
+        # right", so a scope that selects nothing must not read as healthy. Computed live
+        # rather than read from a prior run — a source that has never been indexed is exactly
+        # the one a user most needs told about, and selection is a walk, not an extraction.
+        for src in sources:
+            if src.type not in ("dir", "git_repo"):
+                continue
+            root = src.path if src.path is not None else _managed_repo_path(src.name)
+            if not root.exists():
+                continue                      # a missing clone is its own reported condition
+            try:
+                found = iter_source_files(src, root)
+            except OSError as e:
+                status["issues"].append(f"could not scan source '{src.name}': {e}")
+                status["ok"] = False
+                continue
+            reports = _selection_warnings(src, root, found)
+            if reports:
+                status["ok"] = False
+                status["issues"].extend(reports)
         unreadable = conn.execute(
             "SELECT COUNT(*) FROM contents WHERE extracted_ok=0").fetchone()[0]
         if unreadable:
