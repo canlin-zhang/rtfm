@@ -619,3 +619,34 @@ def test_no_path_warnings_when_every_prefix_contributes(home, tmp_path):
                     ext_allowlist=frozenset({".md"}))
     conn = rtfm.get_index_db()
     assert rtfm.reindex_source(conn, s)["path_warnings"] == []
+
+
+# --- handling routines: one dispatch, extensible (ADR 0014) ------------------
+
+def test_routines_dispatch_pdf_markup_and_catch_all(tmp_path):
+    assert rtfm._routine_for(".pdf").name == "pdf"
+    assert rtfm._routine_for(".md").name == "markup"
+    assert rtfm._routine_for(".mdx").name == "markup"
+    assert rtfm._routine_for(".bzl").name == "text"       # catch-all
+    assert rtfm._routine_for("").name == "text"           # extensionless
+
+
+def test_the_catch_all_routine_is_last_and_matches_everything():
+    assert rtfm.ROUTINES[-1].exts is None
+    assert all(r.exts is not None for r in rtfm.ROUTINES[:-1])
+
+
+def test_body_and_signal_dispatch_agree_on_the_same_routine(tmp_path):
+    # One registry drives both, so a file can never be selected for body extraction by one
+    # rule and for signal extraction by a different one.
+    f = tmp_path / "x.bzl"
+    f.write_text("# a comment heading\nshared_lib_name = 1\n")
+    assert rtfm._rows_for_file(f)                     # body extracted
+    assert rtfm._doc_signal_for_file(f) == ("", "")   # catch-all carries no heading signal
+
+
+def test_markup_routine_still_extracts_headings(tmp_path):
+    f = tmp_path / "x.md"
+    f.write_text("# Title\n\nbody text\n\n## Section\n")
+    title, headings = rtfm._doc_signal_for_file(f)
+    assert title == "Title" and "Section" in headings

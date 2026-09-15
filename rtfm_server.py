@@ -18,6 +18,7 @@ import sqlite3
 import subprocess
 import time
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
@@ -416,25 +417,30 @@ def _auto_reindex_max() -> int:
     return AUTO_REINDEX_MAX_FILES
 
 
-def _rows_for_file(path: Path) -> list[tuple[str, str, str]]:
-    """Return (locator_kind, locator_value, text) rows for a supported file, else []."""
-    ext = path.suffix.lower()
+def _pdf_rows(path: Path) -> list[tuple[str, str, str]]:
+    """Page locators, one row per page with text (ADR 0004)."""
     rows: list[tuple[str, str, str]] = []
-    if ext == ".pdf":
-        text = extract_pdf_text(path)
-        for page_num, page_text in enumerate(text.split("\f"), 1):
-            content = "\n".join(ln.strip() for ln in page_text.splitlines() if ln.strip())
-            if content:
-                rows.append(("page", str(page_num), content))
-    else:
-        # Not PDF ⇒ line-chunked text. Selection already decided this file is wanted
-        # (ADR 0004: PDF → page locators, everything textual → line locators).
-        lines = path.read_text(errors="replace").splitlines()
-        for i in range(0, max(1, len(lines)), CHUNK_LINES):
-            chunk = "\n".join(ln.rstrip() for ln in lines[i:i + CHUNK_LINES])
-            if chunk.strip():
-                rows.append(("line", str(i + 1), chunk))
+    for page_num, page_text in enumerate(extract_pdf_text(path).split("\f"), 1):
+        content = "\n".join(ln.strip() for ln in page_text.splitlines() if ln.strip())
+        if content:
+            rows.append(("page", str(page_num), content))
     return rows
+
+
+def _text_rows(path: Path) -> list[tuple[str, str, str]]:
+    """Line locators, CHUNK_LINES per row (ADR 0004)."""
+    rows: list[tuple[str, str, str]] = []
+    lines = path.read_text(errors="replace").splitlines()
+    for i in range(0, max(1, len(lines)), CHUNK_LINES):
+        chunk = "\n".join(ln.rstrip() for ln in lines[i:i + CHUNK_LINES])
+        if chunk.strip():
+            rows.append(("line", str(i + 1), chunk))
+    return rows
+
+
+def _rows_for_file(path: Path) -> list[tuple[str, str, str]]:
+    """Return (locator_kind, locator_value, text) rows for a file, via its routine."""
+    return _routine_for(path.suffix.lower()).rows(path)
 
 
 def _sane_title(s: str) -> bool:
@@ -498,17 +504,46 @@ def _text_doc_signal(path: Path) -> tuple[str, str]:
     return (headings[0] if headings else ""), "\n".join(headings)
 
 
+def _no_doc_signal(_path: Path) -> tuple[str, str]:
+    """No title/heading signal. A file whose format rtfm has no structural reader for is
+    body-searchable only — guessing structure from, say, '#' comment lines would put a source
+    file's licence header into doc-level ranking (ADR 0012)."""
+    return "", ""
+
+
+class _Routine(NamedTuple):
+    """One handling routine: how a family of files becomes searchable rows and a doc-level
+    signal. Body and signal live in the same record so the two dispatches cannot disagree
+    about which routine a file belongs to — they did, and a .bzl file was selected for
+    indexing and then extracted to nothing.
+
+    Adding a format means adding a routine here; `exts=None` marks the catch-all, which must
+    stay last."""
+    name: str
+    exts: frozenset[str] | None
+    rows: Callable[[Path], list[tuple[str, str, str]]]
+    signal: Callable[[Path], tuple[str, str]]
+
+
+ROUTINES: tuple[_Routine, ...] = (
+    _Routine("pdf", frozenset({".pdf"}), _pdf_rows, _pdf_doc_signal),
+    _Routine("markup", MARKUP_EXTS, _text_rows, _text_doc_signal),
+    _Routine("text", None, _text_rows, _no_doc_signal),        # catch-all, must be last
+)
+
+
+def _routine_for(ext: str) -> _Routine:
+    """The routine handling `ext`. First match wins; the catch-all terminates the search."""
+    return next(r for r in ROUTINES if r.exts is None or ext in r.exts)
+
+
 def _doc_signal_for_file(path: Path) -> tuple[str, str]:
     """Doc-level (title, headings) for ranking. Best-effort — a failure yields ("", "") so the
     document still ranks on body text and signal extraction never blocks body extraction. The
     failure is logged (not silent): a broken/absent pymupdf would otherwise strip title/heading
     ranking corpus-wide with nothing to grep."""
-    ext = path.suffix.lower()
     try:
-        if ext == ".pdf":
-            return _pdf_doc_signal(path)
-        if ext in MARKUP_EXTS:
-            return _text_doc_signal(path)
+        return _routine_for(path.suffix.lower()).signal(path)
     except ImportError as e:
         _log.warning("doc-signal disabled for %s (%s) — body search unaffected; reinstall to "
                      "restore title/heading ranking", path, e)
