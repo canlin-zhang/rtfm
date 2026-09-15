@@ -14,34 +14,83 @@
 #   2. Pointed-to folders — an organized corpus you manage. Run `reindex("<name>")` once after
 #      first adding a large set; thereafter small changes auto-reindex on search. Read-only by default.
 
+# EVERY source declares what it indexes. rtfm has no built-in file-type list. Exactly one of:
+#   ext_allowlist = [".md", ".pdf"]    # only these file types
+#   ext_blocklist = [".png", ".svg"]   # everything except these, plus rtfm's binary defaults
+# Declaring both is refused; declaring neither skips the source and tells you so.
+#
+# Optionally narrow to subtrees:
+#   paths = ["docs", "!docs/versions"]
+# Directory prefixes, not globs — "docs" matches docs/ and everything under it, and a "!"
+# entry excludes one. Omit to index the whole tree.
+#
+# Editing any of these makes the source stale, so the next search reindexes it. Files are
+# indexed as UTF-8 text; PDFs get page extraction. A file that is not valid UTF-8 is
+# reported by reindex() and health_check(), never indexed as garbage.
+
 [[source]]
-name    = "default"            # the zero-config drop-dir; the only mutable source by default
-type    = "dir"
-path    = "~/.rtfm/default"
-mutable = true
+name          = "default"      # the zero-config drop-dir; the only mutable source by default
+type          = "dir"
+path          = "~/.rtfm/default"
+mutable       = true
+ext_allowlist = [".txt", ".md", ".mdx", ".rst", ".rest", ".pdf"]
 
 # Example: point at a large, organized doc set. Run reindex("vendor-docs") once after adding it;
 # searches are instant thereafter. Byte-identical files across version subfolders are stored once.
 # [[source]]
-# name    = "vendor-docs"
-# type    = "dir"
-# path    = "/path/to/vendor/Documentation"
-# mutable = false
+# name          = "vendor-docs"
+# type          = "dir"
+# path          = "/path/to/vendor/Documentation"
+# mutable       = false
+# ext_allowlist = [".pdf", ".md"]
 
 # Example: a git-tracked doc repo — linked mode (user provides the clone). Read-only:
 # rtfm verifies the remote URL and a clean tree, then indexes the checkout as-is —
 # it never fetches or resets the user's clone.
 # [[source]]
-# name    = "specs"
-# type    = "git_repo"
-# url     = "https://example.com/org/specs.git"
-# ref     = "main"
-# path    = "/path/to/specs"
+# name          = "specs"
+# type          = "git_repo"
+# url           = "https://example.com/org/specs.git"
+# ref           = "main"
+# path          = "/path/to/specs"
+# ext_allowlist = [".md", ".pdf"]
 
 # Example: a git-tracked doc repo — managed mode (rtfm clones to ~/.rtfm/repos/<name>/
 # and fetches + resets on every reindex).
 # [[source]]
-# name    = "docs-managed"
-# type    = "git_repo"
-# url     = "https://example.com/org/specs.git"
-# ref     = "v2.1-stable"
+# name          = "docs-managed"
+# type          = "git_repo"
+# url           = "https://example.com/org/specs.git"
+# ref           = "v2.1-stable"
+# ext_allowlist = [".md", ".pdf"]
+
+# Example: a rule reference that lives in source, not prose. Starlark `doc=` strings are
+# Bazel's canonical attribute documentation, so .bzl has to be indexed to answer anything
+# about a rule's attributes. `tests/` is excluded by scoping to the two useful prefixes.
+# [[source]]
+# name          = "rules_cc"
+# type          = "git_repo"
+# url           = "https://github.com/bazelbuild/rules_cc.git"
+# ref           = "main"
+# paths         = ["cc", "examples"]
+# ext_allowlist = [".bzl", ".md"]
+
+# Example: a docs tree that ships its own version archive. docs/versions/ holds 12 historical
+# copies that outnumber the current docs 23 to 1, so excluding it is the difference between
+# searching this release and searching every release at once.
+# [[source]]
+# name          = "bazel"
+# type          = "git_repo"
+# url           = "https://github.com/bazelbuild/bazel.git"
+# ref           = "master"
+# paths         = ["docs", "!docs/versions"]
+# ext_allowlist = [".mdx", ".md"]
+
+# Example: index everything in a tree except assets. A blocklist source also gets rtfm's
+# built-in binary/asset defaults, so images, fonts, archives and compiled objects are
+# already excluded without listing them.
+# [[source]]
+# name          = "kitchen-sink"
+# type          = "dir"
+# path          = "/path/to/tree"
+# ext_blocklist = [".log", ".csv"]

@@ -51,10 +51,22 @@ including the initial clone for managed sources, so the first search over a fres
 take a while. Byte-identical files that repeat across version subfolders are extracted once;
 `find_duplicates` lists every path a given content lives at.
 
+**What a source indexes.** Every source declares it — rtfm has no built-in file-type list, so
+nothing is indexed by a rule you cannot see in your own manifest. Set `ext_allowlist` for "only
+these types" or `ext_blocklist` for "everything except these" (rtfm's own binary and asset
+defaults are added to the blocklist). Declaring both is refused; declaring neither skips the
+source and says so. Narrow to subtrees with `paths`, which takes directory prefixes and
+`!`-prefixed exclusions — `paths = ["docs", "!docs/versions"]` indexes a docs tree without its
+version archive. Editing any of them marks the source stale, so the next search picks it up.
+
+Files are indexed as UTF-8 text, and PDFs get page extraction. A file rtfm agreed to index but
+cannot decode is reported by `reindex` and `health_check`, never indexed as garbage.
+
 ## Use
 
-Drop PDFs / `.md` / `.mdx` / `.rst` / `.txt` into `~/.rtfm/default/`, then ask Claude to search them, or
-add more sources by editing `~/.rtfm/manifest.toml` (see `manifest.example.toml`).
+Drop documents into `~/.rtfm/default/`, then ask Claude to search them, or add more sources by
+editing `~/.rtfm/manifest.toml` (see `manifest.example.toml`). The drop-dir ships configured for
+PDF, Markdown, MDX, reStructuredText and plain text; widen it by editing its `ext_allowlist`.
 
 Or invoke the bundled **`read-the-manual`** skill (`/read-the-manual`) to have a question
 answered strictly from the corpus — verbatim quotes with page/line citations, no
