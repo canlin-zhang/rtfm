@@ -27,7 +27,19 @@ from mcp.server.fastmcp import FastMCP
 # --- config -----------------------------------------------------------------
 _log = logging.getLogger("rtfm")
 
-TEXT_EXTS = {".txt", ".md", ".mdx", ".rst", ".rest"}   # plain text → line locators (.html later)
+# Handling routines, not selection. What a source SELECTS is declared per source in the
+# manifest (ADR 0014) — nothing here decides that.
+MARKUP_EXTS = frozenset({".txt", ".md", ".mdx", ".rst", ".rest"})  # ATX/setext heading parsing
+# Safe to grow where a default allowlist would not be (ADR 0014): everything here is something
+# nobody wants indexed, so a later addition removes garbage, never content.
+DEFAULT_EXT_BLOCKLIST = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".tif", ".tiff", ".webp", ".svg",
+    ".woff", ".woff2", ".ttf", ".otf", ".eot",
+    ".zip", ".gz", ".bz2", ".xz", ".tar", ".7z", ".rar",
+    ".so", ".dylib", ".dll", ".a", ".o", ".obj", ".exe", ".bin",
+    ".jar", ".class", ".pyc", ".pyo", ".wasm",
+    ".mp3", ".mp4", ".wav", ".avi", ".mov", ".webm", ".ogg",
+})
 CHUNK_LINES = 50
 SCHEMA_VERSION = 4                   # index DB is a cache; mismatch ⇒ drop & rebuild
 MAX_LOCATIONS = 5                    # default cap on locations listed per search hit
@@ -414,7 +426,9 @@ def _rows_for_file(path: Path) -> list[tuple[str, str, str]]:
             content = "\n".join(ln.strip() for ln in page_text.splitlines() if ln.strip())
             if content:
                 rows.append(("page", str(page_num), content))
-    elif ext in TEXT_EXTS:
+    else:
+        # Not PDF ⇒ line-chunked text. Selection already decided this file is wanted
+        # (ADR 0004: PDF → page locators, everything textual → line locators).
         lines = path.read_text(errors="replace").splitlines()
         for i in range(0, max(1, len(lines)), CHUNK_LINES):
             chunk = "\n".join(ln.rstrip() for ln in lines[i:i + CHUNK_LINES])
@@ -493,7 +507,7 @@ def _doc_signal_for_file(path: Path) -> tuple[str, str]:
     try:
         if ext == ".pdf":
             return _pdf_doc_signal(path)
-        if ext in TEXT_EXTS:
+        if ext in MARKUP_EXTS:
             return _text_doc_signal(path)
     except ImportError as e:
         _log.warning("doc-signal disabled for %s (%s) — body search unaffected; reinstall to "
@@ -947,7 +961,7 @@ def iter_source_files(src: Source) -> list[Path]:
     for f in src.path.rglob("*"):
         if not f.is_file():
             continue
-        if f.suffix.lower() != ".pdf" and f.suffix.lower() not in TEXT_EXTS:
+        if f.suffix.lower() != ".pdf" and f.suffix.lower() not in MARKUP_EXTS:
             continue
         if any(part.startswith(".") for part in f.relative_to(src.path).parts):
             continue

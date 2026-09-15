@@ -446,3 +446,18 @@ def test_default_branch_parses_remote_head(home, tmp_path, git_branch):
     dest = tmp_path / "dest"
     rtfm._git_clone(str(remote), branch, dest, timeout=30)
     assert rtfm._default_branch(dest) == branch
+
+
+# --- constants split: selection is declared, handling is code (ADR 0014) -----
+
+def test_markup_exts_is_for_heading_parsing_not_selection():
+    assert rtfm.MARKUP_EXTS == frozenset({".txt", ".md", ".mdx", ".rst", ".rest"})
+    assert not hasattr(rtfm, "TEXT_EXTS")           # selection no longer lives in code
+
+
+def test_default_ext_blocklist_covers_common_binaries():
+    for ext in (".png", ".jpg", ".svg", ".gif", ".ico", ".woff", ".woff2",
+                ".so", ".dylib", ".dll", ".zip", ".gz", ".jar", ".class", ".pyc"):
+        assert ext in rtfm.DEFAULT_EXT_BLOCKLIST, ext
+    assert ".md" not in rtfm.DEFAULT_EXT_BLOCKLIST
+    assert ".pdf" not in rtfm.DEFAULT_EXT_BLOCKLIST  # pdf is indexable, not an asset
