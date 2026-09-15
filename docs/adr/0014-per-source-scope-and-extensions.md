@@ -159,8 +159,11 @@ Stored as the value rather than a digest — order-independence comes from sorti
 not from hashing, and a readable column beats an opaque one when someone inspects
 the index by hand.
 
-`dir` sources need nothing: their relpath+mtime set comparison already goes stale
-when the selected file set changes.
+`dir` sources need no stored scope: their relpath+mtime set comparison goes stale
+whenever the selected file set changes. It does not cover one edge, though — a
+source that selects *nothing* has `indexed == on_disk == {}`, which reads as fresh
+forever, so an empty selection is forced stale explicitly. Without that, the
+source is skipped on every query and its stage report is never even computed.
 
 Amends ADR 0013 (commit-based staleness → commit-or-scope).
 

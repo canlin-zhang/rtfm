@@ -851,3 +851,62 @@ def test_an_exclude_prefix_that_works_does_not_warn(home, tmp_path):
                     ext_allowlist=frozenset({".md"}))
     conn = rtfm.get_index_db()
     assert rtfm.reindex_source(conn, s)["path_warnings"] == []
+
+
+# --- stage 2 ACCESS: can rtfm read the bytes at all? (ADR 0015) --------------
+
+
+def test_an_unreadable_file_does_not_crash_the_reindex(home, tmp_path, unopenable):
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "ok.md").write_text("readable keyword\n")
+    unopenable(t / "locked.md")
+    s = rtfm.Source(name="a", type="dir", path=t, ext_allowlist=frozenset({".md"}))
+    conn = rtfm.get_index_db()
+    summary = rtfm.reindex_source(conn, s)          # used to raise PermissionError
+    assert summary["access_errors"] == 1
+    assert rtfm.search_index(conn, "keyword", source="a")   # the readable file still indexes
+
+
+def test_an_unreadable_file_is_named_in_the_report(home, tmp_path, unopenable):
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "ok.md").write_text("fine\n")
+    unopenable(t / "locked.md")
+    s = rtfm.Source(name="a", type="dir", path=t, ext_allowlist=frozenset({".md"}))
+    conn = rtfm.get_index_db()
+    warns = rtfm._summary_warnings(s, rtfm.reindex_source(conn, s))
+    assert any("COULD NOT OPEN" in w and "locked.md" in w for w in warns)
+
+
+def test_a_directory_the_walk_cannot_enter_is_reported(home, tmp_path, unopenable):
+    t = tmp_path / "c"
+    (t / "vault").mkdir(parents=True)
+    (t / "vault" / "secret.md").write_text("hidden\n")
+    (t / "ok.md").write_text("fine\n")
+    unopenable(t / "vault", directory=True)
+    s = rtfm.Source(name="a", type="dir", path=t, ext_allowlist=frozenset({".md"}))
+    conn = rtfm.get_index_db()
+    warns = rtfm._summary_warnings(s, rtfm.reindex_source(conn, s))
+    # rglob swallowed this at scandir, so the subtree was invisible to every code path.
+    # It is SELECT's report, not ACCESS's: nothing under it was ever considered.
+    reports = rtfm.reindex_source(conn, s)["path_warnings"]
+    assert any("SOURCE INCOMPLETE" in w and "vault" in w for w in reports)
+    assert not any("COULD NOT OPEN" in w for w in warns)
+
+
+def test_access_and_decode_failures_are_counted_separately(home, tmp_path, unopenable):
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "ok.md").write_text("fine\n")
+    (t / "binary.md").write_bytes(bytes(range(256)))
+    unopenable(t / "locked.md")
+    s = rtfm.Source(name="a", type="dir", path=t, ext_allowlist=frozenset({".md"}))
+    conn = rtfm.get_index_db()
+    summary = rtfm.reindex_source(conn, s)
+    # Different questions, different remedies: chmod versus convert-or-exclude.
+    assert summary["access_errors"] == 1
+    assert summary["errors"] == 1
+    warns = rtfm._summary_warnings(s, summary)
+    assert any("COULD NOT OPEN" in w for w in warns)
+    assert any("COULD NOT READ" in w for w in warns)

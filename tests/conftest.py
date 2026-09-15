@@ -80,3 +80,25 @@ def sample_txt(tmp_path):
     path = tmp_path / "notes.md"
     path.write_text("\n".join(f"line {i} keyword{i}" for i in range(1, 121)))
     return path
+
+@pytest.fixture
+def unopenable():
+    """Make a path unopenable for the duration of a test, restoring its mode afterwards —
+    pytest's tmp_path teardown cannot remove a directory it has no permission to enter."""
+    touched: list = []
+
+    def _make(path, *, directory=False):
+        if directory:
+            path.mkdir(parents=True, exist_ok=True)
+        else:
+            path.write_text("unreadable")
+        touched.append((path, path.stat().st_mode))
+        path.chmod(0o000)
+        return path
+
+    yield _make
+    for path, mode in touched:
+        try:
+            path.chmod(mode)
+        except OSError:
+            pass

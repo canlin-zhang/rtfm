@@ -777,6 +777,14 @@ def _ensure_git_repo_ready(src: Source) -> tuple[Path, str | None]:
     return repo_path, None
 
 
+def _gc_orphaned_contents(conn: sqlite3.Connection) -> None:
+    """Drop extracted content no location points at any more."""
+    for tbl in ("content_fts", "doc_fts", "contents"):
+        conn.execute(
+            f"DELETE FROM {tbl} WHERE sha256 NOT IN (SELECT DISTINCT sha256 FROM locations)")
+    conn.commit()
+
+
 def _index_files(conn: sqlite3.Connection, src: Source, root: Path) -> dict:
     """Scan `root` for selected files and sync the index for `src.name`: hash new or
     mtime-changed files, purge vanished ones, extract new contents, GC orphaned rows.
@@ -788,10 +796,12 @@ def _index_files(conn: sqlite3.Connection, src: Source, root: Path) -> dict:
     must not be reconstructed here — a synthetic stand-in would discard the scope and
     silently index the whole tree (ADR 0014)."""
     source_name = src.name
-    files = iter_source_files(src, root)
+    walk = walk_source(src, root)
+    files = walk.files
+    access_denied: list[str] = []            # ACCESS: files chosen but not openable
     summary = {"files_seen": len(files), "unique_contents": 0, "newly_extracted": 0,
-               "extraction_skips": 0, "purged": 0, "errors": 0,
-               "path_warnings": _selection_warnings(src, root, files)}
+               "extraction_skips": 0, "purged": 0, "errors": 0, "access_errors": 0,
+               "path_warnings": _selection_warnings(src, root, files, walk.unreadable_dirs)}
 
     existing = {r[0]: (r[1], r[2]) for r in conn.execute(
         "SELECT relpath, sha256, mtime FROM locations WHERE source=?", (source_name,))}
@@ -799,12 +809,19 @@ def _index_files(conn: sqlite3.Connection, src: Source, root: Path) -> dict:
     present: dict[str, tuple[str, float]] = {}
     for f in files:
         rel = str(f.relative_to(root))
-        mtime = f.stat().st_mtime
-        prev = existing.get(rel)
-        if prev and prev[1] == mtime:
-            sha = prev[0]                                   # mtime match: reuse stored sha
-        else:
-            sha = hashlib.sha256(f.read_bytes()).hexdigest()
+        try:
+            mtime = f.stat().st_mtime
+            prev = existing.get(rel)
+            if prev and prev[1] == mtime:
+                sha = prev[0]                               # mtime match: reuse stored sha
+            else:
+                sha = hashlib.sha256(f.read_bytes()).hexdigest()
+        except OSError as e:
+            # ACCESS (ADR 0015). This used to raise straight out of reindex(), so one
+            # unreadable file killed the whole call; search() caught it and dropped the
+            # entire source. Skip the file, name it, index the rest.
+            access_denied.append(f"{f} ({e.strerror or type(e).__name__})")
+            continue
         present[rel] = (sha, mtime)
 
     vanished = set(existing) - set(present)
@@ -850,17 +867,28 @@ def _index_files(conn: sqlite3.Connection, src: Source, root: Path) -> dict:
         summary["errors" if ex.error else "newly_extracted"] += 1
     conn.commit()
 
-    for tbl in ("content_fts", "doc_fts", "contents"):           # GC contents with no live path
-        conn.execute(
-            f"DELETE FROM {tbl} WHERE sha256 NOT IN (SELECT DISTINCT sha256 FROM locations)")
-    conn.commit()
+    if {sha for (sha, _) in existing.values()} - shas_here:
+        # Orphans appear only when a sha this source used to reference is no longer referenced
+        # — a file vanished, or an in-place edit moved it to a new sha. The DELETE is a scan of
+        # the whole corpus's FTS tables, and an empty-selection source is re-walked on every
+        # query (see _stale_delta), so paying for it unconditionally taxed every search.
+        _gc_orphaned_contents(conn)
 
     # Stage 2's own zero (ADR 0015): selection let files through, but none of them are
     # readable, so the source is configured, reports success and answers nothing.
+    summary["access_errors"] = len(access_denied)
+    summary["access_denied"] = access_denied
     if files:
-        readable = conn.execute(
-            "SELECT COUNT(*) FROM contents WHERE extracted_ok=1 AND sha256 IN "
-            "(SELECT sha256 FROM locations WHERE source=?)", (source_name,)).fetchone()[0]
+        # One GROUP BY carries both the stage-3 zero check and the live cross-run unreadable
+        # count. summary["errors"] cannot serve: it is a per-run extraction delta, and a sha
+        # already in contents with extracted_ok=0 is never re-extracted, so it reverts to
+        # zero on the next run while the files stay broken.
+        counts = dict(conn.execute(
+            "SELECT c.extracted_ok, COUNT(DISTINCT c.sha256) FROM contents c "
+            "JOIN locations l ON l.sha256=c.sha256 WHERE l.source=? GROUP BY c.extracted_ok",
+            (source_name,)).fetchall())
+        readable = counts.get(1, 0)
+        summary["unreadable"] = counts.get(0, 0)
         if not readable:
             summary["path_warnings"].append(
                 f"!!! NOTHING COULD BE READ '{source_name}' !!! all {len(files)} selected "
@@ -870,33 +898,29 @@ def _index_files(conn: sqlite3.Connection, src: Source, root: Path) -> dict:
     return summary
 
 
-def _unreadable_count(conn: sqlite3.Connection, source_name: str) -> int:
-    """How many of this source's files are currently unreadable — a live query, not the
-    per-run extraction delta. `summary["errors"]` counts only shas extracted THIS run, and a
-    sha already in `contents` with extracted_ok=0 is never re-extracted, so the delta reverts
-    to zero on the next run while the files stay broken."""
-    return conn.execute(
-        "SELECT COUNT(DISTINCT c.sha256) FROM contents c JOIN locations l ON l.sha256=c.sha256 "
-        "WHERE c.extracted_ok=0 AND l.source=?", (source_name,)).fetchone()[0]
+def _summary_warnings(src: Source, summary: dict) -> list[str]:
+    """Warnings a reindex summary owes the caller: each stage's own report (ADR 0015). All of
+    them are silent otherwise — the summary is nested inside reindex()'s response and was
+    discarded entirely by search().
 
-
-def _summary_warnings(conn: sqlite3.Connection, src: Source, summary: dict) -> list[str]:
-    """Warnings a reindex summary owes the caller: the selection/decode stage reports, and a
-    count of files rtfm agreed to index but cannot read. Both are silent otherwise — the
-    summary is nested inside reindex()'s response and was discarded entirely by search().
-
-    The stage-2 zero report ("NOTHING COULD BE READ") already states the total-failure case,
-    so the partial count is suppressed when it fired — the two would otherwise say the same
-    thing twice in one response."""
+    ACCESS and DECODE are reported separately because their remedies differ: chmod versus
+    convert-or-exclude. The DECODE total-failure report already states the all-failed case, so
+    the partial count is suppressed when it fired rather than saying it twice."""
     if not isinstance(summary, dict):
         return []
     out = list(summary.get("path_warnings", ()))
-    if any("NOTHING COULD BE READ" in w for w in out):
-        return out
-    unreadable = _unreadable_count(conn, src.name)
-    if unreadable:
+    denied = summary.get("access_denied") or ()
+    if denied:
+        shown = ", ".join(str(d) for d in list(denied)[:3])
+        more = f" (+{len(denied) - 3} more)" if len(denied) > 3 else ""
         out.append(
-            f"!!! COULD NOT READ '{src.name}' !!! {unreadable} file(s) are not valid UTF-8 "
+            f"!!! COULD NOT OPEN '{src.name}' !!! {len(denied)} selected file(s) could not be "
+            f"opened and were skipped: {shown}{more}. Recover: fix the permissions, or "
+            f"exclude their file types in {manifest_path()}.")
+    unreadable = summary.get("unreadable", 0)
+    if unreadable and unreadable != summary.get("files_seen"):
+        out.append(
+            f"!!! COULD NOT READ '{src.name}' !!! {unreadable} content(s) are not valid UTF-8 "
             f"and are not searchable. Recover: convert them, or exclude their file types in "
             f"{manifest_path()}.")
     return out
@@ -959,7 +983,7 @@ def reindex_source(conn: sqlite3.Connection, src: Source) -> dict:
         return _reindex_git_repo(conn, src)
     summary = {"source": src.name, "files_seen": 0, "unique_contents": 0,
                "newly_extracted": 0, "extraction_skips": 0, "purged": 0, "errors": 0,
-               "path_warnings": []}
+               "access_errors": 0, "access_denied": [], "path_warnings": []}
     if src.path is None or not src.path.exists():
         return summary
     summary.update(_index_files(conn, src, src.path))
@@ -1089,36 +1113,69 @@ def _under_any(rel: str, prefixes: tuple[str, ...]) -> bool:
     return any(rel == p or rel.startswith(p + "/") for p in prefixes)
 
 
-def iter_source_files(src: Source, root: Path | None = None) -> list[Path]:
-    """Files this source selects, recursively, skipping hidden dirs.
+class _Walk(NamedTuple):
+    """What a source's tree walk found: the files SELECT accepted, and the directories the
+    walk could not enter. The second is ACCESS's only non-per-file failure (ADR 0015) — a
+    subtree that never reached SELECT at all, so it cannot be reported as a file that
+    failed."""
+    files: list[Path]
+    unreadable_dirs: list[Path]
+
+
+def walk_source(src: Source, root: Path | None = None) -> _Walk:
+    """Walk a source's declared scope once, returning selected files and unreadable dirs.
 
     `root` overrides `src.path`: a managed git_repo source has `path is None` and lives at its
     clone path, but its declared scope still applies there.
 
-    The walk starts at each include prefix rather than filtering a whole-tree rglob, so a
+    The walk starts at each include prefix rather than filtering a whole-tree walk, so a
     scoped source does not pay to stat the rest of the repo. Selection is by extension list
-    only — file content is never inspected here. Whether a selected file can actually be read
-    is a separate stage (ADR 0014: filtering and encoding answer different questions)."""
+    only — file content is never inspected here (ADR 0015: SELECT, ACCESS and DECODE answer
+    different questions).
+
+    `os.walk` with an `onerror` callback, not `rglob`: pathlib catches OSError inside scandir
+    and yields nothing, which is indistinguishable from an empty directory, so a subtree this
+    process cannot enter would vanish with nothing raised and nothing to report."""
     base = root if root is not None else src.path
     if base is None or not base.exists():
-        return []
+        return _Walk([], [])
     roots = [base / p for p in src.paths] if src.paths else [base]
     out: set[Path] = set()                        # include prefixes may overlap; dedup by path
+    denied: set[Path] = set()
+
+    def _denied(err: OSError) -> None:
+        if err.filename:
+            denied.add(Path(err.filename))
+
+    def _wanted(f: Path) -> bool:
+        rel = f.relative_to(base)
+        if any(part.startswith(".") for part in rel.parts):
+            return False
+        if not _selects_ext(src, f.suffix.lower()):
+            return False
+        return not (src.exclude_paths and _under_any(rel.as_posix(), src.exclude_paths))
+
     for r in roots:
         if not r.exists():
             continue
-        for f in ([r] if r.is_file() else r.rglob("*")):
-            if not f.is_file():
-                continue
-            rel = f.relative_to(base)
-            if any(part.startswith(".") for part in rel.parts):
-                continue
-            if not _selects_ext(src, f.suffix.lower()):
-                continue
-            if src.exclude_paths and _under_any(rel.as_posix(), src.exclude_paths):
-                continue
-            out.add(f)
-    return sorted(out)
+        if r.is_file():
+            if _wanted(r):
+                out.add(r)
+            continue
+        for dirpath, dirnames, filenames in os.walk(r, onerror=_denied):
+            d = Path(dirpath)
+            dirnames[:] = [n for n in dirnames if not n.startswith(".")]
+            for name in filenames:
+                f = d / name
+                if f.is_file() and _wanted(f):
+                    out.add(f)
+    return _Walk(sorted(out), sorted(denied))
+
+
+def iter_source_files(src: Source, root: Path | None = None) -> list[Path]:
+    """The files a source selects. Callers that also need ACCESS's unreadable directories
+    use walk_source directly; this is the same single walk, files only."""
+    return walk_source(src, root).files
 
 
 def _source_scope(src: Source) -> str:
@@ -1146,14 +1203,22 @@ def _has_any_file(root: Path, prefixes: tuple[str, ...]) -> bool:
     return False
 
 
-def _selection_warnings(src: Source, root: Path, selected: list[Path]) -> list[str]:
+def _selection_warnings(src: Source, root: Path, selected: list[Path],
+                        unreadable_dirs: list[Path] | None = None) -> list[str]:
     """What the selection stage owes the caller when it lets nothing (or less than asked)
     through. A source that quietly selects nothing is the confident-but-empty failure
     ADR 0014 refuses, so each stage that can empty a source names the reason.
 
-    Two cases: the whole source selected nothing, and an individual `paths` prefix
-    contributed nothing — either because it is not in the tree, or because it holds
-    nothing the extension list selects."""
+    Four cases: the whole source selected nothing; an individual `paths` prefix contributed
+    nothing, either because it is not in the tree or because it holds nothing the extension
+    list selects; an `exclude_paths` entry that matched no directory, which is a no-op
+    exclusion — silent in the opposite direction, leaving MORE indexed than the user
+    believes; and a directory that could not be enumerated.
+
+    That last one is SELECT's honesty about its own input rather than an ACCESS failure: an
+    extension list cannot be applied to names that cannot be read, so anything under that
+    directory was never considered at all (ADR 0015). A file rtfm chose and then could not
+    open is the opposite side of SELECT and belongs to ACCESS."""
     out: list[str] = []
     scope = (f"ext_allowlist = {sorted(src.ext_allowlist)}" if src.ext_allowlist
              else f"ext_blocklist = {sorted(src.ext_blocklist)} plus rtfm's binary defaults")
@@ -1177,6 +1242,14 @@ def _selection_warnings(src: Source, root: Path, selected: list[Path]) -> list[s
         f"under {root}, so it excludes nothing and everything it was meant to remove is "
         f"still indexed. Recover: fix or remove the entry in {manifest_path()}."
         for p in src.exclude_paths if not (root / p).exists())
+    unreadable_dirs = unreadable_dirs or []
+    if unreadable_dirs:
+        shown = ", ".join(str(d) for d in unreadable_dirs[:3])
+        more = f" (+{len(unreadable_dirs) - 3} more)" if len(unreadable_dirs) > 3 else ""
+        out.append(
+            f"!!! SOURCE INCOMPLETE '{src.name}' !!! {len(unreadable_dirs)} directory(ies) "
+            f"could not be entered, so nothing under them was ever considered: {shown}{more}. "
+            f"Recover: fix the permissions, or exclude the path in {manifest_path()}.")
     return out
 
 # --- manifest ---------------------------------------------------------------
@@ -1670,8 +1743,10 @@ def read_document_text(src: Source, relpath: str, start: int = 1, end: int | Non
     try:
         lines = _read_text(path).splitlines()
     except UnicodeDecodeError as e:
-        # Every other failure branch here returns a message; a raw exception would crash the
-        # tool call for a file search and health_check already report as unreadable.
+        # Every other failure branch here returns a message. Not redundant with the
+        # indexing-side report: a relpath outside this source's extension lists never
+        # entered `contents` at all (ADR 0014 — filtering reports nothing), so nothing
+        # else in rtfm has ever looked at this file.
         return (f"!!! ERROR !!! '{relpath}' in source '{src.name}' is not valid UTF-8 "
                 f"({e.reason} at byte {e.start}). rtfm indexes UTF-8 text. If this file type "
                 f"should not be indexed, add it to this source's ext_blocklist.")
@@ -1722,7 +1797,7 @@ def search(query: str, source: str | None = None, max_files: int = 20,
             if s.type == "dir":
                 if changed <= budget:
                     result = reindex_source(conn, s)  # inline: only `changed` files extract
-                    warnings.extend(_summary_warnings(conn, s, result))
+                    warnings.extend(_summary_warnings(s, result))
                 else:
                     warnings.append(
                         f"!!! STALE SOURCE '{s.name}' !!! {changed} new/changed files exceed the "
@@ -1740,7 +1815,7 @@ def search(query: str, source: str | None = None, max_files: int = 20,
                 # otherwise repeat the identical warning once per source.
                 key = (s.path if s.path is not None
                        else str(_managed_repo_path(s.name)))
-                warnings.extend(_summary_warnings(conn, s, result))
+                warnings.extend(_summary_warnings(s, result))
                 message = None
                 if isinstance(result, dict) and result.get("error"):
                     message = (f"!!! AUTO-REINDEX FAILED '{s.name}' !!! {result['error']} — "
@@ -1808,10 +1883,11 @@ def reindex(source: str | None = None) -> dict:
                 _staleness_cache.pop(key, None)
         if dropped:
             conn.commit()
+            _gc_orphaned_contents(conn)
     summaries = [reindex_source(conn, s) for s in targets]
     resp: dict = {"reindexed": summaries}
     for tgt, summary in zip(targets, summaries, strict=True):
-        warnings.extend(_summary_warnings(conn, tgt, summary))
+        warnings.extend(_summary_warnings(tgt, summary))
     if dropped:
         resp["purged_sources"] = dropped
     if warnings:
@@ -1972,12 +2048,23 @@ def health_check() -> dict:
             if not root.exists():
                 continue                      # a missing clone is its own reported condition
             try:
-                found = iter_source_files(src, root)
-            except OSError as e:
+                walk = walk_source(src, root)
+            except OSError as e:                  # a root that vanished mid-scan, EIO, ...
                 status["issues"].append(f"could not scan source '{src.name}': {e}")
                 status["ok"] = False
                 continue
-            reports = _selection_warnings(src, root, found)
+            reports = _selection_warnings(src, root, walk.files, walk.unreadable_dirs)
+            # ACCESS, live (ADR 0015). A file skipped for being unopenable never reaches
+            # `contents`, so the extracted_ok count below cannot see it. os.access is a stat,
+            # not an open — cheap next to the walk that just ran.
+            shut = [f for f in walk.files if not os.access(f, os.R_OK)]
+            if shut:
+                reports.append(
+                    f"!!! COULD NOT OPEN '{src.name}' !!! {len(shut)} selected file(s) cannot "
+                    f"be read and are not indexed: "
+                    f"{', '.join(str(f) for f in shut[:3])}. "
+                    f"Recover: fix the permissions, or exclude their file types in "
+                    f"{manifest_path()}.")
             if reports:
                 status["ok"] = False
                 status["issues"].extend(reports)

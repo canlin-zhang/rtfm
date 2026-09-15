@@ -627,3 +627,98 @@ def test_health_check_is_clean_for_a_well_configured_source(home, tmp_path):
         f'[[source]]\nname="fine"\ntype="dir"\npath="{t}"\next_allowlist=[".md"]\n')
     health = rtfm.health_check()
     assert not any("NOTHING" in i for i in health["issues"])
+
+
+
+def _unreadable_source(home, tmp_path, unopenable, directory=False):
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "ok.md").write_text("readable keyword\n")
+    unopenable(t / ("vault" if directory else "locked.md"), directory=directory)
+    if directory:
+        # a file inside, so the subtree is genuinely non-empty — it just can't be entered
+        pass
+    (home / "manifest.toml").write_text(
+        f'[[source]]\nname="a"\ntype="dir"\npath="{t}"\next_allowlist=[".md"]\n')
+    return t
+
+
+def test_reindex_survives_an_unreadable_file(home, tmp_path, unopenable):
+    """One unreadable file used to raise PermissionError straight out of reindex()."""
+    _unreadable_source(home, tmp_path, unopenable)
+    resp = rtfm.reindex()
+    assert "error" not in resp
+    assert any("COULD NOT OPEN" in w and "locked.md" in w for w in resp.get("WARNING", []))
+
+
+def test_search_keeps_the_source_when_one_file_is_unreadable(home, tmp_path, unopenable):
+    """search() used to report AUTO-REINDEX FAILED and drop the whole source for one file."""
+    _unreadable_source(home, tmp_path, unopenable)
+    resp = rtfm.search("keyword")
+    assert resp["results"], "the readable file must still be searchable"
+    assert not any("AUTO-REINDEX FAILED" in w for w in resp.get("WARNING", []))
+    assert any("COULD NOT OPEN" in w for w in resp.get("WARNING", []))
+
+
+def test_health_check_reports_an_unreadable_file(home, tmp_path, unopenable):
+    _unreadable_source(home, tmp_path, unopenable)
+    rtfm.reindex()
+    health = rtfm.health_check()
+    assert health["ok"] is False
+
+
+def test_health_check_reports_an_unenumerable_directory(home, tmp_path, unopenable):
+    """SELECT's report, not ACCESS's — nothing under it was ever considered."""
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "ok.md").write_text("fine\n")
+    unopenable(t / "vault", directory=True)
+    (home / "manifest.toml").write_text(
+        f'[[source]]\nname="a"\ntype="dir"\npath="{t}"\next_allowlist=[".md"]\n')
+    health = rtfm.health_check()
+    assert health["ok"] is False
+    assert any("SOURCE INCOMPLETE" in i and "vault" in i for i in health["issues"])
+
+
+def _managed_repo(home, tmp_path, git_branch, allowlist='[".md"]', extra=""):
+    """A git_repo source rtfm has actually cloned, so health_check's live scan reaches it."""
+    remote, seed, branch = make_git_repo(tmp_path, git_branch, filename="a.md", content="hi\n")
+    (home / "manifest.toml").write_text(
+        f'[[source]]\nname="g"\ntype="git_repo"\nurl="{remote}"\nref="{branch}"\n'
+        f'ext_allowlist={allowlist}\n{extra}')
+    rtfm.reindex()                                  # performs the managed clone
+    return remote, branch
+
+
+def test_health_check_scans_a_cloned_git_repo_source(home, tmp_path, git_branch):
+    """Both pre-existing git_repo health tests use a url that is never cloned, so root.exists()
+    is False and the live scan is skipped entirely — this is the path that was unverified."""
+    _managed_repo(home, tmp_path, git_branch)
+    health = rtfm.health_check()
+    assert health["ok"] is True
+    assert not any("NOTHING" in i for i in health["issues"])
+
+
+def test_health_check_reports_a_git_repo_that_selects_nothing(home, tmp_path, git_branch):
+    _managed_repo(home, tmp_path, git_branch, allowlist='[".mdx"]')
+    health = rtfm.health_check()
+    assert health["ok"] is False
+    assert any("SOURCE SELECTED NOTHING" in i and "'g'" in i for i in health["issues"])
+
+
+def test_health_check_reports_a_bad_prefix_on_a_git_repo(home, tmp_path, git_branch):
+    _managed_repo(home, tmp_path, git_branch, extra='paths=["doc"]\n')
+    health = rtfm.health_check()
+    assert health["ok"] is False
+    assert any("'doc'" in i for i in health["issues"])
+
+
+def test_search_surfaces_stage_reports_for_a_git_repo_source(home, tmp_path, git_branch):
+    """The _summary_warnings call in search()'s git_repo branch had no test — it was
+    independently deletable without any failure."""
+    remote, seed, branch = make_git_repo(tmp_path, git_branch, filename="a.md", content="hi\n")
+    (home / "manifest.toml").write_text(
+        f'[[source]]\nname="g"\ntype="git_repo"\nurl="{remote}"\nref="{branch}"\n'
+        'ext_allowlist=[".md"]\npaths=["doc"]\n')
+    resp = rtfm.search("hi")
+    assert any("'doc'" in w for w in resp.get("WARNING", []))
