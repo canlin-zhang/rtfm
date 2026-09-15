@@ -19,7 +19,7 @@ import subprocess
 import time
 import tomllib
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
 from mcp.server.fastmcp import FastMCP
@@ -978,17 +978,28 @@ class Source:
     url: str | None = None
     ref: str | None = None          # git refspec (branch, tag, SHA); None for dir
     mutable: bool = False
+    paths: tuple[str, ...] = ()            # include prefixes; () = whole tree (ADR 0014)
+    exclude_paths: tuple[str, ...] = ()    # `!` prefixes carved out of the above
+    ext_allowlist: frozenset[str] = frozenset()   # exactly one of these two is required
+    ext_blocklist: frozenset[str] = frozenset()
 
 
 _BOOTSTRAP_MANIFEST = '''\
 # rtfm source manifest. See manifest.example.toml in the repo for all options.
 # Each [[source]] is one place rtfm indexes, in place.
+#
+# Every source declares what it indexes. Exactly one of:
+#   ext_allowlist = [".md", ".pdf"]    # only these file types
+#   ext_blocklist = [".png", ".svg"]   # everything except these, plus rtfm's binary defaults
+# Optionally narrow to subtrees with paths = ["docs", "!docs/versions"] — directory
+# prefixes, not globs; a "!" entry excludes.
 
 [[source]]
-name    = "default"   # the zero-config drop-dir; the only mutable source by default
-type    = "dir"
-path    = "{default}"
-mutable = true
+name          = "default"   # the zero-config drop-dir; the only mutable source by default
+type          = "dir"
+path          = "{default}"
+mutable       = true
+ext_allowlist = [".txt", ".md", ".mdx", ".rst", ".rest", ".pdf"]
 
 # Example: a git-tracked doc repo. rtfm clones and tracks the ref automatically
 # when `path` is omitted (managed mode), or links to an existing clone when
@@ -1011,13 +1022,77 @@ def _ensure_bootstrap() -> None:
         mp.write_text(_BOOTSTRAP_MANIFEST.format(default=default_source_dir()))
 
 
-def _source_from_table(t: dict) -> Source:
+_GLOB_CHARS = ("*", "?", "[")
+
+
+def _normalize_paths(raw, name: str) -> tuple[tuple[str, ...], tuple[str, ...], list[str]]:
+    """Directory prefixes, split into include and exclude. POSIX-separated, no leading or
+    trailing slash, sorted, deduped. A leading slash reads as rooted-at-the-source, which is
+    the syntax rtfm#24 used. A `!` entry excludes.
+
+    Glob characters are a config error, not a pattern (ADR 0014): a literal `docs/**` directory
+    does not exist, so treating it as one would index nothing and look correct. Every rejection
+    warns — the manifest is the user's only view of what rtfm indexes."""
+    warns: list[str] = []
+    include: set[str] = set()
+    exclude: set[str] = set()
+    for entry in raw if isinstance(raw, list) else [raw]:
+        text = str(entry).strip()
+        negated = text.startswith("!")
+        body = text[1:].strip() if negated else text
+        p = body.replace("\\", "/").strip("/")
+        if not p:
+            continue
+        if any(c in p for c in _GLOB_CHARS):
+            warns.append(
+                f"!!! GLOB IN paths '{name}' !!! '{entry}' looks like a glob, but 'paths' takes "
+                f"directory prefixes only (ADR 0014) — dropping it. Recover: name the directory "
+                f"itself, e.g. paths = [\"docs\"], in {manifest_path()}.")
+            continue
+        if ".." in PurePosixPath(p).parts:
+            warns.append(
+                f"!!! PATH ESCAPES THE SOURCE '{name}' !!! '{entry}' contains '..' — 'paths' "
+                f"entries are relative to the source root — dropping it. Recover: use a path "
+                f"relative to the source in {manifest_path()}.")
+            continue
+        (exclude if negated else include).add(p)
+    return tuple(sorted(include)), tuple(sorted(exclude)), warns
+
+
+def _normalize_exts(raw, name: str, key: str) -> tuple[frozenset[str], list[str]]:
+    """Extension list: lowercased, leading dot enforced. Shared by ext_allowlist and
+    ext_blocklist — they differ in meaning, not in shape."""
+    warns: list[str] = []
+    out: set[str] = set()
+    for entry in raw if isinstance(raw, list) else [raw]:
+        e = str(entry).strip().lower()
+        if not e:
+            continue
+        if not e.startswith("."):
+            e = "." + e
+        if "/" in e or e == "." or e.count(".") > 1:
+            warns.append(
+                f"!!! INVALID EXTENSION '{name}' !!! '{entry}' in {key} is not a file extension "
+                f"— dropping it. Recover: use e.g. {key} = [\".bzl\"] in {manifest_path()}.")
+            continue
+        out.add(e)
+    return frozenset(out), warns
+
+
+def _source_from_table(t: dict, warnings: list[str] | None = None) -> Source:
     path = t.get("path")
     url = t.get("url")
     name = t.get("name")
     if not name:
         basis = path or url or "source"
         name = Path(str(basis)).name or "source"
+    sink = warnings if warnings is not None else []
+    inc, exc, path_warns = _normalize_paths(t.get("paths", []), name)
+    allow, allow_warns = _normalize_exts(t.get("ext_allowlist", []), name, "ext_allowlist")
+    block, block_warns = _normalize_exts(t.get("ext_blocklist", []), name, "ext_blocklist")
+    sink.extend(path_warns)
+    sink.extend(allow_warns)
+    sink.extend(block_warns)
     return Source(
         name=name,
         type=t.get("type", "dir"),
@@ -1025,10 +1100,14 @@ def _source_from_table(t: dict) -> Source:
         url=url,
         ref=t.get("ref"),                        # None if absent → default to remote HEAD later
         mutable=bool(t.get("mutable", False)),
+        paths=inc,
+        exclude_paths=exc,
+        ext_allowlist=allow,
+        ext_blocklist=block,
     )
 
 
-def _validate_source(s: Source) -> str | None:
+def _validate_source_wiring(s: Source) -> str | None:
     """Loud warning if a source is misconfigured, else None. A dir source needs an existing,
     readable directory; a `path`-less dir source is unusable (the caller drops it). A git_repo
     source needs a url; in linked mode (`path` set) the path must be a git working tree whose
@@ -1100,6 +1179,32 @@ def _validate_source(s: Source) -> str | None:
     return None
 
 
+
+def _validate_source(s: Source) -> str | None:
+    """Loud warning if a source is misconfigured, else None.
+
+    Wiring first, declaration second: an unknown type or a missing url means the source
+    cannot work at all, and reporting it as an extension-list problem would name the wrong
+    cause. A source that is wired correctly must then declare what it indexes — exactly one
+    of ext_allowlist / ext_blocklist (ADR 0014). rtfm does not guess, because a guess is how
+    a hidden default set returns."""
+    wiring = _validate_source_wiring(s)
+    if wiring:
+        return wiring
+    if s.ext_allowlist and s.ext_blocklist:
+        return (f"!!! BOTH EXTENSION LISTS '{s.name}' !!! a source declares ext_allowlist OR "
+                f"ext_blocklist, never both — refusing it. ext_allowlist means 'only these "
+                f"types'; ext_blocklist means 'everything except these'. Recover: delete one "
+                f"in {manifest_path()}.")
+    if not s.ext_allowlist and not s.ext_blocklist:
+        return (f"!!! NO EXTENSION LIST '{s.name}' !!! rtfm does not guess what to index — "
+                f"skipping this source. Declare exactly one of:\n"
+                f"  ext_allowlist = [\".md\", \".pdf\"]    # only these file types\n"
+                f"  ext_blocklist = [\".png\", \".svg\"]   # everything except these\n"
+                f"Recover: add one in {manifest_path()}.")
+    return None
+
+
 def load_manifest() -> tuple[list[Source], list[str]]:
     """Return (sources, warnings). Bootstraps a default manifest if none exists.
 
@@ -1123,7 +1228,7 @@ def load_manifest() -> tuple[list[Source], list[str]]:
     warnings: list[str] = []
     seen: dict[str, Source] = {}
     for t in tables:
-        s = _source_from_table(t)
+        s = _source_from_table(t, warnings)
         if s.name in seen:
             warnings.append(
                 f"!!! DUPLICATE SOURCE NAME '{s.name}' !!! "
@@ -1136,7 +1241,10 @@ def load_manifest() -> tuple[list[Source], list[str]]:
         warn = _validate_source(s)
         if warn:
             warnings.append(warn)
-            if (s.type == "dir" and s.path is None) or (s.type == "git_repo" and not s.url):
+            if ((s.type == "dir" and s.path is None)
+                    or (s.type == "git_repo" and not s.url)
+                    or (s.type in ("dir", "git_repo")
+                        and bool(s.ext_allowlist) == bool(s.ext_blocklist))):
                 continue                       # unusable — drop it (loudly, above)
         seen[s.name] = s
         sources.append(s)

@@ -17,7 +17,8 @@ def _seed(home, tmp_path, name="docs"):
 
 def _add_source(name, path):
     mp = rtfm.manifest_path()
-    mp.write_text(mp.read_text() + f'\n[[source]]\nname="{name}"\ntype="dir"\npath="{path}"\n')
+    mp.write_text(mp.read_text() + f'\n[[source]]\nname="{name}"\ntype="dir"'
+                  f'\next_allowlist=[".md",".pdf"]\npath="{path}"\n')
 
 
 def test_search_hit_shape_and_locations(home, tmp_path):
@@ -227,7 +228,7 @@ def _status_of(home, tmp_path, name="specs", src=None, remote=None, ref=None):
     url = str(remote) if remote is not None else str(src.url)
     path = f'\npath="{src.path}"' if src.path is not None else ""
     mp.write_text(
-        f'[[source]]\nname="{name}"\ntype="git_repo"\nurl="{url}"\n'
+        f'[[source]]\nname="{name}"\ntype="git_repo"\next_allowlist=[".md",".pdf"]\nurl="{url}"\n'
         f'ref="{ref if ref is not None else src.ref}"\n{path}\n'
     )
     out = rtfm.list_sources()
@@ -454,7 +455,7 @@ def test_reindex_tool_handles_git_repo(home, tmp_path, git_branch):
     rtfm.load_manifest()
     mp = rtfm.manifest_path()
     mp.write_text(
-        f'[[source]]\nname="specs"\ntype="git_repo"\n'
+        f'[[source]]\nname="specs"\ntype="git_repo"\next_allowlist=[".md",".pdf"]\n'
         f'url="{remote}"\nref="{branch}"\npath="{dest}"\n'
     )
     out = rtfm.reindex(source="specs")
@@ -468,7 +469,7 @@ def test_health_check_reports_git_repo_sources(home, tmp_path):
     rtfm.load_manifest()
     mp = rtfm.manifest_path()
     mp.write_text(
-        '[[source]]\nname="specs"\ntype="git_repo"\n'
+        '[[source]]\nname="specs"\ntype="git_repo"\next_allowlist=[".md",".pdf"]\n'
         'url="https://example.com/repo.git"\nref="feat-x"\n'
     )
     out = rtfm.health_check()

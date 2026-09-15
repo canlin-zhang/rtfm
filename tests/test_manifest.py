@@ -18,8 +18,8 @@ def test_bootstrap_creates_default(home):
 def test_load_explicit_sources(home):
     default = rtfm.default_source_dir()
     (home / "manifest.toml").write_text(
-        f'[[source]]\nname="default"\ntype="dir"\npath="{default}"\nmutable=true\n'
-        '[[source]]\nname="vendor"\ntype="dir"\npath="/opt/vendor/doc"\n'
+        f'[[source]]\nname="default"\ntype="dir"\next_allowlist=[".md",".pdf"]\npath="{default}"\nmutable=true\n'
+        '[[source]]\nname="vendor"\ntype="dir"\next_allowlist=[".md",".pdf"]\npath="/opt/vendor/doc"\n'
     )
     sources, warnings = rtfm.load_manifest()
     assert [s.name for s in sources] == ["default", "vendor"]
@@ -28,8 +28,8 @@ def test_load_explicit_sources(home):
 
 def test_duplicate_names_first_wins_with_warning(home):
     (home / "manifest.toml").write_text(
-        '[[source]]\nname="pa"\ntype="dir"\npath="/opt/a"\n'
-        '[[source]]\nname="pa"\ntype="dir"\npath="/opt/b"\n'
+        '[[source]]\nname="pa"\ntype="dir"\next_allowlist=[".md",".pdf"]\npath="/opt/a"\n'
+        '[[source]]\nname="pa"\ntype="dir"\next_allowlist=[".md",".pdf"]\npath="/opt/b"\n'
     )
     sources, warnings = rtfm.load_manifest()
     assert [s.name for s in sources] == ["pa"]    # second refused
@@ -39,7 +39,7 @@ def test_duplicate_names_first_wins_with_warning(home):
 
 def test_name_derived_from_path_when_omitted(home):
     (home / "manifest.toml").write_text(
-        '[[source]]\ntype="dir"\npath="/opt/acme-docs-2025.06"\n'
+        '[[source]]\ntype="dir"\next_allowlist=[".md",".pdf"]\npath="/opt/acme-docs-2025.06"\n'
     )
     sources, warnings = rtfm.load_manifest()
     assert sources[0].name == "acme-docs-2025.06"
@@ -62,8 +62,8 @@ def test_missing_path_source_warns_but_keeps_it_and_others(home, tmp_path):
     good = tmp_path / "good"
     good.mkdir()
     (home / "manifest.toml").write_text(
-        f'[[source]]\nname="good"\ntype="dir"\npath="{good}"\n'
-        '[[source]]\nname="missing"\ntype="dir"\npath="/no/such/place"\n'
+        f'[[source]]\nname="good"\ntype="dir"\next_allowlist=[".md",".pdf"]\npath="{good}"\n'
+        '[[source]]\nname="missing"\ntype="dir"\next_allowlist=[".md",".pdf"]\npath="/no/such/place"\n'
     )
     sources, warnings = rtfm.load_manifest()
     assert {s.name for s in sources} == {"good", "missing"}
@@ -72,7 +72,8 @@ def test_missing_path_source_warns_but_keeps_it_and_others(home, tmp_path):
 
 def test_dir_source_without_path_is_dropped_with_warning(home):
     """A dir source with no `path` at all is unusable, so it is dropped — but loudly."""
-    (home / "manifest.toml").write_text('[[source]]\nname="nopath"\ntype="dir"\n')
+    (home / "manifest.toml").write_text(
+        '[[source]]\nname="nopath"\ntype="dir"\next_allowlist=[".md",".pdf"]\n')
     sources, warnings = rtfm.load_manifest()
     assert all(s.name != "nopath" for s in sources)
     assert any("nopath" in w for w in warnings)
@@ -83,7 +84,7 @@ def test_path_not_a_directory_warns(home, tmp_path):
     f = tmp_path / "afile.md"
     f.write_text("hi\n")
     (home / "manifest.toml").write_text(
-        f'[[source]]\nname="filey"\ntype="dir"\npath="{f}"\n'
+        f'[[source]]\nname="filey"\ntype="dir"\next_allowlist=[".md",".pdf"]\npath="{f}"\n'
     )
     sources, warnings = rtfm.load_manifest()
     assert any("filey" in w for w in warnings)
@@ -96,9 +97,9 @@ def test_search_tolerates_invalid_source(home, tmp_path):
     good.mkdir()
     (good / "g.md").write_text("the widget protocol defines flits\n")
     (home / "manifest.toml").write_text(
-        f'[[source]]\nname="default"\ntype="dir"\npath="{rtfm.default_source_dir()}"\nmutable=true\n'
-        f'[[source]]\nname="good"\ntype="dir"\npath="{good}"\n'
-        '[[source]]\nname="broken"\ntype="dir"\npath="/no/such/place"\n'
+        f'[[source]]\nname="default"\ntype="dir"\next_allowlist=[".md",".pdf"]\npath="{rtfm.default_source_dir()}"\nmutable=true\n'
+        f'[[source]]\nname="good"\ntype="dir"\next_allowlist=[".md",".pdf"]\npath="{good}"\n'
+        '[[source]]\nname="broken"\ntype="dir"\next_allowlist=[".md",".pdf"]\npath="/no/such/place"\n'
     )
     out = rtfm.search(query="widget protocol")
     assert any("widget protocol" in h["snippet"] for h in out["results"])
@@ -109,7 +110,7 @@ def test_search_tolerates_invalid_source(home, tmp_path):
 
 def test_git_repo_source_parses_url_and_ref(home):
     (home / "manifest.toml").write_text(
-        '[[source]]\nname="specs"\ntype="git_repo"\n'
+        '[[source]]\nname="specs"\ntype="git_repo"\next_allowlist=[".md",".pdf"]\n'
         'url="https://example.com/org/specs.git"\nref="dev"\n'
     )
     sources, warnings = rtfm.load_manifest()
@@ -126,7 +127,7 @@ def test_git_repo_source_with_path_is_linked(home, tmp_path):
     repo = tmp_path / "myrepo"
     repo.mkdir()
     (home / "manifest.toml").write_text(
-        f'[[source]]\nname="specs"\ntype="git_repo"\n'
+        f'[[source]]\nname="specs"\ntype="git_repo"\next_allowlist=[".md",".pdf"]\n'
         f'url="https://example.com/repo.git"\nref="main"\npath="{repo}"\n'
     )
     sources, warnings = rtfm.load_manifest()
@@ -136,7 +137,7 @@ def test_git_repo_source_with_path_is_linked(home, tmp_path):
 
 def test_git_repo_without_url_warns(home):
     (home / "manifest.toml").write_text(
-        '[[source]]\nname="specs"\ntype="git_repo"\nref="main"\n'
+        '[[source]]\nname="specs"\ntype="git_repo"\next_allowlist=[".md",".pdf"]\nref="main"\n'
     )
     sources, warnings = rtfm.load_manifest()
     assert any("url" in w.lower() and "specs" in w for w in warnings)
@@ -145,7 +146,7 @@ def test_git_repo_without_url_warns(home):
 def test_git_repo_ref_defaults(home):
     """When ref is omitted, it is None — resolved to remote HEAD at reindex time."""
     (home / "manifest.toml").write_text(
-        '[[source]]\nname="specs"\ntype="git_repo"\n'
+        '[[source]]\nname="specs"\ntype="git_repo"\next_allowlist=[".md",".pdf"]\n'
         'url="https://example.com/repo.git"\n'
     )
     sources, warnings = rtfm.load_manifest()
@@ -155,7 +156,7 @@ def test_git_repo_ref_defaults(home):
 def test_git_repo_mutable_is_ignored(home):
     """mutable=true on a git_repo is silently accepted but has no effect."""
     (home / "manifest.toml").write_text(
-        '[[source]]\nname="specs"\ntype="git_repo"\n'
+        '[[source]]\nname="specs"\ntype="git_repo"\next_allowlist=[".md",".pdf"]\n'
         'url="https://example.com/repo.git"\nref="main"\nmutable=true\n'
     )
     sources, warnings = rtfm.load_manifest()
@@ -167,7 +168,7 @@ def test_git_repo_linked_mode_not_a_repo_warns(home, tmp_path):
     repo = tmp_path / "myrepo"
     repo.mkdir()
     (home / "manifest.toml").write_text(
-        f'[[source]]\nname="specs"\ntype="git_repo"\n'
+        f'[[source]]\nname="specs"\ntype="git_repo"\next_allowlist=[".md",".pdf"]\n'
         f'url="https://example.com/repo.git"\npath="{repo}"\n'
     )
     sources, warnings = rtfm.load_manifest()
@@ -179,7 +180,7 @@ def test_git_repo_linked_mode_no_remote_warns(home, tmp_path):
     repo = tmp_path / "myrepo"
     subprocess.run(["git", "init", str(repo)], capture_output=True)
     (home / "manifest.toml").write_text(
-        f'[[source]]\nname="specs"\ntype="git_repo"\n'
+        f'[[source]]\nname="specs"\ntype="git_repo"\next_allowlist=[".md",".pdf"]\n'
         f'url="https://example.com/repo.git"\npath="{repo}"\n'
     )
     sources, warnings = rtfm.load_manifest()
@@ -193,7 +194,7 @@ def test_git_repo_linked_mode_remote_mismatch_warns(home, tmp_path):
     subprocess.run(["git", "-C", str(repo), "remote", "add", "origin",
                     "https://example.com/org/real.git"], capture_output=True)
     (home / "manifest.toml").write_text(
-        f'[[source]]\nname="specs"\ntype="git_repo"\n'
+        f'[[source]]\nname="specs"\ntype="git_repo"\next_allowlist=[".md",".pdf"]\n'
         f'url="https://example.com/repo.git"\npath="{repo}"\n'
     )
     sources, warnings = rtfm.load_manifest()
@@ -207,7 +208,7 @@ def test_git_repo_linked_mode_matching_remote_is_clean(home, tmp_path):
     subprocess.run(["git", "-C", str(repo), "remote", "add", "origin",
                     "https://example.com/repo.git"], capture_output=True)
     (home / "manifest.toml").write_text(
-        f'[[source]]\nname="specs"\ntype="git_repo"\n'
+        f'[[source]]\nname="specs"\ntype="git_repo"\next_allowlist=[".md",".pdf"]\n'
         f'url="https://example.com/repo.git"\npath="{repo}"\n'
     )
     sources, warnings = rtfm.load_manifest()
@@ -230,7 +231,7 @@ def test_git_repo_without_url_is_dropped(home):
     every search run `git clone None ...` (the whole-reindex crash of review
     round 1). Dir sources set the precedent: unusable sources are dropped loudly."""
     (home / "manifest.toml").write_text(
-        '[[source]]\nname="no-url"\ntype="git_repo"\nref="main"\n'
+        '[[source]]\nname="no-url"\ntype="git_repo"\next_allowlist=[".md",".pdf"]\nref="main"\n'
     )
     sources, warnings = rtfm.load_manifest()
     assert any("no 'url'" in w and "no-url" in w for w in warnings)
@@ -246,9 +247,71 @@ def test_git_repo_linked_missing_git_warns(home, tmp_path, monkeypatch):
     emptybin.mkdir()
     monkeypatch.setenv("PATH", str(emptybin))
     (home / "manifest.toml").write_text(
-        f'[[source]]\nname="specs"\ntype="git_repo"\n'
+        f'[[source]]\nname="specs"\ntype="git_repo"\next_allowlist=[".md",".pdf"]\n'
         f'url="https://example.com/repo.git"\npath="{repo}"\n'
     )
     sources, warnings = rtfm.load_manifest()
     assert any("GIT MISSING" in w and "specs" in w for w in warnings)
     assert not any("NOT A GIT REPO" in w for w in warnings)
+
+
+# --- declared scope: paths + one extension list (ADR 0014) -------------------
+
+def _scoped(home, body):
+    (home / "manifest.toml").write_text(
+        f'[[source]]\nname="d"\ntype="dir"\npath="{home}"\n{body}')
+    sources, warnings = rtfm.load_manifest()
+    return next((s for s in sources if s.name == "d"), None), warnings
+
+
+def test_paths_split_into_include_and_exclude(home):
+    s, warns = _scoped(home, 'ext_allowlist=[".md"]\npaths=["/docs/", "!docs/versions", "cc"]\n')
+    assert s.paths == ("cc", "docs")
+    assert s.exclude_paths == ("docs/versions",)
+    assert warns == []
+
+
+def test_glob_in_paths_warns_and_is_dropped(home):
+    s, warns = _scoped(home, 'ext_allowlist=[".md"]\npaths=["docs/**", "cc"]\n')
+    assert s.paths == ("cc",)
+    assert any("GLOB IN paths" in w and "docs/**" in w for w in warns)
+
+
+def test_escaping_path_warns_and_is_dropped(home):
+    s, warns = _scoped(home, 'ext_allowlist=[".md"]\npaths=["../etc", "cc"]\n')
+    assert s.paths == ("cc",)
+    assert any("ESCAPES THE SOURCE" in w and "../etc" in w for w in warns)
+
+
+def test_allowlist_normalized_case_and_dot(home):
+    s, warns = _scoped(home, 'ext_allowlist=["MD", ".PDF", "bzl"]\n')
+    assert s.ext_allowlist == frozenset({".md", ".pdf", ".bzl"})
+    assert s.ext_blocklist == frozenset()
+    assert warns == []
+
+
+def test_blocklist_normalized(home):
+    s, warns = _scoped(home, 'ext_blocklist=["PNG", ".svg"]\n')
+    assert s.ext_blocklist == frozenset({".png", ".svg"})
+    assert s.ext_allowlist == frozenset()
+    assert warns == []
+
+
+def test_both_extension_lists_is_refused(home):
+    s, warns = _scoped(home, 'ext_allowlist=[".md"]\next_blocklist=[".png"]\n')
+    assert s is None
+    assert any("BOTH EXTENSION LISTS" in w for w in warns)
+
+
+def test_neither_extension_list_is_skipped_with_both_keys_named(home):
+    s, warns = _scoped(home, "")
+    assert s is None
+    msg = next(w for w in warns if "NO EXTENSION LIST" in w)
+    assert "ext_allowlist" in msg and "ext_blocklist" in msg
+
+
+def test_bootstrap_default_source_declares_an_allowlist(home):
+    sources, warns = rtfm.load_manifest()
+    assert warns == []
+    d = next(s for s in sources if s.name == "default")
+    assert {".pdf", ".md", ".mdx", ".rst", ".txt"} <= d.ext_allowlist
