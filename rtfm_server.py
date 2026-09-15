@@ -722,15 +722,21 @@ def _ensure_git_repo_ready(src: Source) -> tuple[Path, str | None]:
     return repo_path, None
 
 
-def _index_files(conn: sqlite3.Connection, source_name: str, root: Path) -> dict:
-    """Scan `root` for supported files and sync the index for `source_name`: hash new or
+def _index_files(conn: sqlite3.Connection, src: Source, root: Path) -> dict:
+    """Scan `root` for selected files and sync the index for `src.name`: hash new or
     mtime-changed files, purge vanished ones, extract new contents, GC orphaned rows.
     Returns a summary of the shared counters. Shared by the dir and git_repo reindex
-    paths so the two can never drift apart."""
-    summary = {"files_seen": 0, "unique_contents": 0, "newly_extracted": 0,
-               "extraction_skips": 0, "purged": 0, "errors": 0}
-    files = iter_source_files(Source(name=source_name, type="dir", path=root))
-    summary["files_seen"] = len(files)
+    paths so the two can never drift apart.
+
+    `root` is passed separately from `src.path` because a managed git_repo source has
+    `path is None` and indexes its clone. `src` is what carries the declared scope, so it
+    must not be reconstructed here — a synthetic stand-in would discard the scope and
+    silently index the whole tree (ADR 0014)."""
+    source_name = src.name
+    files = iter_source_files(src, root)
+    summary = {"files_seen": len(files), "unique_contents": 0, "newly_extracted": 0,
+               "extraction_skips": 0, "purged": 0, "errors": 0,
+               "path_warnings": _selection_warnings(src, root, files)}
 
     existing = {r[0]: (r[1], r[2]) for r in conn.execute(
         "SELECT relpath, sha256, mtime FROM locations WHERE source=?", (source_name,))}
@@ -834,7 +840,7 @@ def _reindex_git_repo(conn: sqlite3.Connection, src: Source) -> dict:
                 f"spelling in the manifest, or the ref may not be fetched into the "
                 f"clone yet (run 'git fetch --tags' there); list_sources reports "
                 f"'unknown'.")
-    summary.update(_index_files(conn, src.name, repo_path))
+    summary.update(_index_files(conn, src, repo_path))
     return summary
 
 
@@ -851,10 +857,11 @@ def reindex_source(conn: sqlite3.Connection, src: Source) -> dict:
     if src.type == "git_repo":
         return _reindex_git_repo(conn, src)
     summary = {"source": src.name, "files_seen": 0, "unique_contents": 0,
-               "newly_extracted": 0, "extraction_skips": 0, "purged": 0, "errors": 0}
+               "newly_extracted": 0, "extraction_skips": 0, "purged": 0, "errors": 0,
+               "path_warnings": []}
     if src.path is None or not src.path.exists():
         return summary
-    summary.update(_index_files(conn, src.name, src.path))
+    summary.update(_index_files(conn, src, src.path))
     return summary
 
 
@@ -953,20 +960,79 @@ def _default_branch(path: Path) -> str:
         return "main"  # sensible fallback
 
 
-def iter_source_files(src: Source) -> list[Path]:
-    """Supported files under a dir source, recursively, skipping hidden dirs."""
-    if src.path is None or not src.path.exists():
+def _selects_ext(src: Source, ext: str) -> bool:
+    """Whether this source indexes files with `ext`. Exactly one list is set — the manifest
+    refuses both and skips neither (ADR 0014) — so this is a two-branch decision.
+
+    Allowlist mode never consults DEFAULT_EXT_BLOCKLIST: "only these types" already excludes
+    everything else, and an explicit allowlist entry must win over rtfm's own defaults."""
+    if src.ext_allowlist:
+        return ext in src.ext_allowlist
+    return ext not in (src.ext_blocklist | DEFAULT_EXT_BLOCKLIST)
+
+
+def _under_any(rel: str, prefixes: tuple[str, ...]) -> bool:
+    """Segment-aware prefix match: 'docs' matches 'docs/a.md' but not 'docsmore/x.md'."""
+    return any(rel == p or rel.startswith(p + "/") for p in prefixes)
+
+
+def iter_source_files(src: Source, root: Path | None = None) -> list[Path]:
+    """Files this source selects, recursively, skipping hidden dirs.
+
+    `root` overrides `src.path`: a managed git_repo source has `path is None` and lives at its
+    clone path, but its declared scope still applies there.
+
+    The walk starts at each include prefix rather than filtering a whole-tree rglob, so a
+    scoped source does not pay to stat the rest of the repo. Selection is by extension list
+    only — file content is never inspected here. Whether a selected file can actually be read
+    is a separate stage (ADR 0014: filtering and encoding answer different questions)."""
+    base = root if root is not None else src.path
+    if base is None or not base.exists():
         return []
-    out = []
-    for f in src.path.rglob("*"):
-        if not f.is_file():
+    roots = [base / p for p in src.paths] if src.paths else [base]
+    out: set[Path] = set()                        # include prefixes may overlap; dedup by path
+    for r in roots:
+        if not r.exists():
             continue
-        if f.suffix.lower() != ".pdf" and f.suffix.lower() not in MARKUP_EXTS:
-            continue
-        if any(part.startswith(".") for part in f.relative_to(src.path).parts):
-            continue
-        out.append(f)
+        for f in ([r] if r.is_file() else r.rglob("*")):
+            if not f.is_file():
+                continue
+            rel = f.relative_to(base)
+            if any(part.startswith(".") for part in rel.parts):
+                continue
+            if not _selects_ext(src, f.suffix.lower()):
+                continue
+            if src.exclude_paths and _under_any(rel.as_posix(), src.exclude_paths):
+                continue
+            out.add(f)
     return sorted(out)
+
+
+def _selection_warnings(src: Source, root: Path, selected: list[Path]) -> list[str]:
+    """What the selection stage owes the caller when it lets nothing (or less than asked)
+    through. A source that quietly selects nothing is the confident-but-empty failure
+    ADR 0014 refuses, so each stage that can empty a source names the reason.
+
+    Two cases: the whole source selected nothing, and an individual `paths` prefix
+    contributed nothing — either because it is not in the tree, or because it holds
+    nothing the extension list selects."""
+    out: list[str] = []
+    scope = (f"ext_allowlist = {sorted(src.ext_allowlist)}" if src.ext_allowlist
+             else f"ext_blocklist = {sorted(src.ext_blocklist)} plus rtfm's binary defaults")
+    if not selected:
+        where = f" under {'/'.join(src.paths)}" if src.paths else ""
+        out.append(
+            f"!!! SOURCE SELECTED NOTHING '{src.name}' !!! no file{where} in {root} matched "
+            f"{scope} — this source contributes nothing to search. Recover: check the "
+            f"extension list and any 'paths' entries in {manifest_path()}.")
+    # Not an else: an empty source WITH prefixes gets both the headline and the cause.
+    rels = [f.relative_to(root).as_posix() for f in selected]
+    out.extend(
+        f"!!! PATH CONTRIBUTES NOTHING '{src.name}' !!! paths entry '{p}' selected no files "
+        f"under {root} — check its spelling, and check that its file types are in this "
+        f"source's {scope}. Recover: fix or remove the entry in {manifest_path()}."
+        for p in src.paths if not any(_under_any(r, (p,)) for r in rels))
+    return out
 
 # --- manifest ---------------------------------------------------------------
 

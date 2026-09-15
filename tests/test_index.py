@@ -461,3 +461,161 @@ def test_default_ext_blocklist_covers_common_binaries():
         assert ext in rtfm.DEFAULT_EXT_BLOCKLIST, ext
     assert ".md" not in rtfm.DEFAULT_EXT_BLOCKLIST
     assert ".pdf" not in rtfm.DEFAULT_EXT_BLOCKLIST  # pdf is indexable, not an asset
+
+
+# --- declared scope applied at selection (ADR 0014) --------------------------
+
+def _tree(base):
+    for rel in ["docs/a.md", "docs/versions/8.0/a.md", "docs/deep/b.md", "cc/r.bzl",
+                "cc/n.md", "tests/t.bzl", "top.md", "assets/logo.png"]:
+        p = base / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("content of " + rel)
+    return base
+
+
+def _rels(src, root=None):
+    base = root or src.path
+    return sorted(str(f.relative_to(base)) for f in rtfm.iter_source_files(src, root))
+
+
+def test_allowlist_selects_only_listed_types(tmp_path):
+    t = _tree(tmp_path / "c")
+    s = rtfm.Source(name="s", type="dir", path=t, ext_allowlist=frozenset({".bzl"}))
+    assert _rels(s) == ["cc/r.bzl", "tests/t.bzl"]
+
+
+def test_blocklist_selects_everything_else(tmp_path):
+    t = _tree(tmp_path / "c")
+    s = rtfm.Source(name="s", type="dir", path=t, ext_blocklist=frozenset({".bzl"}))
+    assert _rels(s) == ["cc/n.md", "docs/a.md", "docs/deep/b.md",
+                        "docs/versions/8.0/a.md", "top.md"]   # .png via the default blocklist
+
+
+def test_allowlist_never_consults_the_default_blocklist(tmp_path):
+    t = _tree(tmp_path / "c")
+    s = rtfm.Source(name="s", type="dir", path=t, ext_allowlist=frozenset({".png"}))
+    assert _rels(s) == ["assets/logo.png"]     # an explicit allowlist wins over the default
+
+
+def test_exclude_prefix_carves_out_of_an_include(tmp_path):
+    t = _tree(tmp_path / "c")
+    s = rtfm.Source(name="s", type="dir", path=t, paths=("docs",),
+                    exclude_paths=("docs/versions",), ext_allowlist=frozenset({".md"}))
+    assert _rels(s) == ["docs/a.md", "docs/deep/b.md"]
+
+
+def test_exclude_prefix_with_no_include_applies_to_the_whole_tree(tmp_path):
+    t = _tree(tmp_path / "c")
+    s = rtfm.Source(name="s", type="dir", path=t, exclude_paths=("docs", "tests"),
+                    ext_allowlist=frozenset({".md", ".bzl"}))
+    assert _rels(s) == ["cc/n.md", "cc/r.bzl", "top.md"]
+
+
+def test_exclude_does_not_match_a_partial_segment(tmp_path):
+    t = _tree(tmp_path / "c")
+    (t / "docsmore").mkdir()
+    (t / "docsmore" / "x.md").write_text("x")
+    s = rtfm.Source(name="s", type="dir", path=t, exclude_paths=("docs",),
+                    ext_allowlist=frozenset({".md"}))
+    assert "docsmore/x.md" in _rels(s)
+
+
+def test_a_path_may_name_a_single_file(tmp_path):
+    t = _tree(tmp_path / "c")
+    s = rtfm.Source(name="s", type="dir", path=t, paths=("top.md",),
+                    ext_allowlist=frozenset({".md"}))
+    assert _rels(s) == ["top.md"]
+
+
+def test_overlapping_include_prefixes_do_not_duplicate(tmp_path):
+    t = _tree(tmp_path / "c")
+    s = rtfm.Source(name="s", type="dir", path=t, paths=("docs", "docs/deep"),
+                    ext_allowlist=frozenset({".md"}))
+    assert _rels(s) == ["docs/a.md", "docs/deep/b.md", "docs/versions/8.0/a.md"]
+
+
+def test_hidden_dirs_are_skipped(tmp_path):
+    t = _tree(tmp_path / "c")
+    (t / ".git").mkdir()
+    (t / ".git" / "h.md").write_text("h")
+    s = rtfm.Source(name="s", type="dir", path=t, ext_allowlist=frozenset({".md"}))
+    assert not any(r.startswith(".git") for r in _rels(s))
+
+
+def test_root_override_is_used_for_managed_clones(tmp_path):
+    t = _tree(tmp_path / "clone")
+    s = rtfm.Source(name="s", type="git_repo", url="x", paths=("cc",),
+                    ext_allowlist=frozenset({".bzl"}))
+    assert s.path is None
+    assert _rels(s, t) == ["cc/r.bzl"]
+
+
+def test_reindex_dir_source_respects_scope(home, tmp_path):
+    t = _tree(tmp_path / "c")
+    s = rtfm.Source(name="scoped", type="dir", path=t, paths=("cc",),
+                    ext_allowlist=frozenset({".bzl", ".md"}))
+    conn = rtfm.get_index_db()
+    summary = rtfm.reindex_source(conn, s)
+    assert summary["files_seen"] == 2
+    rels = {r[0] for r in conn.execute(
+        "SELECT relpath FROM locations WHERE source='scoped'")}
+    assert rels == {"cc/n.md", "cc/r.bzl"}
+
+
+def test_reindex_git_repo_source_respects_scope(home, tmp_path, git_branch):
+    remote, seed, branch = make_git_repo(tmp_path, git_branch)
+    for rel in ["docs/a.md", "cc/r.bzl", "tests/t.bzl"]:
+        p = seed / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("content of " + rel)
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "add"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", branch], capture_output=True)
+    s = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=branch,
+                    paths=("cc",), ext_allowlist=frozenset({".bzl"}))
+    conn = rtfm.get_index_db()
+    summary = rtfm.reindex_source(conn, s)
+    assert summary.get("error") is None
+    rels = {r[0] for r in conn.execute("SELECT relpath FROM locations WHERE source='g'")}
+    assert rels == {"cc/r.bzl"}
+
+
+def test_search_finds_content_in_a_declared_extension(home, tmp_path):
+    t = tmp_path / "c"
+    (t / "cc").mkdir(parents=True)
+    (t / "cc" / "rule.bzl").write_text(
+        "\n".join(["# rule impl"] * 3 + ['    shared_lib_name = attr.string(doc = "the name")']))
+    s = rtfm.Source(name="bz", type="dir", path=t, ext_allowlist=frozenset({".bzl"}))
+    conn = rtfm.get_index_db()
+    rtfm.reindex_source(conn, s)
+    hits = rtfm.search_index(conn, "shared_lib_name", source="bz")
+    assert hits and hits[0]["locations"][0]["relpath"] == "cc/rule.bzl"
+
+
+def test_a_prefix_contributing_nothing_warns(home, tmp_path):
+    t = _tree(tmp_path / "c")
+    # 'assets' exists but holds only .png, which the allowlist does not select.
+    s = rtfm.Source(name="q", type="dir", path=t, paths=("assets", "cc"),
+                    ext_allowlist=frozenset({".bzl"}))
+    conn = rtfm.get_index_db()
+    summary = rtfm.reindex_source(conn, s)
+    assert summary["files_seen"] == 1
+    assert any("'assets'" in w for w in summary["path_warnings"])
+    assert not any("'cc'" in w for w in summary["path_warnings"])
+
+
+def test_a_prefix_that_does_not_exist_warns(home, tmp_path):
+    t = _tree(tmp_path / "c")
+    s = rtfm.Source(name="typo", type="dir", path=t, paths=("doc",),
+                    ext_allowlist=frozenset({".md"}))
+    conn = rtfm.get_index_db()
+    assert any("'doc'" in w for w in rtfm.reindex_source(conn, s)["path_warnings"])
+
+
+def test_no_path_warnings_when_every_prefix_contributes(home, tmp_path):
+    t = _tree(tmp_path / "c")
+    s = rtfm.Source(name="ok", type="dir", path=t, paths=("cc", "docs"),
+                    ext_allowlist=frozenset({".md"}))
+    conn = rtfm.get_index_db()
+    assert rtfm.reindex_source(conn, s)["path_warnings"] == []
