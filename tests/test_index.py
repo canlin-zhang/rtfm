@@ -7,6 +7,11 @@ from conftest import make_git_repo
 
 import rtfm_server as rtfm
 
+# What _reindex_git_repo stores for a source with no declared narrowing. Tests
+# that hand-craft a source_meta row must set it, or the scope check reads them
+# as stale before any commit comparison happens.
+_NO_SCOPE = rtfm._source_scope(rtfm.Source(name="x", type="git_repo"))
+
 
 def test_schema_is_content_addressed(home):
     conn = rtfm.get_index_db()
@@ -319,8 +324,9 @@ def test_stale_delta_git_repo_current_is_not_stale(home, tmp_path, git_branch):
     commit_date = rtfm._git_commit_date(dest, "HEAD")
     conn = rtfm.get_index_db()
     conn.execute(
-        "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?)",
-        ("specs", commit, commit_date))
+        "INSERT INTO source_meta(source, git_commit, git_commit_date, config_scope) "
+        "VALUES(?,?,?,?)",
+        ("specs", commit, commit_date, _NO_SCOPE))
     conn.commit()
     src = rtfm.Source(name="specs", type="git_repo", path=dest,
                        url=str(remote), ref=branch)
@@ -340,8 +346,9 @@ def test_stale_delta_linked_dirty_is_stale(home, tmp_path, git_branch):
     commit = rtfm._git_current_commit(dest)
     conn = rtfm.get_index_db()
     conn.execute(
-        "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?)",
-        ("specs", commit, "2025-01-01T00:00:00+00:00"))
+        "INSERT INTO source_meta(source, git_commit, git_commit_date, config_scope) "
+        "VALUES(?,?,?,?)",
+        ("specs", commit, "2025-01-01T00:00:00+00:00", _NO_SCOPE))
     conn.commit()
     (dest / "a.md").write_text("uncommitted v2\n")
     src = rtfm.Source(name="specs", type="git_repo", path=dest,
@@ -360,8 +367,9 @@ def test_stale_delta_pinned_sha_never_stale(home, tmp_path, git_branch):
     sha = rtfm._git_current_commit(dest)
     conn = rtfm.get_index_db()
     conn.execute(
-        "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?)",
-        ("specs", sha, "2025-01-01T00:00:00+00:00"))
+        "INSERT INTO source_meta(source, git_commit, git_commit_date, config_scope) "
+        "VALUES(?,?,?,?)",
+        ("specs", sha, "2025-01-01T00:00:00+00:00", _NO_SCOPE))
     conn.commit()
     src = rtfm.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref=sha)
@@ -385,8 +393,9 @@ def test_stale_delta_git_repo_behind_is_stale(home, tmp_path, git_branch):
     subprocess.run(["git", "-C", str(seed), "push", "origin", branch], capture_output=True)
     conn = rtfm.get_index_db()
     conn.execute(
-        "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?)",
-        ("specs", old_commit, "2025-01-01T00:00:00+00:00"))
+        "INSERT INTO source_meta(source, git_commit, git_commit_date, config_scope) "
+        "VALUES(?,?,?,?)",
+        ("specs", old_commit, "2025-01-01T00:00:00+00:00", _NO_SCOPE))
     conn.commit()
     src = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref=branch)
     changed, stale = rtfm._stale_delta_git_repo(conn, src)
@@ -410,8 +419,9 @@ def test_stale_delta_git_repo_linked_head_moved_is_stale(home, tmp_path, git_bra
     subprocess.run(["git", "-C", str(seed), "push", "origin", branch], capture_output=True)
     conn = rtfm.get_index_db()
     conn.execute(
-        "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?)",
-        ("specs", old_commit, "2025-01-01T00:00:00+00:00"))
+        "INSERT INTO source_meta(source, git_commit, git_commit_date, config_scope) "
+        "VALUES(?,?,?,?)",
+        ("specs", old_commit, "2025-01-01T00:00:00+00:00", _NO_SCOPE))
     conn.commit()
     src = rtfm.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref=branch)
@@ -650,3 +660,119 @@ def test_markup_routine_still_extracts_headings(tmp_path):
     f.write_text("# Title\n\nbody text\n\n## Section\n")
     title, headings = rtfm._doc_signal_for_file(f)
     assert title == "Title" and "Section" in headings
+
+
+# --- declared scope is a staleness trigger (ADR 0014) ------------------------
+
+def test_source_meta_has_config_scope_column(home):
+    conn = rtfm.get_index_db()
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(source_meta)")}
+    assert "config_scope" in cols
+
+
+def test_scope_is_order_independent_and_change_sensitive(tmp_path):
+    a = rtfm.Source(name="s", type="dir", path=tmp_path, paths=("cc", "docs"),
+                    ext_allowlist=frozenset({".bzl", ".md"}))
+    b = rtfm.Source(name="s", type="dir", path=tmp_path, paths=("docs", "cc"),
+                    ext_allowlist=frozenset({".md", ".bzl"}))
+    c = rtfm.Source(name="s", type="dir", path=tmp_path, paths=("cc",),
+                    ext_allowlist=frozenset({".bzl", ".md"}))
+    d = rtfm.Source(name="s", type="dir", path=tmp_path, paths=("cc", "docs"),
+                    exclude_paths=("cc/private",), ext_allowlist=frozenset({".bzl", ".md"}))
+    e = rtfm.Source(name="s", type="dir", path=tmp_path, paths=("cc", "docs"),
+                    ext_blocklist=frozenset({".bzl", ".md"}))
+    assert rtfm._source_scope(a) == rtfm._source_scope(b)
+    assert rtfm._source_scope(a) != rtfm._source_scope(c)
+    assert rtfm._source_scope(a) != rtfm._source_scope(d)      # exclude_paths counts
+    assert rtfm._source_scope(a) != rtfm._source_scope(e)      # which list it is counts
+
+
+def _seed_bzl_repo(tmp_path, branch):
+    remote, seed, branch = make_git_repo(tmp_path, branch)
+    (seed / "r.bzl").write_text('shared_lib_name = "x"\n')
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "bzl"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", branch], capture_output=True)
+    return remote, seed, branch
+
+
+def test_changing_the_extension_list_makes_a_git_repo_stale(home, tmp_path, git_branch):
+    remote, _seed, branch = _seed_bzl_repo(tmp_path, git_branch)
+    conn = rtfm.get_index_db()
+    narrow = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=branch,
+                         ext_allowlist=frozenset({".md"}))
+    rtfm.reindex_source(conn, narrow)
+    rtfm._staleness_cache.clear()
+    assert rtfm._stale_delta(conn, narrow)[1] is False
+    wide = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=branch,
+                       ext_allowlist=frozenset({".md", ".bzl"}))
+    rtfm._staleness_cache.clear()
+    assert rtfm._stale_delta(conn, wide)[1] is True
+    rtfm.reindex_source(conn, wide)
+    rels = {r[0] for r in conn.execute("SELECT relpath FROM locations WHERE source='g'")}
+    assert "r.bzl" in rels
+
+
+def test_changing_paths_alone_makes_a_git_repo_stale(home, tmp_path, git_branch):
+    remote, _seed, branch = _seed_bzl_repo(tmp_path, git_branch)
+    conn = rtfm.get_index_db()
+    a = rtfm.Source(name="p", type="git_repo", url=str(remote), ref=branch,
+                    ext_allowlist=frozenset({".bzl", ".md"}))
+    rtfm.reindex_source(conn, a)
+    rtfm._staleness_cache.clear()
+    assert rtfm._stale_delta(conn, a)[1] is False
+    b = rtfm.Source(name="p", type="git_repo", url=str(remote), ref=branch,
+                    paths=("nowhere",), ext_allowlist=frozenset({".bzl", ".md"}))
+    rtfm._staleness_cache.clear()
+    assert rtfm._stale_delta(conn, b)[1] is True      # the paths half must count too
+
+
+def test_scope_change_beats_a_managed_sha_pin(home, tmp_path, git_branch):
+    remote, seed, _branch = _seed_bzl_repo(tmp_path, git_branch)
+    sha = subprocess.run(["git", "-C", str(seed), "rev-parse", "HEAD"],
+                         capture_output=True, text=True).stdout.strip()
+    conn = rtfm.get_index_db()
+    pinned = rtfm.Source(name="m", type="git_repo", url=str(remote), ref=sha,
+                         ext_allowlist=frozenset({".md"}))
+    rtfm.reindex_source(conn, pinned)
+    rtfm._staleness_cache.clear()
+    assert rtfm._stale_delta(conn, pinned)[1] is False
+    wider = rtfm.Source(name="m", type="git_repo", url=str(remote), ref=sha,
+                        ext_allowlist=frozenset({".md", ".bzl"}))
+    rtfm._staleness_cache.clear()
+    assert rtfm._stale_delta(conn, wider)[1] is True
+
+
+def test_scope_change_beats_a_linked_sha_pin(home, tmp_path, git_branch):
+    """The managed case never reaches the pin short-circuit — managed mode compares against
+    the pin itself for any ref. The short-circuit the scope check must be ordered ahead of
+    lives only in the linked branch, so pin it there."""
+    remote, _seed, branch = _seed_bzl_repo(tmp_path, git_branch)
+    dest = tmp_path / "linked"
+    rtfm._git_clone(str(remote), branch, dest, timeout=30)
+    sha = rtfm._git_current_commit(dest)
+    subprocess.run(["git", "-C", str(dest), "checkout", sha], capture_output=True)
+    conn = rtfm.get_index_db()
+    pinned = rtfm.Source(name="lp", type="git_repo", path=dest, url=str(remote), ref=sha,
+                         ext_allowlist=frozenset({".md"}))
+    rtfm.reindex_source(conn, pinned)
+    rtfm._staleness_cache.clear()
+    assert rtfm._stale_delta(conn, pinned)[1] is False
+    wider = rtfm.Source(name="lp", type="git_repo", path=dest, url=str(remote), ref=sha,
+                        ext_allowlist=frozenset({".md", ".bzl"}))
+    rtfm._staleness_cache.clear()
+    assert rtfm._stale_delta(conn, wider)[1] is True
+
+
+def test_narrowing_purges_the_excluded_files(home, tmp_path):
+    t = _tree(tmp_path / "c")
+    conn = rtfm.get_index_db()
+    wide = rtfm.Source(name="n", type="dir", path=t,
+                       ext_allowlist=frozenset({".md", ".bzl"}))
+    rtfm.reindex_source(conn, wide)
+    assert any(r[0].endswith(".bzl") for r in conn.execute(
+        "SELECT relpath FROM locations WHERE source='n'"))
+    narrow = rtfm.Source(name="n", type="dir", path=t, ext_allowlist=frozenset({".md"}))
+    rtfm.reindex_source(conn, narrow)
+    rels = {r[0] for r in conn.execute("SELECT relpath FROM locations WHERE source='n'")}
+    assert not any(r.endswith(".bzl") for r in rels)

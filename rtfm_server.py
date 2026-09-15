@@ -42,7 +42,7 @@ DEFAULT_EXT_BLOCKLIST = frozenset({
     ".mp3", ".mp4", ".wav", ".avi", ".mov", ".webm", ".ogg",
 })
 CHUNK_LINES = 50
-SCHEMA_VERSION = 4                   # index DB is a cache; mismatch ⇒ drop & rebuild
+SCHEMA_VERSION = 5                   # index DB is a cache; mismatch ⇒ drop & rebuild
 MAX_LOCATIONS = 5                    # default cap on locations listed per search hit
 
 
@@ -388,7 +388,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE source_meta (
             source          TEXT PRIMARY KEY,
             git_commit      TEXT NOT NULL,
-            git_commit_date TEXT NOT NULL
+            git_commit_date TEXT NOT NULL,
+            config_scope    TEXT NOT NULL DEFAULT ''
         );
         """
     )
@@ -855,10 +856,11 @@ def _reindex_git_repo(conn: sqlite3.Connection, src: Source) -> dict:
                               f"existing commit.")}
         return {"source": src.name, "error": _git_error_class(e)}
     conn.execute(
-        "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?) "
-        "ON CONFLICT(source) DO UPDATE SET "
-        "git_commit=excluded.git_commit, git_commit_date=excluded.git_commit_date",
-        (src.name, commit, commit_date))
+        "INSERT INTO source_meta(source, git_commit, git_commit_date, config_scope) "
+        "VALUES(?,?,?,?) ON CONFLICT(source) DO UPDATE SET "
+        "git_commit=excluded.git_commit, git_commit_date=excluded.git_commit_date, "
+        "config_scope=excluded.config_scope",
+        (src.name, commit, commit_date, _source_scope(src)))
     conn.commit()
     _staleness_cache.pop((src.name, src.ref), None)  # a fresh index makes the cached verdict stale
 
@@ -945,6 +947,10 @@ _staleness_cache: dict[tuple[str, str | None], tuple[float, bool]] = {}
 def _stale_delta_git_repo(conn: sqlite3.Connection, src: Source) -> tuple[int, bool]:
     """Commit-based staleness for git_repo. Returns (0, stale).
 
+    A changed declared scope (`paths`, `exclude_paths`, `ext_allowlist`, `ext_blocklist`) is
+    checked first and makes the source stale on its own — before the pin short-circuit below,
+    because a pin freezes the commit, not the manifest (ADR 0014).
+
     Linked mode is read-only (ADR 0013): rtfm never fetches the user's clone, so the
     refreshable reality is the user's tree — stale iff the indexed commit is not the
     current HEAD (the user moved their checkout) or the tree is dirty (uncommitted
@@ -958,9 +964,12 @@ def _stale_delta_git_repo(conn: sqlite3.Connection, src: Source) -> tuple[int, b
     """
     try:
         row = conn.execute(
-            "SELECT git_commit FROM source_meta WHERE source=?", (src.name,)).fetchone()
+            "SELECT git_commit, config_scope FROM source_meta WHERE source=?",
+            (src.name,)).fetchone()
         if row is None:
             return 0, True  # never indexed — always stale
+        if row[1] != _source_scope(src):
+            return 0, True  # declared scope changed — stale regardless of commit or pin
         repo_path = src.path if src.path is not None else _managed_repo_path(src.name)
         if not repo_path.exists():
             return 0, True  # clone vanished
@@ -1041,6 +1050,17 @@ def iter_source_files(src: Source, root: Path | None = None) -> list[Path]:
                 continue
             out.add(f)
     return sorted(out)
+
+
+def _source_scope(src: Source) -> str:
+    """The indexing-relevant manifest settings, as a comparable string. git_repo staleness is
+    commit-based (ADR 0013), so without this an edited scope leaves the source reporting "up
+    to date" while serving the old file set. Every member is sorted, so manifest key order is
+    not a change. Stored as the value rather than a digest: order-independence comes from
+    sorting, not from hashing, and a readable column beats an opaque one when someone inspects
+    the index by hand (ADR 0014)."""
+    return repr((sorted(src.paths), sorted(src.exclude_paths),
+                 sorted(src.ext_allowlist), sorted(src.ext_blocklist)))
 
 
 def _selection_warnings(src: Source, root: Path, selected: list[Path]) -> list[str]:
