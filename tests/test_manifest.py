@@ -1,9 +1,16 @@
 # tests/test_manifest.py
+import pathlib
 import subprocess
 
 import rtfm_server as rtfm
 
 # --- scope (ADR 0014): paths and extension lists ---
+
+
+def test_the_example_manifest_documents_all_four_keys():
+    text = pathlib.Path("manifest.example.toml").read_text()
+    for key in ("paths", "ext_allowlist", "ext_blocklist"):
+        assert key in text, key
 
 def test_paths_split_into_include_and_exclude(home, tmp_path):
     src = rtfm._source_from_table({

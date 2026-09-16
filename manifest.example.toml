@@ -13,35 +13,71 @@
 #      Created for you automatically; keep it small.
 #   2. Pointed-to folders — an organized corpus you manage. Run `reindex("<name>")` once after
 #      first adding a large set; thereafter small changes auto-reindex on search. Read-only by default.
+#
+# Every source declares its scope. Two keys are optional and one is required.
+#
+#   paths          Directory prefixes to index. Unset means the whole tree. A "!" entry
+#                  excludes a prefix, and exclusion wins:
+#                      paths = ["docs", "!docs/versions"]
+#                  Prefixes only — no globs. A literal "docs/**" directory does not exist,
+#                  so the entry would index nothing while looking correct.
+#
+#   ext_allowlist  Index ONLY these file types.        ) exactly one of these
+#   ext_blocklist  Index everything EXCEPT these,      ) two is required
+#                  on top of rtfm's own list of known binary and asset types.
+#
+# Declaring both is refused; declaring neither is refused. rtfm does not guess what to
+# index, because a guess is how a hidden default comes back through a side door.
+#
+# Which to pick: an allowlist decides what you GET, so growing it later means every source
+# pinned to the old list silently misses the new type. A blocklist decides what you DON'T
+# get, and everything on it is something nobody wants indexed, so growing it later removes
+# garbage and never content. Prefer a blocklist unless you know exactly what you want.
 
 [[source]]
-name    = "default"            # the zero-config drop-dir; the only mutable source by default
-type    = "dir"
-path    = "~/.rtfm/default"
-mutable = true
+name          = "default"            # the zero-config drop-dir; the only mutable source by default
+type          = "dir"
+path          = "~/.rtfm/default"
+mutable       = true
+ext_blocklist = []          # index everything except rtfm's known binary and asset types
 
 # Example: point at a large, organized doc set. Run reindex("vendor-docs") once after adding it;
 # searches are instant thereafter. Byte-identical files across version subfolders are stored once.
 # [[source]]
-# name    = "vendor-docs"
-# type    = "dir"
-# path    = "/path/to/vendor/Documentation"
-# mutable = false
+# name          = "vendor-docs"
+# type          = "dir"
+# path          = "/path/to/vendor/Documentation"
+# mutable       = false
+# ext_blocklist = []
 
 # Example: a git-tracked doc repo — linked mode (user provides the clone). Read-only:
 # rtfm verifies the remote URL and a clean tree, then indexes the checkout as-is —
 # it never fetches or resets the user's clone.
 # [[source]]
-# name    = "specs"
-# type    = "git_repo"
-# url     = "https://example.com/org/specs.git"
-# ref     = "main"
-# path    = "/path/to/specs"
+# name          = "specs"
+# type          = "git_repo"
+# url           = "https://example.com/org/specs.git"
+# ref           = "main"
+# path          = "/path/to/specs"
+# ext_allowlist = [".md"]   # exactly one of ext_allowlist/ext_blocklist is required
 
 # Example: a git-tracked doc repo — managed mode (rtfm clones to ~/.rtfm/repos/<name>/
 # and fetches + resets on every reindex).
 # [[source]]
-# name    = "docs-managed"
-# type    = "git_repo"
-# url     = "https://example.com/org/specs.git"
-# ref     = "v2.1-stable"
+# name          = "docs-managed"
+# type          = "git_repo"
+# url           = "https://example.com/org/specs.git"
+# ref           = "v2.1-stable"
+# ext_allowlist = [".md"]
+
+# Example: a rules repo where the documentation lives in Starlark doc= strings, not
+# in a docs/ folder rtfm could scope with `paths` alone (issue #24). ext_allowlist picks
+# out the file types that actually carry prose, and `paths` narrows further, skipping
+# the repo's test fixtures.
+# [[source]]
+# name          = "rules_cc"
+# type          = "git_repo"
+# url           = "https://github.com/bazelbuild/rules_cc.git"
+# ref           = "main"
+# ext_allowlist = [".bzl", ".md"]
+# paths         = ["cc", "!tests"]
