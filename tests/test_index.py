@@ -614,6 +614,26 @@ def test_a_prefix_does_not_match_a_partial_directory_name(home, tmp_path):
     assert [p.name for p in rtfm.iter_source_files(src)] == ["a.md"]
 
 
+def test_an_exclusion_that_is_a_prefix_of_an_inclusion_selects_nothing(home, tmp_path):
+    # paths=("docs/api",) narrows to a subtree that exclude_paths=("docs",) then excludes
+    # wholesale — exclusion wins unconditionally (ADR 0014), so this is the "looks correct,
+    # indexes nothing" shape the ADR warns about, not a bug in either clause alone.
+    (tmp_path / "docs" / "api").mkdir(parents=True)
+    (tmp_path / "docs" / "api" / "a.md").write_text("x")
+    src = _src(tmp_path, paths=("docs/api",), exclude_paths=("docs",))
+    assert [p.name for p in rtfm.iter_source_files(src)] == []
+
+
+def test_a_root_level_file_is_not_selected_under_a_restrictive_paths(home, tmp_path):
+    # readme.md sits at the source root, outside the "docs" prefix — paths narrows to a
+    # subtree, it never implicitly keeps the root alongside it.
+    (tmp_path / "readme.md").write_text("x")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "a.md").write_text("x")
+    src = _src(tmp_path, paths=("docs",))
+    assert [p.name for p in rtfm.iter_source_files(src)] == ["a.md"]
+
+
 def test_markup_exts_is_not_a_selection_set(home, tmp_path):
     # The whole point of ADR 0014: a .bzl file is selected by the manifest and handled by
     # the plain-text routine. TEXT_EXTS deciding both is the defect being deleted.
@@ -626,16 +646,33 @@ def test_markup_exts_is_not_a_selection_set(home, tmp_path):
     assert rtfm.search_index(conn, "shared_lib_name", source="s")
 
 
-def test_a_paths_entry_that_escapes_the_source_root_selects_nothing(home, tmp_path):
-    # Task 1 rejects glob characters in `paths` but not an absolute path or a `..` segment
-    # (its own tests normalize "/b/" to "b"). Confirmed here rather than assumed: the prefix
-    # match is against a relpath _rel produces relative to `base`, which can never render an
-    # absolute path or climb above the source root, so neither entry can match anything.
+def test_a_dotdot_paths_entry_selects_nothing(home, tmp_path):
+    # Task 1 rejects glob characters in `paths` but not a `..` segment. What's actually
+    # guaranteed: selection can never leave the source root, because the prefix match is
+    # against a relpath _rel produces relative to `base`, and access() only ever enumerates
+    # beneath that root — a relpath can neither render as absolute nor climb above it, so a
+    # ".." entry can't match anything.
     (tmp_path / "a.md").write_text("x")
-    (tmp_path / "etc").mkdir()
-    (tmp_path / "etc" / "passwd.md").write_text("x")
     assert [p.name for p in rtfm.iter_source_files(_src(tmp_path, paths=("..",)))] == []
-    assert [p.name for p in rtfm.iter_source_files(_src(tmp_path, paths=("/etc",)))] == []
+
+
+def test_a_leading_slash_in_paths_normalizes_to_a_root_anchored_prefix(home, tmp_path):
+    # A leading "/" in a manifest's `paths` entry is root-anchoring, the same convention
+    # .gitignore uses — _normalize_paths strips it, so "/docs" becomes the source-relative
+    # prefix "docs" and DOES select the docs/ subtree. Going through _source_from_table (the
+    # real manifest parsing path), not _src: _src builds a Source directly and bypasses
+    # _normalize_paths, which is why an earlier version of this test could (wrongly) claim
+    # a leading-"/" entry matches nothing.
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "docs" / "a.md").write_text("x")
+    (tmp_path / "etc" / "passwd.md").write_text("x")
+    src = rtfm._source_from_table({
+        "name": "s", "type": "dir", "path": str(tmp_path),
+        "paths": ["/docs"], "ext_blocklist": [],
+    })
+    assert src.paths == ("docs",)
+    assert [p.name for p in rtfm.iter_source_files(src)] == ["a.md"]
 
 
 def test_access_returns_reachable_positions(tmp_path):
@@ -876,9 +913,11 @@ def test_stale_delta_converges_after_a_denied_source_root(home, tmp_path, unopen
 
 def test_a_de_selected_file_is_purged(home, tmp_path):
     # The manifest stops wanting .log; the file is untouched on disk. Step 2's answer is
-    # the only one that decides what is in this source, so the row must go.
+    # the only one that decides what is in this source, so the row must go. Distinct bodies:
+    # this test only asserts on `locations`, not on shared content (see the byte-identical
+    # case below for that).
     (tmp_path / "keep.md").write_text("findable keyword")
-    (tmp_path / "drop.log").write_text("findable keyword")
+    (tmp_path / "drop.log").write_text("a different findable keyword")
     conn = rtfm.get_index_db()
     wide = rtfm.Source(name="s", type="dir", path=tmp_path, ext_blocklist=frozenset())
     rtfm.index_source(conn, wide, tmp_path)
@@ -904,12 +943,57 @@ def test_a_de_selected_file_leaves_no_orphan_content(home, tmp_path):
     assert conn.execute("SELECT count(*) FROM contents").fetchone()[0] == 0
 
 
+def test_a_de_selected_files_content_survives_via_a_still_selected_twin(home, tmp_path):
+    # keep.md and drop.log are byte-identical, so they share one contents row (one sha256).
+    # De-selecting .log purges drop.log's *locations* row, but GC is global — "NOT IN (SELECT
+    # sha256 FROM locations)" — not per-source, so the shared content is NOT collected while
+    # keep.md's own locations row still references it, and keep.md must stay searchable
+    # throughout. This is the mechanism that produced a false positive during review.
+    body = "shared identical keyword body"
+    (tmp_path / "keep.md").write_text(body)
+    (tmp_path / "drop.log").write_text(body)
+    conn = rtfm.get_index_db()
+    wide = rtfm.Source(name="s", type="dir", path=tmp_path, ext_blocklist=frozenset())
+    rtfm.index_source(conn, wide, tmp_path)
+    assert conn.execute("SELECT count(*) FROM contents").fetchone()[0] == 1  # one shared sha
+    assert rtfm.search_index(conn, "shared identical keyword", source="s")
+
+    narrow = rtfm.Source(name="s", type="dir", path=tmp_path,
+                         ext_blocklist=frozenset({".log"}))
+    got = rtfm.index_source(conn, narrow, tmp_path)
+    assert got.cache.purged == 1
+    rows = {r[0] for r in conn.execute("SELECT relpath FROM locations WHERE source='s'")}
+    assert rows == {"keep.md"}
+    assert conn.execute("SELECT count(*) FROM contents").fetchone()[0] == 1  # content survives
+    assert rtfm.search_index(conn, "shared identical keyword", source="s")
+
+
 def test_key_order_does_not_change_the_scope(home, tmp_path):
     a = rtfm.Source(name="s", type="dir", path=tmp_path,
                     paths=("a", "b"), ext_allowlist=frozenset({".md", ".pdf"}))
     b = rtfm.Source(name="s", type="dir", path=tmp_path,
                     paths=("b", "a"), ext_allowlist=frozenset({".pdf", ".md"}))
     assert rtfm._config_scope(a) == rtfm._config_scope(b)
+
+
+def test_config_scope_does_not_collide_on_a_comma_in_a_path(home, tmp_path):
+    # A directory literally named "a,b" and the pair ("a", "b") joined on a comma used to
+    # serialize to the same string — a git_repo source edited between the two configs read
+    # as not-stale, defeating the exact check ADR 0014 added config_scope for. JSON encoding
+    # keeps the two shapes distinct because "," inside a JSON string element is not the same
+    # as "," used as JSON's own array separator.
+    one_entry = rtfm.Source(name="s", type="dir", path=tmp_path, paths=("a,b",))
+    two_entries = rtfm.Source(name="s", type="dir", path=tmp_path, paths=("a", "b"))
+    assert rtfm._config_scope(one_entry) != rtfm._config_scope(two_entries)
+
+
+def test_config_scope_distinguishes_declared_empty_from_undeclared(home, tmp_path):
+    # ext_allowlist=frozenset() ("index nothing extra") and ext_allowlist=None ("not declared,
+    # ext_blocklist governs instead") are different configurations and must scope differently.
+    declared_empty = rtfm.Source(name="s", type="dir", path=tmp_path,
+                                 ext_allowlist=frozenset())
+    undeclared = rtfm.Source(name="s", type="dir", path=tmp_path, ext_allowlist=None)
+    assert rtfm._config_scope(declared_empty) != rtfm._config_scope(undeclared)
 
 
 def test_a_source_selecting_nothing_is_forced_stale(home, tmp_path):

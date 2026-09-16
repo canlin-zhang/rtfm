@@ -1445,6 +1445,25 @@ def test_editing_a_git_repo_scope_makes_it_stale(home, tmp_path, git_branch):
     assert rtfm._stale_delta(conn, narrow)[1] is True
 
 
+def test_editing_a_git_repo_scope_by_exclude_paths_alone_makes_it_stale(
+        home, tmp_path, git_branch):
+    # Same regression as above, but for exclude_paths specifically: only ext_allowlist edits
+    # were covered, so a refactor that dropped exclude_paths from _config_scope would go
+    # unnoticed. Two sources differing only in exclude_paths must scope differently and the
+    # second must read stale against the first's indexed state.
+    remote, seed, branch = make_git_repo(tmp_path, git_branch)
+    conn = rtfm.get_index_db()
+    unscoped = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=branch,
+                           ext_blocklist=frozenset())
+    rtfm.reindex_source(conn, unscoped)
+    assert rtfm._stale_delta(conn, unscoped)[1] is False
+
+    excluded = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=branch,
+                           exclude_paths=("nope",), ext_blocklist=frozenset())
+    assert rtfm._config_scope(unscoped) != rtfm._config_scope(excluded)
+    assert rtfm._stale_delta(conn, excluded)[1] is True
+
+
 def test_a_scope_edit_beats_a_sha_pin(home, tmp_path, git_branch):
     # A pin freezes the commit, not the manifest (ADR 0014). Compared before every other
     # branch, including the pin short-circuit that returns early.
@@ -1484,3 +1503,34 @@ def test_git_repo_scope_selects_only_the_matching_subset(home, tmp_path):
     rtfm.reindex_source(conn, src)
     rows = {r[0] for r in conn.execute("SELECT relpath FROM locations WHERE source='g'")}
     assert rows == {"docs/a.md"}
+
+
+def test_two_git_repo_sources_sharing_one_clone_keep_separate_scopes(home, tmp_path):
+    # Two linked sources can point `path` at the very same clone (test_search_dedupes_
+    # warnings_per_clone already covers that for warnings). Each source's own `locations`
+    # rows must hold only its own scope's matches — the clone is shared, the scope isn't.
+    remote, seed, branch = make_git_repo(tmp_path, "main")
+    (seed / "docs").mkdir()
+    (seed / "docs" / "a.md").write_text("docs content\n")
+    (seed / "other").mkdir()
+    (seed / "other" / "b.md").write_text("other content\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "more files"],
+                   capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", branch],
+                   capture_output=True)
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), branch, dest, timeout=30)
+
+    conn = rtfm.get_index_db()
+    src1 = rtfm.Source(name="s1", type="git_repo", path=dest, url=str(remote), ref=branch,
+                       paths=("docs",), ext_blocklist=frozenset())
+    src2 = rtfm.Source(name="s2", type="git_repo", path=dest, url=str(remote), ref=branch,
+                       paths=("other",), ext_blocklist=frozenset())
+    rtfm.reindex_source(conn, src1)
+    rtfm.reindex_source(conn, src2)
+
+    rows1 = {r[0] for r in conn.execute("SELECT relpath FROM locations WHERE source='s1'")}
+    rows2 = {r[0] for r in conn.execute("SELECT relpath FROM locations WHERE source='s2'")}
+    assert rows1 == {"docs/a.md"}
+    assert rows2 == {"other/b.md"}

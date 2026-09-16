@@ -19,8 +19,11 @@
 #   paths          Directory prefixes to index. Unset means the whole tree. A "!" entry
 #                  excludes a prefix, and exclusion wins:
 #                      paths = ["docs", "!docs/versions"]
+#                  Every prefix is relative to the source root; a leading "/" is optional
+#                  and ignored (the same convention .gitignore uses for an anchored path).
 #                  Prefixes only — no globs. A literal "docs/**" directory does not exist,
-#                  so the entry would index nothing while looking correct.
+#                  so a glob character (*, ?, [) is refused at load time, loudly, rather
+#                  than silently indexing nothing while looking correct.
 #
 #   ext_allowlist  Index ONLY these file types.        ) exactly one of these
 #   ext_blocklist  Index everything EXCEPT these,      ) two is required

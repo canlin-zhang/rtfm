@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -693,7 +694,7 @@ def _report_nothing_selected(src: Source, result: Indexed) -> list[str]:
     if src.ext_allowlist is not None:
         ext_clause = f"ext_allowlist = {', '.join(sorted(src.ext_allowlist)) or '(empty)'}"
     else:
-        # The effective set is the user's list unioned with rtfm's ~70 defaults, but dumping
+        # The effective set is the user's list unioned with rtfm's own defaults, but dumping
         # all of it is a wall of extensions the user never wrote and cannot act on, burying
         # the `paths` clause that is often the actual cause. Name what the user declared and
         # summarize the defaults by count — never hardcoded, so it can't drift when
@@ -1137,16 +1138,21 @@ _staleness_cache: dict[tuple[str, str | None, str], tuple[float, bool]] = {}
 
 
 def _config_scope(src: Source) -> str:
-    """The normalized scope keys as one readable string.
+    """The normalized scope keys as one readable, unambiguous string.
 
-    Stored as the value rather than a digest: order-independence comes from sorting, not
-    from hashing, and a readable column beats an opaque one when someone inspects the index
-    by hand (ADR 0014).
+    JSON rather than a delimiter-joined string: on Linux any byte but "/" and NUL is legal in a
+    filename, so a directory named "a,b" and the pair ("a", "b") joined on a comma produce the
+    same text — and a git_repo source edited between those two scopes reads as fresh, which is
+    the exact failure this column exists to catch. Sorted, so order-independence comes from
+    sorting rather than from hashing, and the column stays readable when someone inspects the
+    index by hand (ADR 0014).
     """
-    allow = "*" if src.ext_allowlist is None else ",".join(sorted(src.ext_allowlist))
-    block = "*" if src.ext_blocklist is None else ",".join(sorted(src.ext_blocklist))
-    return (f"paths={','.join(sorted(src.paths))};exclude={','.join(sorted(src.exclude_paths))};"
-            f"allow={allow};block={block}")
+    return json.dumps({
+        "paths": sorted(src.paths),
+        "exclude": sorted(src.exclude_paths),
+        "allow": None if src.ext_allowlist is None else sorted(src.ext_allowlist),
+        "block": None if src.ext_blocklist is None else sorted(src.ext_blocklist),
+    }, separators=(",", ":"))
 
 
 def _stale_delta_git_repo(conn: sqlite3.Connection, src: Source) -> tuple[int, bool]:
