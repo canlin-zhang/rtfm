@@ -446,3 +446,34 @@ def test_default_branch_parses_remote_head(home, tmp_path, git_branch):
     dest = tmp_path / "dest"
     rtfm._git_clone(str(remote), branch, dest, timeout=30)
     assert rtfm._default_branch(dest) == branch
+
+
+def test_step_result_classifies_its_own_outcome():
+    clean = rtfm.StepResult(kept=[1, 2], problems=[])
+    partial = rtfm.StepResult(
+        kept=[1], problems=[rtfm.Problem("a.md", "nope")]
+    )
+    empty = rtfm.StepResult(
+        kept=[], problems=[rtfm.Problem("a.md", "nope")]
+    )
+    assert (
+        rtfm._is_clean(clean),
+        rtfm._is_partial(clean),
+        rtfm._is_empty(clean),
+    ) == (True, False, False)
+    assert (
+        rtfm._is_clean(partial),
+        rtfm._is_partial(partial),
+        rtfm._is_empty(partial),
+    ) == (False, True, False)
+    assert (
+        rtfm._is_clean(empty),
+        rtfm._is_partial(empty),
+        rtfm._is_empty(empty),
+    ) == (False, False, True)
+
+
+def test_a_problem_names_a_position_not_a_hash():
+    p = rtfm.Problem("docs/a.md", "Permission denied")
+    assert p.position == "docs/a.md"
+    assert p._fields == ("position", "reason")

@@ -524,6 +524,61 @@ class _Extracted(NamedTuple):
     error: str | None
 
 
+class Problem(NamedTuple):
+    """One thing that went wrong, attributed to the position it happened to.
+
+    `position` is a relpath and always a relpath — never a content hash. A sha is an
+    internal identity a user cannot act on, and reporting one forces every consumer to
+    convert content counts into file counts. One unit everywhere means nothing converts
+    (ADR 0015)."""
+    position: str
+    reason: str
+
+
+class StepResult(NamedTuple):
+    """What a step let through, and what it could not.
+
+    The happy/partial/empty classification is derivable from these two, so it is a
+    function of a result rather than a field on it. `kept` means what this step passes
+    to the next stage — what survived for most steps, but for extraction (step 3B), both
+    successful and failed results that must persist (ADR 0015)."""
+    kept: list
+    problems: list[Problem]
+
+
+def _is_clean(r: StepResult) -> bool:
+    return bool(r.kept) and not r.problems
+
+
+def _is_partial(r: StepResult) -> bool:
+    return bool(r.kept) and bool(r.problems)
+
+
+def _is_empty(r: StepResult) -> bool:
+    return not r.kept
+
+
+class CacheStats(NamedTuple):
+    """Telemetry about the content-addressed store (ADR 0010), not about failures.
+    Kept apart from step results so a cache detail can never reach a user-facing
+    report."""
+    unique_contents: int
+    newly_extracted: int
+    extraction_skips: int
+    purged: int
+
+
+class Indexed(NamedTuple):
+    """One indexing run. `wanted` is a bare list, not a StepResult: step 2 asks about
+    intent, where rtfm has no standing to call 90% filtered a partial success, so there
+    is nowhere to record a step-2 partial outcome (ADR 0015)."""
+    reachable: StepResult      # step 1  — can rtfm get at these bytes
+    wanted: list               # step 2  — which of them does the manifest want
+    read: StepResult           # step 3A — which gave up their bytes
+    handled: StepResult        # step 3B — which became rows
+    cache: CacheStats
+
+
 def _extract_many(jobs: list[tuple[str, str]]) -> list[_Extracted]:
     """jobs: [(sha, path)] -> [_Extracted(sha, rows, title, headings, error)]. Parallel over unique
     contents (dedup has already cut the job count) with a THREAD pool. A process pool is
