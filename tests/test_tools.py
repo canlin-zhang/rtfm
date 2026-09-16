@@ -704,8 +704,12 @@ def test_search_reports_a_denied_directory_on_every_run(home, tmp_path, unopenab
 
 
 def test_search_reports_nothing_selected_on_every_run(home, tmp_path):
-    """A source whose selection is empty is FRESH now — the forced-stale clause that used to
-    carry this report is gone (ADR 0014), so the report has to come off the scan instead."""
+    """The message survives the removal of the forced-stale clause (ADR 0014).
+
+    Characterization, not a regression witness: this passes on main too, where the forced
+    clause reindexed every query and emitted the same text by the old route. The invariant
+    that is actually new — fresh, with a scan to report from — is pinned in test_index.py's
+    test_a_source_selecting_nothing_is_fresh_and_still_reported."""
     d = tmp_path / "docs"
     d.mkdir()
     (d / "a.png").write_text("x")

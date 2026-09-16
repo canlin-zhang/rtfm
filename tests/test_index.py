@@ -1,4 +1,5 @@
 # tests/test_index.py
+import hashlib
 import os
 import sqlite3
 import subprocess
@@ -752,6 +753,41 @@ def test_read_hashes_what_it_can(tmp_path):
     path, sha, mtime = got.kept[0]
     assert path.name == "a.md" and len(sha) == 64
     assert got.problems == []
+
+
+def test_read_names_a_file_deleted_since_the_scan(tmp_path):
+    # Step 1 stats, step 3A reads, and a file can vanish in between — the race ADR 0015 gives
+    # step 3A. A cache hit must not skip the check: reusing the stored sha for a file that is
+    # gone keeps its row and reports nothing, and the index then serves a path that 404s.
+    t = tmp_path / "c"
+    t.mkdir()
+    f = t / "a.md"
+    f.write_text("alpha")
+    scanned = _reached(f)                       # step 1 saw it
+    sha = rtfm.read_bytes_for(scanned, t, {}).kept[0].sha
+    f.unlink()                                  # ...and it goes before step 3A gets there
+    got = rtfm.read_bytes_for(scanned, t, {"a.md": (sha, scanned[0].mtime)})
+    assert got.kept == []
+    assert [p.position for p in got.problems] == ["a.md"]
+
+
+def test_read_keeps_the_scans_mtime_against_new_content(tmp_path):
+    # The mtime stored is step 1's, not a fresh one. A file edited between the scan and the
+    # read is hashed as it is now, but recorded with the older mtime, so the next run sees a
+    # mismatch and re-reads once. The reverse — a newer mtime against older bytes — would
+    # make the stale content read as fresh forever.
+    t = tmp_path / "c"
+    t.mkdir()
+    f = t / "a.md"
+    f.write_text("alpha")
+    scanned = _reached(f)
+    f.write_text("beta")                        # changed after the scan...
+    later = scanned[0].mtime + 10
+    os.utime(f, (later, later))                 # ...landing with a later mtime, deterministically
+    got = rtfm.read_bytes_for(scanned, t, {}).kept[0]
+    assert got.sha == hashlib.sha256(b"beta").hexdigest()      # hashed as it is now
+    assert got.mtime == scanned[0].mtime                       # recorded as it was scanned
+    assert got.mtime < f.stat().st_mtime                       # i.e. older, never newer
 
 
 def test_read_names_a_file_whose_bytes_it_cannot_get(tmp_path, unopenable):

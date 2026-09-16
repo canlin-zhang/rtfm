@@ -1370,12 +1370,15 @@ def read_bytes_for(positions: list[_Reached], base: Path,
     read. Failing here is infrastructure — the user fixes storage or permissions,
     not files.
 
-    `existing` lets an unchanged position skip re-hashing. It is a cache on the
-    hash, never a gate on the read: a position whose key misses is read, and one
-    whose key hits was already confirmed reachable by step 1.
+    `existing` lets an unchanged position skip re-hashing. It is a cache on the hash, never
+    a gate on the read — and never a gate on the liveness check either: every position is
+    stat'd here even on a cache hit, because a file deleted between step 1's scan and this
+    step is precisely the race this step owns, and skipping the syscall would keep its row
+    and its old sha with nothing reported.
 
-    The mtime is step 1's: if a file changes between scan and read we store the older mtime
-    against the new content, so the next run re-reads it once — never the reverse.
+    The mtime compared is step 1's, not this stat's: if a file changes between scan and read
+    we store the older mtime against the new content, so the next run re-reads it once —
+    never the reverse.
 
     PR2 widens the cache key from mtime to mtime+size."""
     kept: list[_Hashed] = []
@@ -1383,6 +1386,7 @@ def read_bytes_for(positions: list[_Reached], base: Path,
     for r in positions:
         rel = _rel(r.path, base)
         try:
+            r.path.stat()                       # liveness: gone since the scan is step 3A's
             prev = existing.get(rel)
             sha = prev[0] if prev and prev[1] == r.mtime else \
                 hashlib.sha256(r.path.read_bytes()).hexdigest()
