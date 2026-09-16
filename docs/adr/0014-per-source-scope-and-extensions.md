@@ -162,10 +162,18 @@ not from hashing, and a readable column beats an opaque one when someone inspect
 the index by hand.
 
 `dir` sources need no stored scope: their relpath+mtime set comparison goes stale
-whenever the selected file set changes. It does not cover one edge, though — a
-source that selects *nothing* has `indexed == on_disk == {}`, which reads as fresh
-forever, so an empty selection is forced stale explicitly. Without that, the
-source is skipped on every query and its stage report is never even computed.
+whenever the selected file set changes. A source that selects *nothing* and has
+nothing indexed has `indexed == on_disk == {}` and reads as fresh, which is
+correct — there is nothing to index and nothing to purge. (A source that selects
+nothing but *has* indexed rows still reads as stale on the set comparison, and its
+purge runs.)
+
+An earlier version forced the empty selection stale explicitly, so that the
+pipeline would run and its "nothing selected" report would reach the user. That
+was a workaround for a report being reachable only through an index run: the
+freshness handler now returns the scan it walked, and the report is derived from
+that scan on every query, indexed or not (ADR 0015). The forced-stale clause is
+gone along with the reason for it.
 
 Amends ADR 0013 (commit-based staleness → commit-or-scope).
 

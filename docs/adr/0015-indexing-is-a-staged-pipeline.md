@@ -125,10 +125,19 @@ above: telling someone to convert a file they lack permission to open, or to che
 an extension list when the directory was unreadable.
 
 **Freshness gates the pipeline; it is not a step in it.** It decides whether to
-ask the four questions at all. Its handlers differ in what they can prove without
-looking: git compares the indexed commit to `origin/<ref>` and can skip the
-traversal outright, while bookkeeping needs a `stat` per position and therefore
-folds into Step 1 rather than preceding it.
+ask the four questions at all, and it has a handler table of its own. Its handlers
+differ in what they can prove without looking, and that difference decides where
+the gate sits:
+
+- git compares the indexed commit to `origin/<ref>`, proves freshness without
+  traversing, and its gate therefore precedes Step 1.
+- bookkeeping needs a `stat` per position, which is Step 1's scan. It folds into
+  Step 1 rather than preceding it, so its gate sits *after* Step 2 — it compares
+  the index against what Step 2 selected.
+
+A handler that scans in order to decide hands that scan on, and the pipeline it
+gates consumes it. Recomputing it is how one query came to pay two full
+traversals of the same tree, one to decide and one to act.
 
 ## Consequences
 
@@ -146,3 +155,12 @@ folds into Step 1 rather than preceding it.
   never replacement.
 - Step 1's report reaches `search`, `reindex` and `health_check`. A stated
   boundary is worthless if a user cannot hear that they hit it.
+- A Dir source reports Step 1 on every `search`, because its freshness handler
+  has already walked. A Repo source reports it only on a run that indexes, because
+  its freshness is a commit comparison and walking the clone to manufacture a
+  report is the cost that comparison exists to avoid. Reporting is free where a
+  scan is already paid for, and not worth buying where it is not.
+- "What is currently unsearchable" is a question about the store, not about a run.
+  Extraction failures are reported from `contents.error`, read the same way by
+  `search`, `reindex` and `health_check`. A step reaching into the store to
+  re-report an earlier run's failure is a step answering a question it does not own.
