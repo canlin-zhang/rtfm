@@ -844,3 +844,33 @@ def test_stale_delta_converges_after_a_denied_source_root(home, tmp_path, unopen
     unopenable(t, directory=True)
     rtfm.index_source(conn, src, t)  # reconcile round: the row survives, still unreachable
     assert rtfm._stale_delta(conn, src) == (0, False, False)
+
+
+def test_a_de_selected_file_is_purged(home, tmp_path):
+    # The manifest stops wanting .log; the file is untouched on disk. Step 2's answer is
+    # the only one that decides what is in this source, so the row must go.
+    (tmp_path / "keep.md").write_text("findable keyword")
+    (tmp_path / "drop.log").write_text("findable keyword")
+    conn = rtfm.get_index_db()
+    wide = rtfm.Source(name="s", type="dir", path=tmp_path, ext_blocklist=frozenset())
+    rtfm.index_source(conn, wide, tmp_path)
+    rows = {r[0] for r in conn.execute("SELECT relpath FROM locations WHERE source='s'")}
+    assert rows == {"keep.md", "drop.log"}
+
+    narrow = rtfm.Source(name="s", type="dir", path=tmp_path,
+                         ext_blocklist=frozenset({".log"}))
+    got = rtfm.index_source(conn, narrow, tmp_path)
+    assert got.cache.purged == 1
+    rows = {r[0] for r in conn.execute("SELECT relpath FROM locations WHERE source='s'")}
+    assert rows == {"keep.md"}
+
+
+def test_a_de_selected_file_leaves_no_orphan_content(home, tmp_path):
+    (tmp_path / "drop.log").write_text("unique content here")
+    conn = rtfm.get_index_db()
+    rtfm.index_source(conn, rtfm.Source(name="s", type="dir", path=tmp_path,
+                                        ext_blocklist=frozenset()), tmp_path)
+    assert conn.execute("SELECT count(*) FROM contents").fetchone()[0] == 1
+    rtfm.index_source(conn, rtfm.Source(name="s", type="dir", path=tmp_path,
+                                        ext_blocklist=frozenset({".log"})), tmp_path)
+    assert conn.execute("SELECT count(*) FROM contents").fetchone()[0] == 0

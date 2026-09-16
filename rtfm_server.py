@@ -15,7 +15,6 @@ import logging
 import os
 import re
 import sqlite3
-import stat
 import subprocess
 import time
 import tomllib
@@ -879,18 +878,16 @@ def index_source(conn: sqlite3.Connection, src: Source, root: Path) -> Indexed:
     wanted = select(reachable.kept, root, src)
     read = read_bytes_for(wanted, root, existing)
 
-    # Reconcile against what step 2 wanted. A position that failed 3A is still in `wanted`
-    # (read_bytes_for reports it as a problem, not by omission), so it keeps its row via
-    # wanted_rels alone. A position that failed step 1 never reaches `wanted` at all — access()
-    # excludes what it could not open — so for anything wanted_rels does not cover, ask step 1's
-    # own report first and the filesystem second. Only a relpath that no unreachable position
-    # shadows, and that nothing sits at any more, has actually vanished.
+    # Reconcile against what step 2 wanted, and nothing else. A position that failed 3A is
+    # still in `wanted` (read_bytes_for reports it as a problem, not by omission), so it
+    # keeps its row. A position step 1 could not reach never arrives at step 2 at all, so
+    # step 1's own report is what keeps it — the filesystem is not asked, because "the file
+    # is still there" and "the manifest still wants it" stopped being the same fact once
+    # step 2 became policy: a de-selected file is present on disk and must still be purged.
     wanted_rels = {_rel(f, root) for f in wanted}
     unreachable = {p.position for p in reachable.problems}
     vanished = {rel for rel in existing
-                if rel not in wanted_rels
-                and not _shadowed_by(rel, unreachable)
-                and not _still_there(root / rel)}
+                if rel not in wanted_rels and not _shadowed_by(rel, unreachable)}
     for rel in vanished:
         conn.execute("DELETE FROM locations WHERE source=? AND relpath=?", (source_name, rel))
     for f, sha, mtime in read.kept:
@@ -1224,22 +1221,6 @@ def _shadowed_by(rel: str, unreachable: set[str]) -> bool:
     and _stale_delta stops converging on one.
     """
     return any(u == "." or rel == u or rel.startswith(u + "/") for u in unreachable)
-
-
-def _still_there(p: Path) -> bool:
-    """Is a regular file still sitting at this position?
-
-    Not `Path.is_file()`: before Python 3.14 it re-raises OSError for EACCES, so a file
-    under a directory nobody can enter raises out of the caller rather than answering.
-    An OS that refuses to say is answering "unreadable", never "absent" — the caller
-    deletes an indexed row on a False, so only a real ENOENT/ENOTDIR earns one.
-    """
-    try:
-        return stat.S_ISREG(os.stat(p).st_mode)
-    except (FileNotFoundError, NotADirectoryError):
-        return False
-    except OSError:
-        return True
 
 
 def read_bytes_for(positions: list[Path], base: Path,
