@@ -319,13 +319,14 @@ def test_stale_delta_git_repo_current_is_not_stale(home, tmp_path, git_branch):
     rtfm._git_clone(str(remote), branch, dest, timeout=30)
     commit = rtfm._git_current_commit(dest)
     commit_date = rtfm._git_commit_date(dest, "HEAD")
-    conn = rtfm.get_index_db()
-    conn.execute(
-        "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?)",
-        ("specs", commit, commit_date))
-    conn.commit()
     src = rtfm.Source(name="specs", type="git_repo", path=dest,
                        url=str(remote), ref=branch)
+    conn = rtfm.get_index_db()
+    conn.execute(
+        "INSERT INTO source_meta(source, git_commit, git_commit_date, config_scope) "
+        "VALUES(?,?,?,?)",
+        ("specs", commit, commit_date, rtfm._config_scope(src)))
+    conn.commit()
     changed, stale = rtfm._stale_delta_git_repo(conn, src)
     assert stale is False
     assert changed == 0
@@ -340,14 +341,15 @@ def test_stale_delta_linked_dirty_is_stale(home, tmp_path, git_branch):
     dest = tmp_path / "dest"
     rtfm._git_clone(str(remote), branch, dest, timeout=30)
     commit = rtfm._git_current_commit(dest)
-    conn = rtfm.get_index_db()
-    conn.execute(
-        "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?)",
-        ("specs", commit, "2025-01-01T00:00:00+00:00"))
-    conn.commit()
-    (dest / "a.md").write_text("uncommitted v2\n")
     src = rtfm.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref=branch)
+    conn = rtfm.get_index_db()
+    conn.execute(
+        "INSERT INTO source_meta(source, git_commit, git_commit_date, config_scope) "
+        "VALUES(?,?,?,?)",
+        ("specs", commit, "2025-01-01T00:00:00+00:00", rtfm._config_scope(src)))
+    conn.commit()
+    (dest / "a.md").write_text("uncommitted v2\n")
     changed, stale = rtfm._stale_delta_git_repo(conn, src)
     assert stale is True
 
@@ -360,13 +362,14 @@ def test_stale_delta_pinned_sha_never_stale(home, tmp_path, git_branch):
     dest = tmp_path / "dest"
     rtfm._git_clone(str(remote), branch, dest, timeout=30)
     sha = rtfm._git_current_commit(dest)
-    conn = rtfm.get_index_db()
-    conn.execute(
-        "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?)",
-        ("specs", sha, "2025-01-01T00:00:00+00:00"))
-    conn.commit()
     src = rtfm.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref=sha)
+    conn = rtfm.get_index_db()
+    conn.execute(
+        "INSERT INTO source_meta(source, git_commit, git_commit_date, config_scope) "
+        "VALUES(?,?,?,?)",
+        ("specs", sha, "2025-01-01T00:00:00+00:00", rtfm._config_scope(src)))
+    conn.commit()
     changed, stale = rtfm._stale_delta_git_repo(conn, src)
     assert stale is False
 
@@ -385,12 +388,13 @@ def test_stale_delta_git_repo_behind_is_stale(home, tmp_path, git_branch):
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v2"], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "push", "origin", branch], capture_output=True)
+    src = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref=branch)
     conn = rtfm.get_index_db()
     conn.execute(
-        "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?)",
-        ("specs", old_commit, "2025-01-01T00:00:00+00:00"))
+        "INSERT INTO source_meta(source, git_commit, git_commit_date, config_scope) "
+        "VALUES(?,?,?,?)",
+        ("specs", old_commit, "2025-01-01T00:00:00+00:00", rtfm._config_scope(src)))
     conn.commit()
-    src = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref=branch)
     changed, stale = rtfm._stale_delta_git_repo(conn, src)
     assert stale is True
 
@@ -410,13 +414,14 @@ def test_stale_delta_git_repo_linked_head_moved_is_stale(home, tmp_path, git_bra
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v2"], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "push", "origin", branch], capture_output=True)
-    conn = rtfm.get_index_db()
-    conn.execute(
-        "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?)",
-        ("specs", old_commit, "2025-01-01T00:00:00+00:00"))
-    conn.commit()
     src = rtfm.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref=branch)
+    conn = rtfm.get_index_db()
+    conn.execute(
+        "INSERT INTO source_meta(source, git_commit, git_commit_date, config_scope) "
+        "VALUES(?,?,?,?)",
+        ("specs", old_commit, "2025-01-01T00:00:00+00:00", rtfm._config_scope(src)))
+    conn.commit()
     changed, stale = rtfm._stale_delta_git_repo(conn, src)
     assert stale is False  # remote moved, tree didn't — nothing to reindex
 
@@ -874,3 +879,22 @@ def test_a_de_selected_file_leaves_no_orphan_content(home, tmp_path):
     rtfm.index_source(conn, rtfm.Source(name="s", type="dir", path=tmp_path,
                                         ext_blocklist=frozenset({".log"})), tmp_path)
     assert conn.execute("SELECT count(*) FROM contents").fetchone()[0] == 0
+
+
+def test_key_order_does_not_change_the_scope(home, tmp_path):
+    a = rtfm.Source(name="s", type="dir", path=tmp_path,
+                    paths=("a", "b"), ext_allowlist=frozenset({".md", ".pdf"}))
+    b = rtfm.Source(name="s", type="dir", path=tmp_path,
+                    paths=("b", "a"), ext_allowlist=frozenset({".pdf", ".md"}))
+    assert rtfm._config_scope(a) == rtfm._config_scope(b)
+
+
+def test_a_source_selecting_nothing_is_forced_stale(home, tmp_path):
+    # indexed == on_disk == {} reads as fresh forever, so the source is skipped on every
+    # query and its step report is never even computed (ADR 0014).
+    (tmp_path / "a.png").write_text("x")
+    src = rtfm.Source(name="s", type="dir", path=tmp_path,
+                      ext_allowlist=frozenset({".md"}))
+    conn = rtfm.get_index_db()
+    rtfm.index_source(conn, src, tmp_path)
+    assert rtfm._stale_delta(conn, src)[1] is True

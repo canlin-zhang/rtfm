@@ -57,7 +57,7 @@ DEFAULT_EXT_BLOCKLIST = frozenset({
     ".doc", ".xls", ".ppt", ".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp",
 })
 CHUNK_LINES = 50
-SCHEMA_VERSION = 4                   # index DB is a cache; mismatch ⇒ drop & rebuild
+SCHEMA_VERSION = 5                   # index DB is a cache; mismatch ⇒ drop & rebuild
 MAX_LOCATIONS = 5                    # default cap on locations listed per search hit
 
 
@@ -403,7 +403,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE source_meta (
             source          TEXT PRIMARY KEY,
             git_commit      TEXT NOT NULL,
-            git_commit_date TEXT NOT NULL
+            git_commit_date TEXT NOT NULL,
+            config_scope    TEXT NOT NULL DEFAULT ''
         );
         """
     )
@@ -963,12 +964,17 @@ def _reindex_git_repo(conn: sqlite3.Connection, src: Source) -> dict:
                               f"existing commit.")}
         return {"source": src.name, "error": _git_error_class(e)}
     conn.execute(
-        "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?) "
-        "ON CONFLICT(source) DO UPDATE SET "
-        "git_commit=excluded.git_commit, git_commit_date=excluded.git_commit_date",
-        (src.name, commit, commit_date))
+        "INSERT INTO source_meta(source, git_commit, git_commit_date, config_scope) "
+        "VALUES(?,?,?,?) ON CONFLICT(source) DO UPDATE SET "
+        "git_commit=excluded.git_commit, git_commit_date=excluded.git_commit_date, "
+        "config_scope=excluded.config_scope",
+        (src.name, commit, commit_date, _config_scope(src)))
     conn.commit()
-    _staleness_cache.pop((src.name, src.ref), None)  # a fresh index makes the cached verdict stale
+    # A fresh index makes any cached verdict for this source+ref stale, whichever scope it
+    # was memoized under — the key now includes config_scope (see _stale_delta), so a plain
+    # tuple lookup would miss.
+    for key in [k for k in _staleness_cache if k[0] == src.name and k[1] == src.ref]:
+        _staleness_cache.pop(key, None)
 
     # Now run the file-level indexing (shared core with dir sources)
     summary = {"source": src.name, "commit": commit, "commit_date": commit_date}
@@ -1022,18 +1028,22 @@ def _stale_delta(conn: sqlite3.Connection, src: Source) -> tuple[int, bool, bool
 
     git_repo verdicts cost git subprocesses (and a fetch for managed sources) and
     feed the auto-reindex attempt and its failure warning — both are memoized per
-    source+ref for STALENESS_TTL seconds (ADR 0013): the check runs at most every
-    30 s, and search re-attempts a stale source at most every 30 s, so a
+    source+ref+config_scope for STALENESS_TTL seconds (ADR 0013): the check runs at
+    most every 30 s, and search re-attempts a stale source at most every 30 s, so a
     persistently broken or dirty source warns on the first query of each window,
-    not on every query.
+    not on every query. The scope is part of the key, not just of the verdict
+    computation: a manifest edit changes the key, so it can never hit a memo entry
+    written under the old scope (ADR 0014) — the source may briefly hold two entries
+    (old scope, new scope) but the old one is simply never looked up again.
     """
     if src.type == "git_repo":
         now = time.monotonic()
-        hit = _staleness_cache.get((src.name, src.ref))
+        key = (src.name, src.ref, _config_scope(src))
+        hit = _staleness_cache.get(key)
         if hit and now - hit[0] < STALENESS_TTL:
             return 0, hit[1], True
         _, stale = _stale_delta_git_repo(conn, src)
-        _staleness_cache[(src.name, src.ref)] = (now, stale)
+        _staleness_cache[key] = (now, stale)
         return 0, stale, False
     # dir sources: stat + (relpath, mtime) compare — no hashing or extraction.
     # `changed` counts files that would need fresh extraction and bounds the cost of an
@@ -1061,11 +1071,27 @@ def _stale_delta(conn: sqlite3.Connection, src: Source) -> tuple[int, bool, bool
         except OSError:
             on_disk[rel] = mtime   # shadowed by an unreachable ancestor dir: can't re-read
     changed = sum(1 for rel, mtime in on_disk.items() if indexed.get(rel) != mtime)
-    stale = changed > 0 or set(indexed) != set(on_disk)   # latter catches vanished files
+    # An empty selection has indexed == on_disk == {}, which reads as fresh forever: the
+    # source is skipped on every query and its step report is never even computed. Force it
+    # (ADR 0014) so the user hears that their manifest selects nothing.
+    stale = (changed > 0 or set(indexed) != set(on_disk) or not on_disk)
     return changed, stale, False
 
 
-_staleness_cache: dict[tuple[str, str | None], tuple[float, bool]] = {}
+_staleness_cache: dict[tuple[str, str | None, str], tuple[float, bool]] = {}
+
+
+def _config_scope(src: Source) -> str:
+    """The normalized scope keys as one readable string.
+
+    Stored as the value rather than a digest: order-independence comes from sorting, not
+    from hashing, and a readable column beats an opaque one when someone inspects the index
+    by hand (ADR 0014).
+    """
+    allow = "*" if src.ext_allowlist is None else ",".join(sorted(src.ext_allowlist))
+    block = "*" if src.ext_blocklist is None else ",".join(sorted(src.ext_blocklist))
+    return (f"paths={','.join(sorted(src.paths))};exclude={','.join(sorted(src.exclude_paths))};"
+            f"allow={allow};block={block}")
 
 
 def _stale_delta_git_repo(conn: sqlite3.Connection, src: Source) -> tuple[int, bool]:
@@ -1084,9 +1110,12 @@ def _stale_delta_git_repo(conn: sqlite3.Connection, src: Source) -> tuple[int, b
     """
     try:
         row = conn.execute(
-            "SELECT git_commit FROM source_meta WHERE source=?", (src.name,)).fetchone()
+            "SELECT git_commit, config_scope FROM source_meta WHERE source=?",
+            (src.name,)).fetchone()
         if row is None:
             return 0, True  # never indexed — always stale
+        if row[1] != _config_scope(src):
+            return 0, True  # the manifest moved; a pin freezes the commit, not the scope
         repo_path = src.path if src.path is not None else _managed_repo_path(src.name)
         if not repo_path.exists():
             return 0, True  # clone vanished

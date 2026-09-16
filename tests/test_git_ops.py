@@ -2,6 +2,7 @@ import os
 import subprocess
 
 import pytest
+from conftest import make_git_repo
 
 import rtfm_server as rtfm
 
@@ -1427,3 +1428,59 @@ def test_reindex_unreadable_clone_is_git_failed(home, tmp_path):
         assert "GIT_FAILED" in summary["error"]
     finally:
         dest.chmod(0o755)  # let pytest clean up the tmp dir
+
+
+# --- config_scope staleness (ADR 0014) ---
+
+def test_editing_a_git_repo_scope_makes_it_stale(home, tmp_path, git_branch):
+    remote, seed, branch = make_git_repo(tmp_path, git_branch)
+    conn = rtfm.get_index_db()
+    wide = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=branch,
+                       ext_blocklist=frozenset())
+    rtfm.reindex_source(conn, wide)
+    assert rtfm._stale_delta(conn, wide)[1] is False
+
+    narrow = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=branch,
+                         ext_allowlist=frozenset({".md"}))
+    assert rtfm._stale_delta(conn, narrow)[1] is True
+
+
+def test_a_scope_edit_beats_a_sha_pin(home, tmp_path, git_branch):
+    # A pin freezes the commit, not the manifest (ADR 0014). Compared before every other
+    # branch, including the pin short-circuit that returns early.
+    remote, seed, branch = make_git_repo(tmp_path, git_branch)
+    sha = subprocess.run(["git", "-C", str(seed), "rev-parse", "HEAD"],
+                         capture_output=True, text=True).stdout.strip()
+    conn = rtfm.get_index_db()
+    pinned = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=sha,
+                         path=seed, ext_blocklist=frozenset())
+    rtfm.reindex_source(conn, pinned)
+    assert rtfm._stale_delta(conn, pinned)[1] is False
+
+    rescoped = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=sha,
+                           path=seed, ext_allowlist=frozenset({".md"}))
+    assert rtfm._stale_delta(conn, rescoped)[1] is True
+
+
+def test_git_repo_scope_selects_only_the_matching_subset(home, tmp_path):
+    # Task 2 wired paths/ext_allowlist into select() for every source type, but no test
+    # anywhere had exercised them for git_repo specifically — this seeds a real clone with
+    # files in and out of scope and checks the index only holds the matches.
+    remote, seed, branch = make_git_repo(tmp_path, "main")
+    (seed / "docs").mkdir()
+    (seed / "docs" / "a.md").write_text("in scope by path and extension\n")
+    (seed / "docs" / "b.txt").write_text("wrong extension, right path\n")
+    (seed / "other").mkdir()
+    (seed / "other" / "c.md").write_text("right extension, wrong path\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "more files"],
+                   capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", branch],
+                   capture_output=True)
+
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=branch,
+                      paths=("docs",), ext_allowlist=frozenset({".md"}))
+    rtfm.reindex_source(conn, src)
+    rows = {r[0] for r in conn.execute("SELECT relpath FROM locations WHERE source='g'")}
+    assert rows == {"docs/a.md"}
