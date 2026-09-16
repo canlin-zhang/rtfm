@@ -580,7 +580,8 @@ class StepResult(NamedTuple):
     The happy/partial/empty classification is derivable from these two, so it is a
     function of a result rather than a field on it. `kept` means what this step passes
     to the next stage — what survived for most steps, but for extraction (step 3B), both
-    successful and failed results that must persist (ADR 0015)."""
+    successful and failed results that must persist (2026-09-16 four-step indexing
+    design doc)."""
     kept: list
     problems: list[Problem]
 
@@ -1028,7 +1029,27 @@ def _stale_delta(conn: sqlite3.Connection, src: Source) -> tuple[int, bool, bool
         return 0, False, False
     indexed = {r[0]: r[1] for r in conn.execute(
         "SELECT relpath, mtime FROM locations WHERE source=?", (src.name,))}
-    on_disk = {str(f.relative_to(src.path)): f.stat().st_mtime for f in iter_source_files(src)}
+    # access()/select() directly, not iter_source_files: step 1's problems (a position denied
+    # or a directory it could not enter) are needed here too. index_source's reconcile keeps
+    # an unreadable-but-present position's row on purpose (it has not vanished) — so on_disk
+    # must count it present as well, or set(indexed) != set(on_disk) forever and every search
+    # of that source runs a full reindex, unconditionally (RTFM_AUTO_REINDEX_MAX=0 does not
+    # help: `changed` stays 0 while `stale` never clears).
+    reachable = access(src)
+    on_disk = {str(f.relative_to(src.path)): f.stat().st_mtime
+               for f in select(reachable.kept, src.path)}
+    unreachable = {p.position for p in reachable.problems}
+
+    def _shadowed(rel: str) -> bool:
+        return any(rel == u or rel.startswith(u + "/") for u in unreachable)
+
+    for rel, mtime in indexed.items():
+        if rel in on_disk or not _shadowed(rel):
+            continue
+        try:
+            on_disk[rel] = (src.path / rel).stat().st_mtime
+        except OSError:
+            on_disk[rel] = mtime   # shadowed by an unreachable ancestor dir: can't re-read
     changed = sum(1 for rel, mtime in on_disk.items() if indexed.get(rel) != mtime)
     stale = changed > 0 or set(indexed) != set(on_disk)   # latter catches vanished files
     return changed, stale, False

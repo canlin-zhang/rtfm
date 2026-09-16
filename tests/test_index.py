@@ -683,3 +683,41 @@ def test_a_file_under_an_unreadable_directory_is_not_treated_as_vanished(
     # Still searchable: the row and its content were never GC'd, so search_index answers
     # from what was already indexed — it does not need to re-read the now-unreachable file.
     assert rtfm.search_index(conn, "keyword", source="s")
+
+
+def test_stale_delta_converges_after_an_unreadable_file(home, tmp_path):
+    # Regression: _stale_delta used to build on_disk from iter_source_files, which routes
+    # through access() and drops every position access() denies. The indexed row survives
+    # the reconcile (see test above) — deliberately — so set(indexed) != set(on_disk) was
+    # permanently true and the source read as stale on every single query, forever.
+    # chmod directly (not the `unopenable` fixture): its write_text step would rewrite this
+    # file's content — and so its mtime — which manufactures a real content change instead of
+    # the plain permission-only case this regression is about.
+    t = tmp_path / "c"
+    t.mkdir()
+    f = t / "a.md"
+    f.write_text("findable keyword")
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="s", type="dir", path=t)
+    rtfm.index_source(conn, src, t)
+    f.chmod(0o000)
+    try:
+        rtfm.index_source(conn, src, t)  # reconcile round: the row survives, still unreadable
+        assert rtfm._stale_delta(conn, src) == (0, False, False)
+    finally:
+        f.chmod(0o644)
+
+
+def test_stale_delta_converges_after_an_unreadable_directory(home, tmp_path, unopenable):
+    # Same convergence bug, but for a directory step 1 could not enter at all — the review
+    # reported this case looping identically to the single-file one above.
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "vault").mkdir()
+    (t / "vault" / "deep.md").write_text("findable keyword")
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="s", type="dir", path=t)
+    rtfm.index_source(conn, src, t)
+    unopenable(t / "vault", directory=True)
+    rtfm.index_source(conn, src, t)  # reconcile round: the row survives, still unreadable
+    assert rtfm._stale_delta(conn, src) == (0, False, False)
