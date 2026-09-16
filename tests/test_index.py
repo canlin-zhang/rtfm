@@ -518,3 +518,57 @@ def test_select_keeps_supported_and_drops_the_rest(tmp_path):
     paths = [t / "a.md", t / "b.png", t / "c.pdf", t / "d.rst"]
     got = rtfm.select(paths, t)
     assert sorted(p.name for p in got) == ["a.md", "c.pdf", "d.rst"]
+
+
+def test_access_returns_reachable_positions(tmp_path):
+    t = tmp_path / "c"
+    (t / "sub").mkdir(parents=True)
+    (t / "a.md").write_text("a")
+    (t / "sub" / "b.md").write_text("b")
+    s = rtfm.Source(name="s", type="dir", path=t)
+    got = rtfm.access(s)
+    assert sorted(p.name for p in got.kept) == ["a.md", "b.md"]
+    assert got.problems == []
+    assert rtfm._is_clean(got)
+
+
+def test_access_names_a_directory_it_cannot_enter(tmp_path, unopenable):
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "a.md").write_text("a")
+    unopenable(t / "vault", directory=True)
+    got = rtfm.access(rtfm.Source(name="s", type="dir", path=t))
+    # rglob swallows this inside scandir and yields nothing, which is indistinguishable from
+    # an empty directory — so the subtree was invisible to every code path.
+    assert rtfm._is_partial(got)
+    assert any("vault" in p.position for p in got.problems)
+
+
+def test_access_names_a_file_it_cannot_open(tmp_path, unopenable):
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "a.md").write_text("a")
+    unopenable(t / "locked.md")
+    got = rtfm.access(rtfm.Source(name="s", type="dir", path=t))
+    assert any(p.position == "locked.md" for p in got.problems)
+    assert [p.name for p in got.kept] == ["a.md"]
+
+
+def test_access_reports_unfiltered(tmp_path, unopenable):
+    # We cannot filter what we could not read — an inaccessible directory might hold exactly
+    # the files the user wants, and its contents are unknowable from outside (ADR 0015).
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "a.md").write_text("a")
+    unopenable(t / "image.png")
+    got = rtfm.access(rtfm.Source(name="s", type="dir", path=t))
+    assert any(p.position == "image.png" for p in got.problems)
+
+
+def test_iter_source_files_still_works_for_its_callers(tmp_path):
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "a.md").write_text("a")
+    (t / "b.png").write_text("b")
+    s = rtfm.Source(name="s", type="dir", path=t)
+    assert [p.name for p in rtfm.iter_source_files(s)] == ["a.md"]

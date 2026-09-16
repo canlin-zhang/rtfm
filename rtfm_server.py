@@ -1050,20 +1050,63 @@ def select(positions: list[Path], base: Path) -> list[Path]:
             if f.suffix.lower() == ".pdf" or f.suffix.lower() in TEXT_EXTS]
 
 
-def iter_source_files(src: Source) -> list[Path]:
-    """Supported files under a dir source, recursively, skipping hidden dirs."""
-    if src.path is None or not src.path.exists():
-        return []
-    out = []
-    for f in src.path.rglob("*"):
-        if not f.is_file():
-            continue
-        if f.suffix.lower() != ".pdf" and f.suffix.lower() not in TEXT_EXTS:
-            continue
-        if any(part.startswith(".") for part in f.relative_to(src.path).parts):
-            continue
-        out.append(f)
-    return sorted(out)
+def access(src: Source, root: Path | None = None) -> StepResult:
+    """Step 1 (ADR 0015): can rtfm get at these bytes?
+
+    Enumerates the source and scans what it finds for readability. `root` overrides `src.path`
+    for a managed git_repo, whose tree lives at its clone.
+
+    `os.walk` with an `onerror` callback, not `rglob`: pathlib catches OSError inside scandir
+    and yields nothing, which is indistinguishable from an empty directory, so a subtree this
+    process cannot enter would vanish with nothing raised and nothing to report.
+
+    Reports unfiltered — we cannot filter what we could not read. An inaccessible directory
+    might hold exactly the files the user wants, and its contents are unknowable from outside,
+    so letting step 2's intent suppress step 1's facts would leave a user writing a manifest
+    against a corpus rtfm silently truncated.
+
+    This scans; it does not read. `os.access` is a stat, and it may assert the negative but
+    only ever suggest the positive — mode bits denying you is conclusive, mode bits allowing
+    you is a hint, and step 3A owns the truth."""
+    base = root if root is not None else src.path
+    if base is None or not base.exists():
+        return StepResult([], [])
+    kept: list[Path] = []
+    problems: list[Problem] = []
+
+    def _denied(err: OSError) -> None:
+        if err.filename:
+            problems.append(Problem(
+                _rel(Path(err.filename), base), err.strerror or type(err).__name__))
+
+    for dirpath, dirnames, filenames in os.walk(base, onerror=_denied):
+        d = Path(dirpath)
+        dirnames[:] = [n for n in dirnames if not n.startswith(".")]
+        for name in filenames:
+            if name.startswith("."):
+                continue
+            f = d / name
+            if not f.is_file():
+                continue
+            if os.access(f, os.R_OK):
+                kept.append(f)
+            else:
+                problems.append(Problem(_rel(f, base), "Permission denied"))
+    return StepResult(sorted(kept), problems)
+
+
+def _rel(p: Path, base: Path) -> str:
+    """A position: the path as the user wrote it, relative to the source root."""
+    try:
+        return p.relative_to(base).as_posix()
+    except ValueError:
+        return str(p)
+
+
+def iter_source_files(src: Source, root: Path | None = None) -> list[Path]:
+    """Positions a source contributes, after selection. Callers that also need step 1's
+    problems call `access` and `select` directly."""
+    return select(access(src, root).kept, root if root is not None else src.path)
 
 # --- manifest ---------------------------------------------------------------
 
