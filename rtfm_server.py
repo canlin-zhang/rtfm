@@ -29,7 +29,34 @@ from mcp.server.fastmcp import FastMCP
 # --- config -----------------------------------------------------------------
 _log = logging.getLogger("rtfm")
 
-TEXT_EXTS = {".txt", ".md", ".mdx", ".rst", ".rest"}   # plain text → line locators (.html later)
+# The markup routine's extension set — a HANDLING concern (ATX/setext heading extraction
+# for doc-level ranking, ADR 0012), never a selection default. TEXT_EXTS did both jobs
+# under one name, which is how a .bzl file came to be selected and then extracted to zero
+# rows (ADR 0014).
+MARKUP_EXTS = frozenset({".txt", ".md", ".mdx", ".rst", ".rest"})
+
+# Step 2's default deny set, consulted in ext_blocklist mode only. Growing this list
+# removes garbage from an index; growing an allowlist would silently add content to every
+# source that never asked for it, which is why there is no default allowlist (ADR 0014).
+DEFAULT_EXT_BLOCKLIST = frozenset({
+    # images and assets
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".tiff", ".tif",
+    ".svg", ".svgz", ".psd", ".ai", ".eps",
+    # fonts
+    ".woff", ".woff2", ".ttf", ".otf", ".eot",
+    # archives
+    ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar", ".jar", ".whl",
+    # audio and video
+    ".mp3", ".wav", ".flac", ".ogg", ".m4a", ".mp4", ".avi", ".mov", ".mkv", ".webm",
+    # compiled and linkable artifacts
+    ".so", ".dylib", ".dll", ".exe", ".o", ".a", ".lib", ".pyc", ".pyo", ".class",
+    ".wasm", ".node",
+    # binary data and containers
+    ".db", ".sqlite", ".sqlite3", ".bin", ".dat", ".pickle", ".pkl", ".npy", ".npz",
+    ".parquet", ".avro", ".pb",
+    # office binaries (zip containers; never valid UTF-8)
+    ".doc", ".xls", ".ppt", ".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp",
+})
 CHUNK_LINES = 50
 SCHEMA_VERSION = 4                   # index DB is a cache; mismatch ⇒ drop & rebuild
 MAX_LOCATIONS = 5                    # default cap on locations listed per search hit
@@ -513,7 +540,7 @@ class _Routine(NamedTuple):
 
 ROUTINES: tuple[_Routine, ...] = (
     _Routine("pdf", frozenset({".pdf"}), _pdf_rows, _pdf_doc_signal),
-    _Routine("markup", frozenset(TEXT_EXTS), _text_rows, _text_doc_signal),
+    _Routine("markup", MARKUP_EXTS, _text_rows, _text_doc_signal),
 )
 
 # The fallback sits outside ROUTINES. Inside, it would match unconditionally, so placing
@@ -849,7 +876,7 @@ def index_source(conn: sqlite3.Connection, src: Source, root: Path) -> Indexed:
         "SELECT relpath, sha256, mtime FROM locations WHERE source=?", (source_name,))}
 
     reachable = access(src, root)
-    wanted = select(reachable.kept, root)
+    wanted = select(reachable.kept, root, src)
     read = read_bytes_for(wanted, root, existing)
 
     # Reconcile against what step 2 wanted. A position that failed 3A is still in `wanted`
@@ -921,12 +948,6 @@ def _as_summary(result: Indexed) -> dict:
             "errors": errors}
 
 
-def _index_files(conn: sqlite3.Connection, source_name: str, root: Path) -> dict:
-    """Kept so `_reindex_git_repo` is unchanged."""
-    result = index_source(conn, Source(name=source_name, type="dir", path=root), root)
-    return _as_summary(result)
-
-
 def _reindex_git_repo(conn: sqlite3.Connection, src: Source) -> dict:
     """Rebuild a git_repo source."""
     repo_path, error = _ensure_git_repo_ready(src)
@@ -965,7 +986,8 @@ def _reindex_git_repo(conn: sqlite3.Connection, src: Source) -> dict:
                 f"spelling in the manifest, or the ref may not be fetched into the "
                 f"clone yet (run 'git fetch --tags' there); list_sources reports "
                 f"'unknown'.")
-    summary.update(_index_files(conn, src.name, repo_path))
+    result = index_source(conn, src, repo_path)
+    summary.update(_as_summary(result))
     return summary
 
 
@@ -1032,7 +1054,7 @@ def _stale_delta(conn: sqlite3.Connection, src: Source) -> tuple[int, bool, bool
     # help: `changed` stays 0 while `stale` never clears).
     reachable = access(src)
     on_disk = {str(f.relative_to(src.path)): f.stat().st_mtime
-               for f in select(reachable.kept, src.path)}
+               for f in select(reachable.kept, src.path, src)}
     unreachable = {p.position for p in reachable.problems}
     for rel, mtime in indexed.items():
         if rel in on_disk or not _shadowed_by(rel, unreachable):
@@ -1102,21 +1124,40 @@ def _default_branch(path: Path) -> str:
         return "main"  # sensible fallback
 
 
-def select(positions: list[Path], base: Path) -> list[Path]:
+def select(positions: list[Path], base: Path, src: Source) -> list[Path]:
     """Step 2 (ADR 0015): out of what we can reach, what does the user want?
 
-    Returns a bare list, deliberately, not a StepResult. Steps 1, 3A and 3B ask
-    about the world, where "partial" is an observed fact worth reporting. This
-    step asks about intent, and rtfm has no standing to call 90% filtered a
-    partial success — either something survived or nothing did. With no
-    `problems` field there is nowhere to write a step-2 partial-filtering
-    warning, so nobody can.
+    Policy, not a handler table — the manifest's `paths` prefixes and its one extension
+    list (ADR 0014). No content is inspected, ever: a file outside the lists was never a
+    candidate, which is not an error and is reported nowhere.
 
-    PR2 replaces this hardcoded set with the manifest's ext_allowlist /
-    ext_blocklist (ADR 0014); the shape of the step does not change.
+    Returns a bare list, deliberately, not a StepResult. Steps 1, 3A and 3B ask about the
+    world, where "partial" is an observed fact worth reporting. This step asks about
+    intent, and rtfm has no standing to call 90% filtered a partial success — either
+    something survived or nothing did. With no `problems` field there is nowhere to write
+    a step-2 partial-filtering warning, so nobody can.
     """
+    if src.ext_allowlist is not None:
+        def wanted_ext(ext: str) -> bool:
+            return ext in src.ext_allowlist
+    else:
+        denied = DEFAULT_EXT_BLOCKLIST | (src.ext_blocklist or frozenset())
+
+        def wanted_ext(ext: str) -> bool:
+            return ext not in denied
+
+    def wanted_path(rel: str) -> bool:
+        if any(_under(rel, p) for p in src.exclude_paths):
+            return False
+        return not src.paths or any(_under(rel, p) for p in src.paths)
+
     return [f for f in positions
-            if f.suffix.lower() == ".pdf" or f.suffix.lower() in TEXT_EXTS]
+            if wanted_ext(f.suffix.lower()) and wanted_path(_rel(f, base))]
+
+
+def _under(rel: str, prefix: str) -> bool:
+    """Is `rel` at or beneath this directory prefix? "docs" must not match "docsets/x.md"."""
+    return rel == prefix or rel.startswith(prefix + "/")
 
 
 def access(src: Source, root: Path | None = None) -> StepResult:
@@ -1263,7 +1304,8 @@ def handle(conn: sqlite3.Connection, read_kept: list[tuple[Path, str, float]],
 def iter_source_files(src: Source, root: Path | None = None) -> list[Path]:
     """Positions a source contributes, after selection. Callers that also need step 1's
     problems call `access` and `select` directly."""
-    return select(access(src, root).kept, root if root is not None else src.path)
+    base = root if root is not None else src.path
+    return select(access(src, root).kept, base, src)
 
 # --- manifest ---------------------------------------------------------------
 

@@ -272,7 +272,8 @@ def test_extraction_works_from_worker_thread_with_event_loop(home, tmp_path):
 
 def test_reindex_indexes_rst_files(home, tmp_path):
     """`.rst` and `.rest` (reStructuredText) are plain text — they index like `.md`, with line
-    locators. Unlocks Sphinx doc trees. Fails before they're in TEXT_EXTS (files skipped)."""
+    locators. Unlocks Sphinx doc trees. Fails before they're selected by the manifest's
+    extension list (files skipped)."""
     d = tmp_path / "docs"
     d.mkdir()
     (d / "guide.rst").write_text(
@@ -291,8 +292,9 @@ def test_reindex_indexes_rst_files(home, tmp_path):
 def test_reindex_indexes_mdx_files(home, tmp_path):
     """`.mdx` is markdown carrying JSX components — the page format of Docusaurus- and
     Next.js-based doc sites, whose prose is otherwise unreachable. It indexes like `.md`,
-    with line locators; component tags are inert text. Fails before `.mdx` is in TEXT_EXTS
-    (the file is skipped, and the whole site indexes as nothing)."""
+    with line locators; component tags are inert text. Fails before `.mdx` is selected by
+    the manifest's extension list (the file is skipped, and the whole site indexes as
+    nothing)."""
     d = tmp_path / "docs"
     d.mkdir()
     (d / "guide.mdx").write_text(
@@ -501,13 +503,18 @@ def test_markup_routine_still_extracts_headings(tmp_path):
     assert title == "Title" and "Section" in headings
 
 
+def _src(tmp_path, **kw):
+    kw.setdefault("ext_blocklist", frozenset())
+    return rtfm.Source(name="s", type="dir", path=tmp_path, **kw)
+
+
 def test_select_returns_a_bare_list_not_a_step_result(tmp_path):
     # Step 2 asks about intent, where rtfm has no standing to call 90% filtered a partial
     # success. A bare list means there is nowhere to record a step-2 partial outcome.
     t = tmp_path / "c"
     t.mkdir()
     (t / "a.md").write_text("a")
-    got = rtfm.select([t / "a.md"], t)
+    got = rtfm.select([t / "a.md"], t, _src(t))
     assert isinstance(got, list)
     assert not isinstance(got, rtfm.StepResult)
 
@@ -516,8 +523,91 @@ def test_select_keeps_supported_and_drops_the_rest(tmp_path):
     t = tmp_path / "c"
     t.mkdir()
     paths = [t / "a.md", t / "b.png", t / "c.pdf", t / "d.rst"]
-    got = rtfm.select(paths, t)
+    got = rtfm.select(paths, t, _src(t))
     assert sorted(p.name for p in got) == ["a.md", "c.pdf", "d.rst"]
+
+
+def test_allowlist_selects_only_those_types(home, tmp_path):
+    for n in ("a.md", "b.bzl", "c.png", "d.txt"):
+        (tmp_path / n).write_text("x")
+    src = rtfm.Source(name="s", type="dir", path=tmp_path,
+                      ext_allowlist=frozenset({".md", ".bzl"}))
+    got = {p.name for p in rtfm.iter_source_files(src)}
+    assert got == {"a.md", "b.bzl"}
+
+
+def test_blocklist_selects_everything_but_the_union_with_rtfms_defaults(home, tmp_path):
+    for n in ("a.md", "b.py", "c.png", "d.log"):
+        (tmp_path / n).write_text("x")
+    src = _src(tmp_path, ext_blocklist=frozenset({".log"}))
+    got = {p.name for p in rtfm.iter_source_files(src)}
+    assert got == {"a.md", "b.py"}          # .png from the default set, .log from the user's
+
+
+def test_an_allowlist_never_consults_the_default_blocklist(home, tmp_path):
+    (tmp_path / "a.png").write_text("x")
+    src = rtfm.Source(name="s", type="dir", path=tmp_path,
+                      ext_allowlist=frozenset({".png"}))
+    assert [p.name for p in rtfm.iter_source_files(src)] == ["a.png"]
+
+
+def test_paths_scopes_to_a_prefix(home, tmp_path):
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "src").mkdir()
+    (tmp_path / "docs" / "a.md").write_text("x")
+    (tmp_path / "src" / "b.md").write_text("x")
+    src = _src(tmp_path, paths=("docs",))
+    assert [p.name for p in rtfm.iter_source_files(src)] == ["a.md"]
+
+
+def test_an_exclusion_beats_an_inclusion(home, tmp_path):
+    (tmp_path / "docs" / "versions").mkdir(parents=True)
+    (tmp_path / "docs" / "a.md").write_text("x")
+    (tmp_path / "docs" / "versions" / "old.md").write_text("x")
+    src = _src(tmp_path, paths=("docs",), exclude_paths=("docs/versions",))
+    assert [p.name for p in rtfm.iter_source_files(src)] == ["a.md"]
+
+
+def test_an_exclusion_alone_scopes_the_whole_tree_minus_that_prefix(home, tmp_path):
+    (tmp_path / "keep").mkdir()
+    (tmp_path / "drop").mkdir()
+    (tmp_path / "keep" / "a.md").write_text("x")
+    (tmp_path / "drop" / "b.md").write_text("x")
+    src = _src(tmp_path, exclude_paths=("drop",))
+    assert [p.name for p in rtfm.iter_source_files(src)] == ["a.md"]
+
+
+def test_a_prefix_does_not_match_a_partial_directory_name(home, tmp_path):
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docsets").mkdir()
+    (tmp_path / "docs" / "a.md").write_text("x")
+    (tmp_path / "docsets" / "b.md").write_text("x")
+    src = _src(tmp_path, paths=("docs",))
+    assert [p.name for p in rtfm.iter_source_files(src)] == ["a.md"]
+
+
+def test_markup_exts_is_not_a_selection_set(home, tmp_path):
+    # The whole point of ADR 0014: a .bzl file is selected by the manifest and handled by
+    # the plain-text routine. TEXT_EXTS deciding both is the defect being deleted.
+    assert not hasattr(rtfm, "TEXT_EXTS")
+    (tmp_path / "r.bzl").write_text("def cc_shared_library(shared_lib_name): pass")
+    src = rtfm.Source(name="s", type="dir", path=tmp_path,
+                      ext_allowlist=frozenset({".bzl"}))
+    conn = rtfm.get_index_db()
+    rtfm.index_source(conn, src, tmp_path)
+    assert rtfm.search_index(conn, "shared_lib_name", source="s")
+
+
+def test_a_paths_entry_that_escapes_the_source_root_selects_nothing(home, tmp_path):
+    # Task 1 rejects glob characters in `paths` but not an absolute path or a `..` segment
+    # (its own tests normalize "/b/" to "b"). Confirmed here rather than assumed: the prefix
+    # match is against a relpath _rel produces relative to `base`, which can never render an
+    # absolute path or climb above the source root, so neither entry can match anything.
+    (tmp_path / "a.md").write_text("x")
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "etc" / "passwd.md").write_text("x")
+    assert [p.name for p in rtfm.iter_source_files(_src(tmp_path, paths=("..",)))] == []
+    assert [p.name for p in rtfm.iter_source_files(_src(tmp_path, paths=("/etc",)))] == []
 
 
 def test_access_returns_reachable_positions(tmp_path):
