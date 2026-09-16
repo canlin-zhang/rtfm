@@ -52,6 +52,13 @@ per sync method (git fast-forward for Repo, re-fetch for Web, no-op for Dir). St
 bounded: fires at most once per window, not once per query.
 _Avoid_: pull (git-specific), sync (implies bidirectional), update
 
+**Freshness**:
+Whether the index still matches a Source's current content — the index-vs-Source comparison,
+as opposed to Refresh, which is the Source-vs-upstream one. Decided per source type: mtime
+comparison for Dir, commit comparison for Repo.
+_Avoid_: bare "stale"/"staleness" for the comparison itself — it reads as either one;
+ADR 0003's "staleness window" is Refresh's cadence and keeps that name.
+
 ### Other
 
 **Corpus home**:

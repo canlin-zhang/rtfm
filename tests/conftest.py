@@ -6,12 +6,12 @@ import rtfm_server as rtfm
 
 
 @pytest.fixture(autouse=True)
-def _clear_staleness_cache():
-    """The git_repo staleness memo is module-level and TTL'd — a verdict cached by
+def _clear_freshness_cache():
+    """The git_repo freshness memo is module-level and TTL'd — a verdict cached by
     one test must not leak into the next (or the same test's later assertions)."""
-    rtfm._staleness_cache.clear()
+    rtfm._freshness_cache.clear()
     yield
-    rtfm._staleness_cache.clear()
+    rtfm._freshness_cache.clear()
 
 
 @pytest.fixture(autouse=True)

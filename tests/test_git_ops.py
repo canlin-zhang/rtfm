@@ -1204,7 +1204,7 @@ def test_reindex_purges_manifest_absent_sources(home, tmp_path):
 # --- round-3 review batch: memo semantics, purge guard, final gaps ---
 
 def test_staleness_memo_bounds_checks_and_invalidates(home, tmp_path, monkeypatch):
-    """The verdict memo: two _stale_delta calls within the TTL run one check (one
+    """The verdict memo: two _freshness calls within the TTL run one check (one
     fetch for managed); an explicit reindex invalidates the entry."""
     remote = tmp_path / "remote.git"
     subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
@@ -1228,13 +1228,10 @@ def test_staleness_memo_bounds_checks_and_invalidates(home, tmp_path, monkeypatc
         return real_fetch(path, timeout=timeout)
 
     monkeypatch.setattr(rtfm, "_git_fetch", counting_fetch)
-    changed, stale, cached = rtfm._stale_delta(conn, src)
-    assert (changed, stale, cached) == (0, False, False) and len(calls) == 1
-    changed, stale, cached = rtfm._stale_delta(conn, src)
-    assert cached is True and len(calls) == 1  # memoized — no second fetch
+    assert rtfm._freshness(conn, src)[:3] == (0, False, False) and len(calls) == 1
+    assert rtfm._freshness(conn, src).cached is True and len(calls) == 1  # memoized
     rtfm.reindex_source(conn, src)             # invalidates the entry (its own fetch +1)
-    changed, stale, cached = rtfm._stale_delta(conn, src)
-    assert cached is False and len(calls) == 3  # fresh check again (1 + 1 + 1)
+    assert rtfm._freshness(conn, src).cached is False and len(calls) == 3  # 1 + 1 + 1
 
 
 def test_search_does_not_reattempt_broken_source_within_ttl(home, tmp_path, monkeypatch):
@@ -1438,11 +1435,11 @@ def test_editing_a_git_repo_scope_makes_it_stale(home, tmp_path, git_branch):
     wide = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=branch,
                        ext_blocklist=frozenset())
     rtfm.reindex_source(conn, wide)
-    assert rtfm._stale_delta(conn, wide)[1] is False
+    assert rtfm._freshness(conn, wide)[1] is False
 
     narrow = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=branch,
                          ext_allowlist=frozenset({".md"}))
-    assert rtfm._stale_delta(conn, narrow)[1] is True
+    assert rtfm._freshness(conn, narrow)[1] is True
 
 
 def test_editing_a_git_repo_scope_by_exclude_paths_alone_makes_it_stale(
@@ -1456,12 +1453,12 @@ def test_editing_a_git_repo_scope_by_exclude_paths_alone_makes_it_stale(
     unscoped = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=branch,
                            ext_blocklist=frozenset())
     rtfm.reindex_source(conn, unscoped)
-    assert rtfm._stale_delta(conn, unscoped)[1] is False
+    assert rtfm._freshness(conn, unscoped)[1] is False
 
     excluded = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=branch,
                            exclude_paths=("nope",), ext_blocklist=frozenset())
     assert rtfm._config_scope(unscoped) != rtfm._config_scope(excluded)
-    assert rtfm._stale_delta(conn, excluded)[1] is True
+    assert rtfm._freshness(conn, excluded)[1] is True
 
 
 def test_a_scope_edit_beats_a_sha_pin(home, tmp_path, git_branch):
@@ -1474,11 +1471,11 @@ def test_a_scope_edit_beats_a_sha_pin(home, tmp_path, git_branch):
     pinned = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=sha,
                          path=seed, ext_blocklist=frozenset())
     rtfm.reindex_source(conn, pinned)
-    assert rtfm._stale_delta(conn, pinned)[1] is False
+    assert rtfm._freshness(conn, pinned)[1] is False
 
     rescoped = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=sha,
                            path=seed, ext_allowlist=frozenset({".md"}))
-    assert rtfm._stale_delta(conn, rescoped)[1] is True
+    assert rtfm._freshness(conn, rescoped)[1] is True
 
 
 def test_git_repo_scope_selects_only_the_matching_subset(home, tmp_path):
