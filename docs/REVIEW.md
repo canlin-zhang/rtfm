@@ -74,6 +74,17 @@ own tail. Say so out loud, stop, and ship what was already good.
   different outputs and a reviewer given only "find problems" returns only
   problems.
 
+## Dispatching a review round
+
+Dispatch subagents that invoke the `pr-review-toolkit` skill, and let them fan
+out subagents of their own. One reviewer per lens — correctness, tests, silent
+failures, comment accuracy, type design — reading the same diff, is how a round
+covers ground a single pass misses.
+
+Fan-out is not a substitute for the rules above. More reviewers find more
+findings; they do not decide which ones block. A round that ends without a
+merge verdict has produced material, not a decision.
+
 ## Deciding on a finding
 
 | Finding | Action |
