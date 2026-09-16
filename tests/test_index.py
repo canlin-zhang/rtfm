@@ -658,3 +658,28 @@ def test_an_unreadable_file_is_not_treated_as_vanished(home, tmp_path, unopenabl
         assert rows == {"a.md"}
     finally:
         f.chmod(0o644)
+
+
+def test_a_file_under_an_unreadable_directory_is_not_treated_as_vanished(
+        home, tmp_path, unopenable):
+    # Path.is_file() swallows the OSError from stat'ing a path under a directory it cannot
+    # enter and reports False — indistinguishable from "gone" unless step 1's own report of
+    # the unreachable directory is consulted too. The file is untouched; rtfm just can't see
+    # it right now.
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "vault").mkdir()
+    (t / "vault" / "deep.md").write_text("findable keyword")
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="s", type="dir", path=t)
+    rtfm.index_source(conn, src, t)
+    assert rtfm.search_index(conn, "keyword", source="s")
+    unopenable(t / "vault", directory=True)
+    got = rtfm.index_source(conn, src, t)
+    assert got.cache.purged == 0
+    rows = {r[0] for r in conn.execute(
+        "SELECT relpath FROM locations WHERE source='s'")}
+    assert rows == {"vault/deep.md"}
+    # Still searchable: the row and its content were never GC'd, so search_index answers
+    # from what was already indexed — it does not need to re-read the now-unreachable file.
+    assert rtfm.search_index(conn, "keyword", source="s")

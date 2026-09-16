@@ -823,10 +823,19 @@ def index_source(conn: sqlite3.Connection, src: Source, root: Path) -> Indexed:
     # wanted_rels alone. A position that failed step 1 never reaches `wanted` at all — access()
     # excludes what it could not open — so for anything wanted_rels does not cover, fall back to
     # asking the filesystem directly: a relpath that still names a file (however unreadable) has
-    # not vanished, only a relpath with nothing there at all has.
+    # not vanished. Nor has one sitting under a directory step 1 could not enter — Path.is_file()
+    # swallows that OSError and reports False, which would read as vanished even though the file
+    # is untouched; unreachable_dirs catches that case. Only a relpath with nothing there at all,
+    # and not shadowed by an unreachable ancestor, has actually vanished.
     wanted_rels = {_rel(f, root) for f in wanted}
+    unreachable_dirs = {p.position for p in reachable.problems}
+
+    def _shadowed(rel: str) -> bool:
+        return any(rel == u or rel.startswith(u + "/") for u in unreachable_dirs)
+
     vanished = {rel for rel in existing
-                if rel not in wanted_rels and not (root / rel).is_file()}
+                if rel not in wanted_rels and not (root / rel).is_file()
+                and not _shadowed(rel)}
     for rel in vanished:
         conn.execute("DELETE FROM locations WHERE source=? AND relpath=?", (source_name, rel))
     for f, sha, mtime in read.kept:
