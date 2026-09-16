@@ -446,3 +446,311 @@ def test_default_branch_parses_remote_head(home, tmp_path, git_branch):
     dest = tmp_path / "dest"
     rtfm._git_clone(str(remote), branch, dest, timeout=30)
     assert rtfm._default_branch(dest) == branch
+
+
+def test_step_result_classifies_its_own_outcome():
+    clean = rtfm.StepResult(kept=[1, 2], problems=[])
+    partial = rtfm.StepResult(
+        kept=[1], problems=[rtfm.Problem("a.md", "nope")]
+    )
+    empty = rtfm.StepResult(
+        kept=[], problems=[rtfm.Problem("a.md", "nope")]
+    )
+    assert (
+        rtfm._is_clean(clean),
+        rtfm._is_partial(clean),
+        rtfm._is_empty(clean),
+    ) == (True, False, False)
+    assert (
+        rtfm._is_clean(partial),
+        rtfm._is_partial(partial),
+        rtfm._is_empty(partial),
+    ) == (False, True, False)
+    assert (
+        rtfm._is_clean(empty),
+        rtfm._is_partial(empty),
+        rtfm._is_empty(empty),
+    ) == (False, False, True)
+
+
+def test_a_problem_names_a_position_not_a_hash():
+    p = rtfm.Problem("docs/a.md", "Permission denied")
+    assert p.position == "docs/a.md"
+    assert p._fields == ("position", "reason")
+
+
+def test_one_registry_drives_body_and_signal(tmp_path):
+    # These dispatched independently and could disagree about a file — a .bzl was
+    # selected by one and ignored by the other, so it indexed to zero rows.
+    assert rtfm._routine_for(".pdf").name == "pdf"
+    assert rtfm._routine_for(".md").name == "markup"
+    assert rtfm._routine_for(".bzl").name == "text"
+    assert rtfm._routine_for("").name == "text"
+
+
+def test_the_fallback_is_not_a_member_of_the_ordered_registry():
+    # Inside the tuple it would match unconditionally, shadowing anything after it.
+    assert rtfm.DEFAULT_ROUTINE not in rtfm.ROUTINES
+    assert all(r.exts for r in rtfm.ROUTINES)
+
+
+def test_markup_routine_still_extracts_headings(tmp_path):
+    f = tmp_path / "x.md"
+    f.write_text("# Title\n\nbody text\n\n## Section\n")
+    title, headings = rtfm._doc_signal_for_file(f)
+    assert title == "Title" and "Section" in headings
+
+
+def test_select_returns_a_bare_list_not_a_step_result(tmp_path):
+    # Step 2 asks about intent, where rtfm has no standing to call 90% filtered a partial
+    # success. A bare list means there is nowhere to record a step-2 partial outcome.
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "a.md").write_text("a")
+    got = rtfm.select([t / "a.md"], t)
+    assert isinstance(got, list)
+    assert not isinstance(got, rtfm.StepResult)
+
+
+def test_select_keeps_supported_and_drops_the_rest(tmp_path):
+    t = tmp_path / "c"
+    t.mkdir()
+    paths = [t / "a.md", t / "b.png", t / "c.pdf", t / "d.rst"]
+    got = rtfm.select(paths, t)
+    assert sorted(p.name for p in got) == ["a.md", "c.pdf", "d.rst"]
+
+
+def test_access_returns_reachable_positions(tmp_path):
+    t = tmp_path / "c"
+    (t / "sub").mkdir(parents=True)
+    (t / "a.md").write_text("a")
+    (t / "sub" / "b.md").write_text("b")
+    s = rtfm.Source(name="s", type="dir", path=t)
+    got = rtfm.access(s)
+    assert sorted(p.name for p in got.kept) == ["a.md", "b.md"]
+    assert got.problems == []
+    assert rtfm._is_clean(got)
+
+
+def test_access_names_a_directory_it_cannot_enter(tmp_path, unopenable):
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "a.md").write_text("a")
+    unopenable(t / "vault", directory=True)
+    got = rtfm.access(rtfm.Source(name="s", type="dir", path=t))
+    # rglob swallows this inside scandir and yields nothing, which is indistinguishable from
+    # an empty directory — so the subtree was invisible to every code path.
+    assert rtfm._is_partial(got)
+    assert any("vault" in p.position for p in got.problems)
+
+
+def test_access_names_a_file_it_cannot_open(tmp_path, unopenable):
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "a.md").write_text("a")
+    unopenable(t / "locked.md")
+    got = rtfm.access(rtfm.Source(name="s", type="dir", path=t))
+    assert any(p.position == "locked.md" for p in got.problems)
+    assert [p.name for p in got.kept] == ["a.md"]
+
+
+def test_access_reports_unfiltered(tmp_path, unopenable):
+    # We cannot filter what we could not read — an inaccessible directory might hold exactly
+    # the files the user wants, and its contents are unknowable from outside (ADR 0015).
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "a.md").write_text("a")
+    unopenable(t / "image.png")
+    got = rtfm.access(rtfm.Source(name="s", type="dir", path=t))
+    assert any(p.position == "image.png" for p in got.problems)
+
+
+def test_iter_source_files_still_works_for_its_callers(tmp_path):
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "a.md").write_text("a")
+    (t / "b.png").write_text("b")
+    s = rtfm.Source(name="s", type="dir", path=t)
+    assert [p.name for p in rtfm.iter_source_files(s)] == ["a.md"]
+
+
+def test_read_hashes_what_it_can(tmp_path):
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "a.md").write_text("alpha")
+    got = rtfm.read_bytes_for([t / "a.md"], t, {})
+    assert len(got.kept) == 1
+    path, sha, mtime = got.kept[0]
+    assert path.name == "a.md" and len(sha) == 64
+    assert got.problems == []
+
+
+def test_read_names_a_file_whose_bytes_it_cannot_get(tmp_path, unopenable):
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "a.md").write_text("alpha")
+    unopenable(t / "locked.md")
+    got = rtfm.read_bytes_for([t / "a.md", t / "locked.md"], t, {})
+    # One unreadable file used to raise straight out of the reindex.
+    assert [p.position for p in got.problems] == ["locked.md"]
+    assert len(got.kept) == 1
+
+
+def test_read_reuses_a_cached_hash(tmp_path):
+    t = tmp_path / "c"
+    t.mkdir()
+    f = t / "a.md"
+    f.write_text("alpha")
+    mtime = f.stat().st_mtime
+    got = rtfm.read_bytes_for([f], t, {"a.md": ("cafebabe", mtime)})
+    assert got.kept[0][1] == "cafebabe"      # no re-hash when the key matches
+
+
+def test_handle_fans_a_failed_content_out_to_every_position(home, tmp_path):
+    # Three byte-identical corrupt files are one extraction and three broken files. Reporting
+    # the sha would make every consumer convert contents into files — the conversion that
+    # printed a content count as "N file(s)".
+    t = tmp_path / "c"
+    t.mkdir()
+    bad = b"%PDF-1.4 not really a pdf" + bytes(range(256))
+    for n in ("v1.pdf", "v2.pdf", "v3.pdf"):
+        (t / n).write_bytes(bad)
+    conn = rtfm.get_index_db()
+    read = rtfm.read_bytes_for([t / "v1.pdf", t / "v2.pdf", t / "v3.pdf"], t, {})
+    sha = read.kept[0][1]
+    got = rtfm.handle(conn, read.kept, {sha}, t)
+    assert sorted(p.position for p in got.problems) == ["v1.pdf", "v2.pdf", "v3.pdf"]
+    assert all("pdf" not in p.reason.lower() or "utf-8" not in p.reason.lower()
+               for p in got.problems)          # reported in the handler's own terms
+
+
+def test_index_source_returns_each_step_s_result(home, tmp_path):
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "a.md").write_text("alpha keyword")
+    conn = rtfm.get_index_db()
+    got = rtfm.index_source(conn, rtfm.Source(name="s", type="dir", path=t), t)
+    assert isinstance(got, rtfm.Indexed)
+    assert [p.name for p in got.reachable.kept] == ["a.md"]
+    assert [p.name for p in got.wanted] == ["a.md"]
+    assert len(got.read.kept) == 1
+    assert got.cache.unique_contents == 1
+
+
+def test_an_unreadable_file_is_not_treated_as_vanished(home, tmp_path, unopenable):
+    # Failing a step is not the same as ceasing to exist. Reconciling against what SUCCEEDED
+    # would delete the row and GC the content — losing indexed content because a file's
+    # permissions changed.
+    t = tmp_path / "c"
+    t.mkdir()
+    f = t / "a.md"
+    f.write_text("findable keyword")
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="s", type="dir", path=t)
+    rtfm.index_source(conn, src, t)
+    assert rtfm.search_index(conn, "keyword", source="s")
+    f.chmod(0o000)
+    try:
+        got = rtfm.index_source(conn, src, t)
+        assert got.cache.purged == 0
+        rows = {r[0] for r in conn.execute(
+            "SELECT relpath FROM locations WHERE source='s'")}
+        assert rows == {"a.md"}
+    finally:
+        f.chmod(0o644)
+
+
+def test_a_file_under_an_unreadable_directory_is_not_treated_as_vanished(
+        home, tmp_path, unopenable):
+    # Asking the filesystem about a path under a directory it cannot enter gets no usable
+    # answer — Path.is_file() raises EACCES before 3.14 and reports a bare False from 3.14
+    # on, which is indistinguishable from "gone". Only step 1's own report of the
+    # unreachable directory settles it. The file is untouched; rtfm just can't see it now.
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "vault").mkdir()
+    (t / "vault" / "deep.md").write_text("findable keyword")
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="s", type="dir", path=t)
+    rtfm.index_source(conn, src, t)
+    assert rtfm.search_index(conn, "keyword", source="s")
+    unopenable(t / "vault", directory=True)
+    got = rtfm.index_source(conn, src, t)
+    assert got.cache.purged == 0
+    rows = {r[0] for r in conn.execute(
+        "SELECT relpath FROM locations WHERE source='s'")}
+    assert rows == {"vault/deep.md"}
+    # Still searchable: the row and its content were never GC'd, so search_index answers
+    # from what was already indexed — it does not need to re-read the now-unreachable file.
+    assert rtfm.search_index(conn, "keyword", source="s")
+
+
+def test_stale_delta_converges_after_an_unreadable_file(home, tmp_path):
+    # Regression: _stale_delta used to build on_disk from iter_source_files, which routes
+    # through access() and drops every position access() denies. The indexed row survives
+    # the reconcile (see test above) — deliberately — so set(indexed) != set(on_disk) was
+    # permanently true and the source read as stale on every single query, forever.
+    # chmod directly (not the `unopenable` fixture): its write_text step would rewrite this
+    # file's content — and so its mtime — which manufactures a real content change instead of
+    # the plain permission-only case this regression is about.
+    t = tmp_path / "c"
+    t.mkdir()
+    f = t / "a.md"
+    f.write_text("findable keyword")
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="s", type="dir", path=t)
+    rtfm.index_source(conn, src, t)
+    f.chmod(0o000)
+    try:
+        rtfm.index_source(conn, src, t)  # reconcile round: the row survives, still unreadable
+        assert rtfm._stale_delta(conn, src) == (0, False, False)
+    finally:
+        f.chmod(0o644)
+
+
+def test_stale_delta_converges_after_an_unreadable_directory(home, tmp_path, unopenable):
+    # Same convergence bug, but for a directory step 1 could not enter at all — the review
+    # reported this case looping identically to the single-file one above.
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "vault").mkdir()
+    (t / "vault" / "deep.md").write_text("findable keyword")
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="s", type="dir", path=t)
+    rtfm.index_source(conn, src, t)
+    unopenable(t / "vault", directory=True)
+    rtfm.index_source(conn, src, t)  # reconcile round: the row survives, still unreadable
+    assert rtfm._stale_delta(conn, src) == (0, False, False)
+
+
+def test_a_denied_source_root_does_not_purge_the_whole_source(home, tmp_path, unopenable):
+    # The root is the one position _rel renders as "." — no relpath equals it or starts with
+    # "./", so a prefix test alone never shadows anything and every row of the source reads as
+    # vanished at once, content GC'd, while every file is still sitting on disk untouched.
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "a.md").write_text("findable keyword")
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="s", type="dir", path=t)
+    rtfm.index_source(conn, src, t)
+    unopenable(t, directory=True)
+    got = rtfm.index_source(conn, src, t)
+    assert got.reachable.problems == [rtfm.Problem(position=".", reason="Permission denied")]
+    assert got.cache.purged == 0
+    rows = {r[0] for r in conn.execute("SELECT relpath FROM locations WHERE source='s'")}
+    assert rows == {"a.md"}
+    assert rtfm.search_index(conn, "keyword", source="s")
+
+
+def test_stale_delta_converges_after_a_denied_source_root(home, tmp_path, unopenable):
+    # Same root blind spot on the freshness side: nothing shadowed means the surviving rows
+    # never rejoin on_disk, so the source reads stale on every query and never converges.
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "a.md").write_text("findable keyword")
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="s", type="dir", path=t)
+    rtfm.index_source(conn, src, t)
+    unopenable(t, directory=True)
+    rtfm.index_source(conn, src, t)  # reconcile round: the row survives, still unreachable
+    assert rtfm._stale_delta(conn, src) == (0, False, False)
