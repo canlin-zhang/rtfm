@@ -1,7 +1,79 @@
 # tests/test_manifest.py
+import pathlib
 import subprocess
 
 import rtfm_server as rtfm
+
+# --- scope (ADR 0014): paths and extension lists ---
+
+
+def test_the_example_manifest_documents_all_four_keys():
+    text = pathlib.Path("manifest.example.toml").read_text()
+    for key in ("paths", "ext_allowlist", "ext_blocklist"):
+        assert key in text, key
+
+def test_paths_split_into_include_and_exclude(home, tmp_path):
+    src = rtfm._source_from_table({
+        "name": "s", "type": "dir", "path": str(tmp_path),
+        "paths": ["docs", "!docs/versions"], "ext_blocklist": [],
+    })
+    assert src.paths == ("docs",)
+    assert src.exclude_paths == ("docs/versions",)
+
+
+def test_paths_are_normalized_and_sorted(home, tmp_path):
+    src = rtfm._source_from_table({
+        "name": "s", "type": "dir", "path": str(tmp_path),
+        "paths": ["/b/", "./a", "b"], "ext_blocklist": [],
+    })
+    assert src.paths == ("a", "b")          # deduped, stripped, sorted
+
+
+def test_extensions_are_normalized(home, tmp_path):
+    src = rtfm._source_from_table({
+        "name": "s", "type": "dir", "path": str(tmp_path),
+        "ext_allowlist": ["MD", ".PDF", "bzl"],
+    })
+    assert src.ext_allowlist == frozenset({".md", ".pdf", ".bzl"})
+    assert src.ext_blocklist is None
+
+
+def test_declaring_both_extension_lists_is_refused(home, tmp_path):
+    s = rtfm._source_from_table({
+        "name": "s", "type": "dir", "path": str(tmp_path),
+        "ext_allowlist": [".md"], "ext_blocklist": [".png"],
+    })
+    warn = rtfm._validate_source(s)
+    assert warn is not None
+    assert "ext_allowlist" in warn and "ext_blocklist" in warn
+
+
+def test_declaring_neither_extension_list_is_refused(home, tmp_path):
+    s = rtfm._source_from_table({"name": "s", "type": "dir", "path": str(tmp_path)})
+    warn = rtfm._validate_source(s)
+    assert warn is not None
+    assert "ext_allowlist" in warn and "ext_blocklist" in warn
+
+
+def test_a_glob_in_paths_is_a_config_error(home, tmp_path):
+    for bad in ("docs/**", "docs/*.md", "docs/v?", "docs/[abc]"):
+        s = rtfm._source_from_table({
+            "name": "s", "type": "dir", "path": str(tmp_path),
+            "paths": [bad], "ext_blocklist": [],
+        })
+        warn = rtfm._validate_source(s)
+        assert warn is not None, bad
+        assert "prefix" in warn.lower(), bad
+
+
+def test_a_source_declaring_neither_list_is_dropped_not_kept(home, tmp_path):
+    (tmp_path / "a.md").write_text("x")
+    rtfm.manifest_path().parent.mkdir(parents=True, exist_ok=True)
+    rtfm.manifest_path().write_text(
+        f'[[source]]\nname = "s"\ntype = "dir"\npath = "{tmp_path}"\n')
+    sources, warnings = rtfm.load_manifest()
+    assert [s.name for s in sources] == []
+    assert any("ext_allowlist" in w for w in warnings)
 
 
 def test_bootstrap_creates_default(home):
@@ -18,8 +90,8 @@ def test_bootstrap_creates_default(home):
 def test_load_explicit_sources(home):
     default = rtfm.default_source_dir()
     (home / "manifest.toml").write_text(
-        f'[[source]]\nname="default"\ntype="dir"\npath="{default}"\nmutable=true\n'
-        '[[source]]\nname="vendor"\ntype="dir"\npath="/opt/vendor/doc"\n'
+        f'[[source]]\nname="default"\ntype="dir"\npath="{default}"\nmutable=true\next_blocklist=[]\n'
+        '[[source]]\nname="vendor"\ntype="dir"\npath="/opt/vendor/doc"\next_blocklist=[]\n'
     )
     sources, warnings = rtfm.load_manifest()
     assert [s.name for s in sources] == ["default", "vendor"]
@@ -28,8 +100,8 @@ def test_load_explicit_sources(home):
 
 def test_duplicate_names_first_wins_with_warning(home):
     (home / "manifest.toml").write_text(
-        '[[source]]\nname="pa"\ntype="dir"\npath="/opt/a"\n'
-        '[[source]]\nname="pa"\ntype="dir"\npath="/opt/b"\n'
+        '[[source]]\nname="pa"\ntype="dir"\npath="/opt/a"\next_blocklist=[]\n'
+        '[[source]]\nname="pa"\ntype="dir"\npath="/opt/b"\next_blocklist=[]\n'
     )
     sources, warnings = rtfm.load_manifest()
     assert [s.name for s in sources] == ["pa"]    # second refused
@@ -39,7 +111,7 @@ def test_duplicate_names_first_wins_with_warning(home):
 
 def test_name_derived_from_path_when_omitted(home):
     (home / "manifest.toml").write_text(
-        '[[source]]\ntype="dir"\npath="/opt/acme-docs-2025.06"\n'
+        '[[source]]\ntype="dir"\npath="/opt/acme-docs-2025.06"\next_blocklist=[]\n'
     )
     sources, warnings = rtfm.load_manifest()
     assert sources[0].name == "acme-docs-2025.06"
@@ -62,8 +134,8 @@ def test_missing_path_source_warns_but_keeps_it_and_others(home, tmp_path):
     good = tmp_path / "good"
     good.mkdir()
     (home / "manifest.toml").write_text(
-        f'[[source]]\nname="good"\ntype="dir"\npath="{good}"\n'
-        '[[source]]\nname="missing"\ntype="dir"\npath="/no/such/place"\n'
+        f'[[source]]\nname="good"\ntype="dir"\npath="{good}"\next_blocklist=[]\n'
+        '[[source]]\nname="missing"\ntype="dir"\npath="/no/such/place"\next_blocklist=[]\n'
     )
     sources, warnings = rtfm.load_manifest()
     assert {s.name for s in sources} == {"good", "missing"}
@@ -72,7 +144,7 @@ def test_missing_path_source_warns_but_keeps_it_and_others(home, tmp_path):
 
 def test_dir_source_without_path_is_dropped_with_warning(home):
     """A dir source with no `path` at all is unusable, so it is dropped — but loudly."""
-    (home / "manifest.toml").write_text('[[source]]\nname="nopath"\ntype="dir"\n')
+    (home / "manifest.toml").write_text('[[source]]\nname="nopath"\ntype="dir"\next_blocklist=[]\n')
     sources, warnings = rtfm.load_manifest()
     assert all(s.name != "nopath" for s in sources)
     assert any("nopath" in w for w in warnings)
@@ -83,7 +155,7 @@ def test_path_not_a_directory_warns(home, tmp_path):
     f = tmp_path / "afile.md"
     f.write_text("hi\n")
     (home / "manifest.toml").write_text(
-        f'[[source]]\nname="filey"\ntype="dir"\npath="{f}"\n'
+        f'[[source]]\nname="filey"\ntype="dir"\npath="{f}"\next_blocklist=[]\n'
     )
     sources, warnings = rtfm.load_manifest()
     assert any("filey" in w for w in warnings)
@@ -96,9 +168,9 @@ def test_search_tolerates_invalid_source(home, tmp_path):
     good.mkdir()
     (good / "g.md").write_text("the widget protocol defines flits\n")
     (home / "manifest.toml").write_text(
-        f'[[source]]\nname="default"\ntype="dir"\npath="{rtfm.default_source_dir()}"\nmutable=true\n'
-        f'[[source]]\nname="good"\ntype="dir"\npath="{good}"\n'
-        '[[source]]\nname="broken"\ntype="dir"\npath="/no/such/place"\n'
+        f'[[source]]\nname="default"\ntype="dir"\npath="{rtfm.default_source_dir()}"\nmutable=true\next_blocklist=[]\n'
+        f'[[source]]\nname="good"\ntype="dir"\npath="{good}"\next_blocklist=[]\n'
+        '[[source]]\nname="broken"\ntype="dir"\npath="/no/such/place"\next_blocklist=[]\n'
     )
     out = rtfm.search(query="widget protocol")
     assert any("widget protocol" in h["snippet"] for h in out["results"])
@@ -110,7 +182,7 @@ def test_search_tolerates_invalid_source(home, tmp_path):
 def test_git_repo_source_parses_url_and_ref(home):
     (home / "manifest.toml").write_text(
         '[[source]]\nname="specs"\ntype="git_repo"\n'
-        'url="https://example.com/org/specs.git"\nref="dev"\n'
+        'url="https://example.com/org/specs.git"\nref="dev"\next_blocklist=[]\n'
     )
     sources, warnings = rtfm.load_manifest()
     assert [s.name for s in sources] == ["specs"]
@@ -127,7 +199,7 @@ def test_git_repo_source_with_path_is_linked(home, tmp_path):
     repo.mkdir()
     (home / "manifest.toml").write_text(
         f'[[source]]\nname="specs"\ntype="git_repo"\n'
-        f'url="https://example.com/repo.git"\nref="main"\npath="{repo}"\n'
+        f'url="https://example.com/repo.git"\nref="main"\npath="{repo}"\next_blocklist=[]\n'
     )
     sources, warnings = rtfm.load_manifest()
     s = sources[0]
@@ -136,7 +208,7 @@ def test_git_repo_source_with_path_is_linked(home, tmp_path):
 
 def test_git_repo_without_url_warns(home):
     (home / "manifest.toml").write_text(
-        '[[source]]\nname="specs"\ntype="git_repo"\nref="main"\n'
+        '[[source]]\nname="specs"\ntype="git_repo"\nref="main"\next_blocklist=[]\n'
     )
     sources, warnings = rtfm.load_manifest()
     assert any("url" in w.lower() and "specs" in w for w in warnings)
@@ -146,7 +218,7 @@ def test_git_repo_ref_defaults(home):
     """When ref is omitted, it is None — resolved to remote HEAD at reindex time."""
     (home / "manifest.toml").write_text(
         '[[source]]\nname="specs"\ntype="git_repo"\n'
-        'url="https://example.com/repo.git"\n'
+        'url="https://example.com/repo.git"\next_blocklist=[]\n'
     )
     sources, warnings = rtfm.load_manifest()
     assert sources[0].ref is None
@@ -156,7 +228,7 @@ def test_git_repo_mutable_is_ignored(home):
     """mutable=true on a git_repo is silently accepted but has no effect."""
     (home / "manifest.toml").write_text(
         '[[source]]\nname="specs"\ntype="git_repo"\n'
-        'url="https://example.com/repo.git"\nref="main"\nmutable=true\n'
+        'url="https://example.com/repo.git"\nref="main"\nmutable=true\next_blocklist=[]\n'
     )
     sources, warnings = rtfm.load_manifest()
     assert sources[0].mutable is True  # parsed but ignored at runtime
@@ -168,7 +240,7 @@ def test_git_repo_linked_mode_not_a_repo_warns(home, tmp_path):
     repo.mkdir()
     (home / "manifest.toml").write_text(
         f'[[source]]\nname="specs"\ntype="git_repo"\n'
-        f'url="https://example.com/repo.git"\npath="{repo}"\n'
+        f'url="https://example.com/repo.git"\npath="{repo}"\next_blocklist=[]\n'
     )
     sources, warnings = rtfm.load_manifest()
     assert any("NOT A GIT REPO" in w and "specs" in w for w in warnings)
@@ -180,7 +252,7 @@ def test_git_repo_linked_mode_no_remote_warns(home, tmp_path):
     subprocess.run(["git", "init", str(repo)], capture_output=True)
     (home / "manifest.toml").write_text(
         f'[[source]]\nname="specs"\ntype="git_repo"\n'
-        f'url="https://example.com/repo.git"\npath="{repo}"\n'
+        f'url="https://example.com/repo.git"\npath="{repo}"\next_blocklist=[]\n'
     )
     sources, warnings = rtfm.load_manifest()
     assert any("NO REMOTE" in w and "specs" in w for w in warnings)
@@ -194,7 +266,7 @@ def test_git_repo_linked_mode_remote_mismatch_warns(home, tmp_path):
                     "https://example.com/org/real.git"], capture_output=True)
     (home / "manifest.toml").write_text(
         f'[[source]]\nname="specs"\ntype="git_repo"\n'
-        f'url="https://example.com/repo.git"\npath="{repo}"\n'
+        f'url="https://example.com/repo.git"\npath="{repo}"\next_blocklist=[]\n'
     )
     sources, warnings = rtfm.load_manifest()
     assert any("MISMATCH" in w and "specs" in w for w in warnings)
@@ -208,7 +280,7 @@ def test_git_repo_linked_mode_matching_remote_is_clean(home, tmp_path):
                     "https://example.com/repo.git"], capture_output=True)
     (home / "manifest.toml").write_text(
         f'[[source]]\nname="specs"\ntype="git_repo"\n'
-        f'url="https://example.com/repo.git"\npath="{repo}"\n'
+        f'url="https://example.com/repo.git"\npath="{repo}"\next_blocklist=[]\n'
     )
     sources, warnings = rtfm.load_manifest()
     assert warnings == []
@@ -218,7 +290,7 @@ def test_unknown_source_type_warns(home):
     """An unknown type is a loud config error — a typo'd type must not load
     silently and then be invisible to search."""
     (home / "manifest.toml").write_text(
-        '[[source]]\nname="typoed"\ntype="Git_Repo"\nurl="https://example.com/r.git"\n'
+        '[[source]]\nname="typoed"\ntype="Git_Repo"\nurl="https://example.com/r.git"\next_blocklist=[]\n'
     )
     sources, warnings = rtfm.load_manifest()
     assert any("unknown type" in w and "typoed" in w for w in warnings)
@@ -230,7 +302,7 @@ def test_git_repo_without_url_is_dropped(home):
     every search run `git clone None ...` (the whole-reindex crash of review
     round 1). Dir sources set the precedent: unusable sources are dropped loudly."""
     (home / "manifest.toml").write_text(
-        '[[source]]\nname="no-url"\ntype="git_repo"\nref="main"\n'
+        '[[source]]\nname="no-url"\ntype="git_repo"\nref="main"\next_blocklist=[]\n'
     )
     sources, warnings = rtfm.load_manifest()
     assert any("no 'url'" in w and "no-url" in w for w in warnings)
@@ -247,7 +319,7 @@ def test_git_repo_linked_missing_git_warns(home, tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", str(emptybin))
     (home / "manifest.toml").write_text(
         f'[[source]]\nname="specs"\ntype="git_repo"\n'
-        f'url="https://example.com/repo.git"\npath="{repo}"\n'
+        f'url="https://example.com/repo.git"\npath="{repo}"\next_blocklist=[]\n'
     )
     sources, warnings = rtfm.load_manifest()
     assert any("GIT MISSING" in w and "specs" in w for w in warnings)

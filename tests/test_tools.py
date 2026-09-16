@@ -17,7 +17,10 @@ def _seed(home, tmp_path, name="docs"):
 
 def _add_source(name, path):
     mp = rtfm.manifest_path()
-    mp.write_text(mp.read_text() + f'\n[[source]]\nname="{name}"\ntype="dir"\npath="{path}"\n')
+    mp.write_text(
+        mp.read_text()
+        + f'\n[[source]]\nname="{name}"\ntype="dir"\npath="{path}"\next_blocklist=[]\n'
+    )
 
 
 def test_search_hit_shape_and_locations(home, tmp_path):
@@ -74,6 +77,15 @@ def test_read_text_line_range(home, tmp_path):
     conn, d = _seed(home, tmp_path)
     text = rtfm.read_document_text(rtfm.Source("docs", "dir", d), "guide.md", 2, 2)
     assert "widget protocol" in text and "intro line" not in text
+
+
+def test_read_reports_a_non_utf8_file_instead_of_raising(home, tmp_path):
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "cp1252.md").write_bytes(b"caf\xe9 keyword\n")
+    msg = rtfm.read_document_text(rtfm.Source("docs", "dir", d), "cp1252.md")
+    assert "cp1252.md" in msg
+    assert "utf-8" in msg.lower()
 
 
 def test_search_auto_reindexes_small_unindexed_source(home, tmp_path):
@@ -202,7 +214,7 @@ def test_search_reports_a_file_it_could_not_open(home, tmp_path, unopenable):
     (t / "a.md").write_text("alpha keyword")
     unopenable(t / "locked.md")
     (home / "manifest.toml").write_text(
-        f'[[source]]\nname="s"\ntype="dir"\npath="{t}"\n')
+        f'[[source]]\nname="s"\ntype="dir"\npath="{t}"\next_blocklist=[]\n')
     resp = rtfm.search("keyword")
     assert resp["results"], "the readable file must still be searchable"
     assert any("COULD NOT OPEN" in w and "locked.md" in w for w in resp.get("WARNING", []))
@@ -240,7 +252,7 @@ def _status_of(home, tmp_path, name="specs", src=None, remote=None, ref=None):
     path = f'\npath="{src.path}"' if src.path is not None else ""
     mp.write_text(
         f'[[source]]\nname="{name}"\ntype="git_repo"\nurl="{url}"\n'
-        f'ref="{ref if ref is not None else src.ref}"\n{path}\n'
+        f'ref="{ref if ref is not None else src.ref}"\n{path}\next_blocklist=[]\n'
     )
     out = rtfm.list_sources()
     return next(s for s in out["sources"] if s["name"] == name)["git_status"]
@@ -381,7 +393,7 @@ def test_health_check_calls_step_one_without_indexing(home, tmp_path, unopenable
     (t / "a.md").write_text("alpha")
     unopenable(t / "vault", directory=True)
     (home / "manifest.toml").write_text(
-        f'[[source]]\nname="s"\ntype="dir"\npath="{t}"\n')
+        f'[[source]]\nname="s"\ntype="dir"\npath="{t}"\next_blocklist=[]\n')
     health = rtfm.health_check()
     assert health["ok"] is False
     assert any("vault" in i for i in health["issues"])
@@ -481,7 +493,7 @@ def test_reindex_tool_handles_git_repo(home, tmp_path, git_branch):
     mp = rtfm.manifest_path()
     mp.write_text(
         f'[[source]]\nname="specs"\ntype="git_repo"\n'
-        f'url="{remote}"\nref="{branch}"\npath="{dest}"\n'
+        f'url="{remote}"\nref="{branch}"\npath="{dest}"\next_blocklist=[]\n'
     )
     out = rtfm.reindex(source="specs")
     assert len(out["reindexed"]) == 1
@@ -495,9 +507,160 @@ def test_health_check_reports_git_repo_sources(home, tmp_path):
     mp = rtfm.manifest_path()
     mp.write_text(
         '[[source]]\nname="specs"\ntype="git_repo"\n'
-        'url="https://example.com/repo.git"\nref="feat-x"\n'
+        'url="https://example.com/repo.git"\nref="feat-x"\next_blocklist=[]\n'
     )
     out = rtfm.health_check()
     names = [s["name"] for s in out["sources"]]
     assert "specs" in names
     assert any(s["type"] == "git_repo" for s in out["sources"])
+
+
+def test_a_read_failure_does_not_tell_you_to_edit_the_manifest(home, tmp_path, unopenable):
+    (tmp_path / "a.md").write_text("findable keyword")
+    result = rtfm.StepResult([], [rtfm.Problem("a.md", "Permission denied")])
+    [msg] = rtfm.report("s", result, "read")
+    assert "storage" in msg
+    assert str(rtfm.manifest_path()) not in msg
+
+
+def test_an_access_failure_does_name_the_manifest(home, tmp_path):
+    result = rtfm.StepResult([], [rtfm.Problem("vault", "Permission denied")])
+    [msg] = rtfm.report("s", result, "access")
+    assert str(rtfm.manifest_path()) in msg
+
+
+def test_report_marks_elided_positions_and_reasons(home):
+    problems = [rtfm.Problem(f"f{i}.md", f"reason {i}") for i in range(5)]
+    [msg] = rtfm.report("s", rtfm.StepResult([], problems), "handle")
+    assert "(+2 more)" in msg          # 5 positions, 3 shown
+    assert "(+3 more)" in msg          # 5 distinct reasons, 2 shown
+
+
+def test_a_git_repo_source_reports_its_steps(home, tmp_path, git_branch):
+    remote, seed, branch = make_git_repo(tmp_path, git_branch, filename="broken.pdf",
+                                         content="%PDF-1.4\nnot really a pdf\n")
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=branch,
+                      ext_blocklist=frozenset())
+    summary = rtfm.reindex_source(conn, src)
+    assert any("COULD NOT HANDLE" in w for w in summary.get("warnings", []))
+
+
+def test_reindex_surfaces_a_handling_failure(home, tmp_path):
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "broken.pdf").write_bytes(b"%PDF-1.4\nnot really a pdf\n")
+    rtfm.load_manifest()
+    _add_source("docs", d)
+    out = rtfm.reindex(source="docs")
+    assert any("COULD NOT HANDLE" in w for w in out.get("WARNING", []))
+
+
+def test_search_surfaces_a_handling_failure(home, tmp_path):
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "ok.md").write_text("findable keyword")
+    (d / "broken.pdf").write_bytes(b"%PDF-1.4\nnot really a pdf\n")
+    rtfm.load_manifest()
+    _add_source("docs", d)
+    out = rtfm.search(query="keyword", source="docs")
+    assert any("COULD NOT HANDLE" in w for w in out.get("WARNING", []))
+
+
+def _add_allowlisted_source(name, path, allow):
+    mp = rtfm.manifest_path()
+    exts = ", ".join(f'"{e}"' for e in allow)
+    mp.write_text(
+        mp.read_text()
+        + f'\n[[source]]\nname="{name}"\ntype="dir"\npath="{path}"\next_allowlist=[{exts}]\n'
+    )
+
+
+def test_reindex_reports_nothing_selected(home, tmp_path):
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "a.md").write_text("x")
+    rtfm.load_manifest()
+    _add_allowlisted_source("docs", d, [".nomatch"])
+    out = rtfm.reindex(source="docs")
+    assert any("NOTHING SELECTED" in w for w in out.get("WARNING", []))
+
+
+def test_search_reports_nothing_selected(home, tmp_path):
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "a.md").write_text("findable keyword")
+    rtfm.load_manifest()
+    _add_allowlisted_source("docs", d, [".nomatch"])
+    out = rtfm.search(query="keyword", source="docs")
+    assert any("NOTHING SELECTED" in w for w in out.get("WARNING", []))
+
+
+def test_health_check_reports_an_extraction_failure_on_every_run(home, tmp_path):
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "broken.pdf").write_bytes(b"%PDF-1.4\nnot really a pdf\n")
+    rtfm.load_manifest()
+    _add_source("docs", d)
+    rtfm.reindex(source="docs")
+    out = rtfm.health_check()
+    assert out["ok"] is False
+    assert any("broken.pdf" in i for i in out["issues"])
+    # No reindex between the two calls — the row is already in `contents`, so this must
+    # say the same thing without re-extracting anything.
+    again = rtfm.health_check()
+    assert again["ok"] is False
+    assert any("broken.pdf" in i for i in again["issues"])
+
+
+def test_health_check_clean_corpus_has_no_extraction_issue(home, tmp_path):
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "ok.md").write_text("clean content")
+    rtfm.load_manifest()
+    _add_source("docs", d)
+    rtfm.reindex(source="docs")
+    out = rtfm.health_check()
+    assert out["ok"] is True
+    assert out["issues"] == []
+
+
+def test_health_check_names_every_broken_position_not_a_content_count(home, tmp_path):
+    d = tmp_path / "docs"
+    d.mkdir()
+    body = b"%PDF-1.4\nnot really a pdf\n"
+    for n in ("a.pdf", "b.pdf", "c.pdf"):
+        (d / n).write_bytes(body)
+    rtfm.load_manifest()
+    _add_source("docs", d)
+    rtfm.reindex(source="docs")
+    out = rtfm.health_check()
+    [issue] = [i for i in out["issues"] if "COULD NOT HANDLE" in i]
+    assert "3 path(s)" in issue
+    for n in ("a.pdf", "b.pdf", "c.pdf"):
+        assert n in issue
+
+
+def test_health_check_skips_extraction_rows_for_a_source_dropped_from_the_manifest(
+        home, tmp_path):
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "broken.pdf").write_bytes(b"%PDF-1.4\nnot really a pdf\n")
+    rtfm.load_manifest()
+    mp = rtfm.manifest_path()
+    original = mp.read_text()
+    _add_source("docs", d)
+    rtfm.reindex(source="docs")
+    mp.write_text(original)   # 'docs' no longer declared, but its contents.error row remains
+    out = rtfm.health_check()
+    assert not any("broken.pdf" in i for i in out["issues"])
+
+
+def test_the_zero_path_summary_has_the_same_keys_as_a_real_one(home, tmp_path):
+    conn = rtfm.get_index_db()
+    missing = rtfm.Source(name="s", type="dir", path=tmp_path / "nope",
+                          ext_blocklist=frozenset())
+    real = rtfm.Source(name="s", type="dir", path=tmp_path, ext_blocklist=frozenset())
+    (tmp_path / "a.md").write_text("x")
+    assert (set(rtfm.reindex_source(conn, missing))
+            == set(rtfm.reindex_source(conn, real)) - {"warnings"})

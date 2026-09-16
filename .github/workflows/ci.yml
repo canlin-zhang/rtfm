@@ -12,10 +12,12 @@ jobs:
       fail-fast: false
       matrix:
         # requires-python is >=3.11 (open upper bound); prove it on each version.
-        # 3.14 is load-bearing: pathlib's exists()/is_file() stopped raising on
-        # unreadable paths there, which is why bump's guard is stat()-based —
-        # a reversion of the unreadable-path branch would be CI-invisible
-        # without it (the S_ISREG type-check half is pinned on every version).
+        # 3.14 is also load-bearing for an open, tracked-separately defect: pathlib's
+        # exists()/is_file() stopped raising PermissionError on an unreadable parent
+        # directory there, so _validate_source's s.path.exists() calls raise on
+        # 3.11-3.13 and return a plain False on 3.14 for the identical path. This
+        # matrix would catch it if a test existed; none does yet, and none is added
+        # here — it is out of scope for this change.
         python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4

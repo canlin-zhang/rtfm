@@ -11,11 +11,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
 import sqlite3
-import stat
 import subprocess
 import time
 import tomllib
@@ -29,9 +29,36 @@ from mcp.server.fastmcp import FastMCP
 # --- config -----------------------------------------------------------------
 _log = logging.getLogger("rtfm")
 
-TEXT_EXTS = {".txt", ".md", ".mdx", ".rst", ".rest"}   # plain text → line locators (.html later)
+# The markup routine's extension set — a HANDLING concern (ATX/setext heading extraction
+# for doc-level ranking, ADR 0012), never a selection default. TEXT_EXTS did both jobs
+# under one name, which is how a .bzl file came to be selected and then extracted to zero
+# rows (ADR 0014).
+MARKUP_EXTS = frozenset({".txt", ".md", ".mdx", ".rst", ".rest"})
+
+# Step 2's default deny set, consulted in ext_blocklist mode only. Growing this list
+# removes garbage from an index; growing an allowlist would silently add content to every
+# source that never asked for it, which is why there is no default allowlist (ADR 0014).
+DEFAULT_EXT_BLOCKLIST = frozenset({
+    # images and assets
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".tiff", ".tif",
+    ".svg", ".svgz", ".psd", ".ai", ".eps",
+    # fonts
+    ".woff", ".woff2", ".ttf", ".otf", ".eot",
+    # archives
+    ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar", ".jar", ".whl",
+    # audio and video
+    ".mp3", ".wav", ".flac", ".ogg", ".m4a", ".mp4", ".avi", ".mov", ".mkv", ".webm",
+    # compiled and linkable artifacts
+    ".so", ".dylib", ".dll", ".exe", ".o", ".a", ".lib", ".pyc", ".pyo", ".class",
+    ".wasm", ".node",
+    # binary data and containers
+    ".db", ".sqlite", ".sqlite3", ".bin", ".dat", ".pickle", ".pkl", ".npy", ".npz",
+    ".parquet", ".avro", ".pb",
+    # office binaries (zip containers; never valid UTF-8)
+    ".doc", ".xls", ".ppt", ".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp",
+})
 CHUNK_LINES = 50
-SCHEMA_VERSION = 4                   # index DB is a cache; mismatch ⇒ drop & rebuild
+SCHEMA_VERSION = 5                   # index DB is a cache; mismatch ⇒ drop & rebuild
 MAX_LOCATIONS = 5                    # default cap on locations listed per search hit
 
 
@@ -377,7 +404,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE source_meta (
             source          TEXT PRIMARY KEY,
             git_commit      TEXT NOT NULL,
-            git_commit_date TEXT NOT NULL
+            git_commit_date TEXT NOT NULL,
+            config_scope    TEXT NOT NULL DEFAULT ''
         );
         """
     )
@@ -419,7 +447,7 @@ def _pdf_rows(path: Path) -> list[tuple[str, str, str]]:
 def _text_rows(path: Path) -> list[tuple[str, str, str]]:
     """Line locators, CHUNK_LINES per row (ADR 0004)."""
     rows: list[tuple[str, str, str]] = []
-    lines = path.read_text(errors="replace").splitlines()
+    lines = path.read_text(encoding="utf-8").splitlines()
     for i in range(0, max(1, len(lines)), CHUNK_LINES):
         chunk = "\n".join(ln.rstrip() for ln in lines[i:i + CHUNK_LINES])
         if chunk.strip():
@@ -474,7 +502,7 @@ def _text_doc_signal(path: Path) -> tuple[str, str]:
     (`paragraph\\n---` is a heading; a `---` after a blank line is a horizontal rule, not a
     heading). A leading `---` YAML frontmatter block is skipped first so its closing fence isn't
     misread as an underline (which would make a frontmatter key the title)."""
-    lines = path.read_text(errors="replace").splitlines()
+    lines = path.read_text(encoding="utf-8").splitlines()
     start = 0
     if lines and lines[0].strip() == "---":
         for j in range(1, len(lines)):
@@ -513,7 +541,7 @@ class _Routine(NamedTuple):
 
 ROUTINES: tuple[_Routine, ...] = (
     _Routine("pdf", frozenset({".pdf"}), _pdf_rows, _pdf_doc_signal),
-    _Routine("markup", frozenset(TEXT_EXTS), _text_rows, _text_doc_signal),
+    _Routine("markup", MARKUP_EXTS, _text_rows, _text_doc_signal),
 )
 
 # The fallback sits outside ROUTINES. Inside, it would match unconditionally, so placing
@@ -622,11 +650,11 @@ class Indexed(NamedTuple):
 
 _STEP_MESSAGES = {
     "access": ("COULD NOT OPEN", "could not be reached",
-               "fix the permissions, or point the source elsewhere"),
-    "read": ("COULD NOT READ", "could not give up their bytes",
-             "fix storage or permissions"),
+               "fix the permissions, or point the source elsewhere in {manifest}"),
+    "read":   ("COULD NOT READ", "could not give up their bytes",
+               "fix storage or permissions where the source lives"),
     "handle": ("COULD NOT HANDLE", "could not be processed",
-               "convert them, or exclude their file types"),
+               "convert them, or exclude their file types in {manifest}"),
 }
 
 
@@ -634,22 +662,64 @@ def report(src_name: str, result: StepResult, step: str) -> list[str]:
     """Turn one step's problems into messages. The only place a Problem becomes text.
 
     Each step names itself and gives its own remedy, because merging them tells a user to
-    convert a file they simply lack permission to open (ADR 0015)."""
+    convert a file they simply lack permission to open (ADR 0015). The manifest is named
+    only where editing it is the actual fix — step 3A's failure is infrastructure (a failing
+    disk, a permission bit), and telling someone to fix that by editing TOML is the
+    merged-step defect ADR 0015 deletes, wearing a different hat."""
     if not result.problems:
         return []
     tag, what, recover = _STEP_MESSAGES[step]
     shown = ", ".join(p.position for p in result.problems[:3])
     more = f" (+{len(result.problems) - 3} more)" if len(result.problems) > 3 else ""
-    reasons = ", ".join(sorted({p.reason for p in result.problems})[:2])
+    distinct = sorted({p.reason for p in result.problems})
+    reasons = ", ".join(distinct[:2])
+    if len(distinct) > 2:
+        reasons += f" (+{len(distinct) - 2} more)"
     return [f"!!! {tag} '{src_name}' !!! {len(result.problems)} path(s) {what}: "
-            f"{shown}{more} — {reasons}. Recover: {recover} in {manifest_path()}."]
+            f"{shown}{more} — {reasons}. "
+            f"Recover: {recover.format(manifest=manifest_path())}."]
 
 
-def report_all(src_name: str, result: Indexed) -> list[str]:
+def _report_nothing_selected(src: Source, result: Indexed) -> list[str]:
+    """Step 2's sad path (ADR 0015): step 1 reached something and step 2 kept none of it.
+
+    Derived here from `Indexed`, not stored on a `StepResult` — step 2 returns a bare list on
+    purpose (see `select`): rtfm has no standing to call 90% filtered a partial success, so
+    there is nowhere for a step-2 outcome to live except this comparison of two already-stored
+    results. `reachable.kept` empty is step 1's sad path, not this one — the access report (or,
+    for a merely-empty directory, nothing at all) already says everything there is to say, so
+    the condition below requires step 1 to have reached something."""
+    if not (result.reachable.kept and not result.wanted):
+        return []
+    if src.ext_allowlist is not None:
+        ext_clause = f"ext_allowlist = {', '.join(sorted(src.ext_allowlist)) or '(empty)'}"
+    else:
+        # The effective set is the user's list unioned with rtfm's own defaults, but dumping
+        # all of it is a wall of extensions the user never wrote and cannot act on, burying
+        # the `paths` clause that is often the actual cause. Name what the user declared and
+        # summarize the defaults by count — never hardcoded, so it can't drift when
+        # DEFAULT_EXT_BLOCKLIST grows.
+        n_defaults = len(DEFAULT_EXT_BLOCKLIST)
+        user = sorted(src.ext_blocklist or frozenset())
+        if user:
+            ext_clause = (f"ext_blocklist = {', '.join(user)} "
+                          f"(plus rtfm's {n_defaults} default binary and asset types)")
+        else:
+            ext_clause = (f"ext_blocklist = [] "
+                          f"(rtfm's {n_defaults} default binary and asset types only)")
+    parts = list(src.paths) + [f"!{p}" for p in src.exclude_paths]
+    paths_clause = f" — and paths = {', '.join(parts)}" if parts else ""
+    return [f"!!! NOTHING SELECTED '{src.name}' !!! {len(result.reachable.kept):,} path(s) "
+            f"reachable, none selected. {ext_clause}{paths_clause}. "
+            f"Recover: widen the extension list or the paths in {manifest_path()}."]
+
+
+def report_all(src: Source, result: Indexed) -> list[str]:
     """Every step's report, in pipeline order."""
-    return (report(src_name, result.reachable, "access")
-            + report(src_name, result.read, "read")
-            + report(src_name, result.handled, "handle"))
+    return (report(src.name, result.reachable, "access")
+            + _report_nothing_selected(src, result)
+            + report(src.name, result.read, "read")
+            + report(src.name, result.handled, "handle"))
 
 
 def _extract_many(jobs: list[tuple[str, str]]) -> list[_Extracted]:
@@ -849,21 +919,19 @@ def index_source(conn: sqlite3.Connection, src: Source, root: Path) -> Indexed:
         "SELECT relpath, sha256, mtime FROM locations WHERE source=?", (source_name,))}
 
     reachable = access(src, root)
-    wanted = select(reachable.kept, root)
+    wanted = select(reachable.kept, root, src)
     read = read_bytes_for(wanted, root, existing)
 
-    # Reconcile against what step 2 wanted. A position that failed 3A is still in `wanted`
-    # (read_bytes_for reports it as a problem, not by omission), so it keeps its row via
-    # wanted_rels alone. A position that failed step 1 never reaches `wanted` at all — access()
-    # excludes what it could not open — so for anything wanted_rels does not cover, ask step 1's
-    # own report first and the filesystem second. Only a relpath that no unreachable position
-    # shadows, and that nothing sits at any more, has actually vanished.
+    # Reconcile against what step 2 wanted, and nothing else. A position that failed 3A is
+    # still in `wanted` (read_bytes_for reports it as a problem, not by omission), so it
+    # keeps its row. A position step 1 could not reach never arrives at step 2 at all, so
+    # step 1's own report is what keeps it — the filesystem is not asked, because "the file
+    # is still there" and "the manifest still wants it" stopped being the same fact once
+    # step 2 became policy: a de-selected file is present on disk and must still be purged.
     wanted_rels = {_rel(f, root) for f in wanted}
     unreachable = {p.position for p in reachable.problems}
     vanished = {rel for rel in existing
-                if rel not in wanted_rels
-                and not _shadowed_by(rel, unreachable)
-                and not _still_there(root / rel)}
+                if rel not in wanted_rels and not _shadowed_by(rel, unreachable)}
     for rel in vanished:
         conn.execute("DELETE FROM locations WHERE source=? AND relpath=?", (source_name, rel))
     for f, sha, mtime in read.kept:
@@ -921,10 +989,9 @@ def _as_summary(result: Indexed) -> dict:
             "errors": errors}
 
 
-def _index_files(conn: sqlite3.Connection, source_name: str, root: Path) -> dict:
-    """Kept so `_reindex_git_repo` is unchanged."""
-    result = index_source(conn, Source(name=source_name, type="dir", path=root), root)
-    return _as_summary(result)
+_EMPTY_INDEXED = Indexed(reachable=StepResult([], []), wanted=[],
+                         read=StepResult([], []), handled=StepResult([], []),
+                         cache=CacheStats(0, 0, 0, 0))
 
 
 def _reindex_git_repo(conn: sqlite3.Connection, src: Source) -> dict:
@@ -945,12 +1012,17 @@ def _reindex_git_repo(conn: sqlite3.Connection, src: Source) -> dict:
                               f"existing commit.")}
         return {"source": src.name, "error": _git_error_class(e)}
     conn.execute(
-        "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?) "
-        "ON CONFLICT(source) DO UPDATE SET "
-        "git_commit=excluded.git_commit, git_commit_date=excluded.git_commit_date",
-        (src.name, commit, commit_date))
+        "INSERT INTO source_meta(source, git_commit, git_commit_date, config_scope) "
+        "VALUES(?,?,?,?) ON CONFLICT(source) DO UPDATE SET "
+        "git_commit=excluded.git_commit, git_commit_date=excluded.git_commit_date, "
+        "config_scope=excluded.config_scope",
+        (src.name, commit, commit_date, _config_scope(src)))
     conn.commit()
-    _staleness_cache.pop((src.name, src.ref), None)  # a fresh index makes the cached verdict stale
+    # A fresh index makes any cached verdict for this source+ref stale, whichever scope it
+    # was memoized under — the key now includes config_scope (see _stale_delta), so a plain
+    # tuple lookup would miss.
+    for key in [k for k in _staleness_cache if k[0] == src.name and k[1] == src.ref]:
+        _staleness_cache.pop(key, None)
 
     # Now run the file-level indexing (shared core with dir sources)
     summary = {"source": src.name, "commit": commit, "commit_date": commit_date}
@@ -965,7 +1037,9 @@ def _reindex_git_repo(conn: sqlite3.Connection, src: Source) -> dict:
                 f"spelling in the manifest, or the ref may not be fetched into the "
                 f"clone yet (run 'git fetch --tags' there); list_sources reports "
                 f"'unknown'.")
-    summary.update(_index_files(conn, src.name, repo_path))
+    result = index_source(conn, src, repo_path)
+    summary.update(_as_summary(result))
+    summary["warnings"] = report_all(src, result)
     return summary
 
 
@@ -981,13 +1055,12 @@ def reindex_source(conn: sqlite3.Connection, src: Source) -> dict:
     """
     if src.type == "git_repo":
         return _reindex_git_repo(conn, src)
-    summary = {"source": src.name, "files_seen": 0, "unique_contents": 0,
-               "newly_extracted": 0, "extraction_skips": 0, "purged": 0, "errors": 0}
+    summary = {"source": src.name, **_as_summary(_EMPTY_INDEXED)}
     if src.path is None or not src.path.exists():
         return summary
     result = index_source(conn, src, src.path)
     summary.update(_as_summary(result))
-    summary["warnings"] = report_all(src.name, result)
+    summary["warnings"] = report_all(src, result)
     return summary
 
 
@@ -1003,18 +1076,22 @@ def _stale_delta(conn: sqlite3.Connection, src: Source) -> tuple[int, bool, bool
 
     git_repo verdicts cost git subprocesses (and a fetch for managed sources) and
     feed the auto-reindex attempt and its failure warning — both are memoized per
-    source+ref for STALENESS_TTL seconds (ADR 0013): the check runs at most every
-    30 s, and search re-attempts a stale source at most every 30 s, so a
+    source+ref+config_scope for STALENESS_TTL seconds (ADR 0013): the check runs at
+    most every 30 s, and search re-attempts a stale source at most every 30 s, so a
     persistently broken or dirty source warns on the first query of each window,
-    not on every query.
+    not on every query. The scope is part of the key, not just of the verdict
+    computation: a manifest edit changes the key, so it can never hit a memo entry
+    written under the old scope (ADR 0014) — the source may briefly hold two entries
+    (old scope, new scope) but the old one is simply never looked up again.
     """
     if src.type == "git_repo":
         now = time.monotonic()
-        hit = _staleness_cache.get((src.name, src.ref))
+        key = (src.name, src.ref, _config_scope(src))
+        hit = _staleness_cache.get(key)
         if hit and now - hit[0] < STALENESS_TTL:
             return 0, hit[1], True
         _, stale = _stale_delta_git_repo(conn, src)
-        _staleness_cache[(src.name, src.ref)] = (now, stale)
+        _staleness_cache[key] = (now, stale)
         return 0, stale, False
     # dir sources: stat + (relpath, mtime) compare — no hashing or extraction.
     # `changed` counts files that would need fresh extraction and bounds the cost of an
@@ -1032,7 +1109,7 @@ def _stale_delta(conn: sqlite3.Connection, src: Source) -> tuple[int, bool, bool
     # help: `changed` stays 0 while `stale` never clears).
     reachable = access(src)
     on_disk = {str(f.relative_to(src.path)): f.stat().st_mtime
-               for f in select(reachable.kept, src.path)}
+               for f in select(reachable.kept, src.path, src)}
     unreachable = {p.position for p in reachable.problems}
     for rel, mtime in indexed.items():
         if rel in on_disk or not _shadowed_by(rel, unreachable):
@@ -1042,11 +1119,40 @@ def _stale_delta(conn: sqlite3.Connection, src: Source) -> tuple[int, bool, bool
         except OSError:
             on_disk[rel] = mtime   # shadowed by an unreachable ancestor dir: can't re-read
     changed = sum(1 for rel, mtime in on_disk.items() if indexed.get(rel) != mtime)
-    stale = changed > 0 or set(indexed) != set(on_disk)   # latter catches vanished files
+    # An empty selection has indexed == on_disk == {}, which reads as fresh forever: the
+    # source is skipped on every query and its step report is never even computed. Force it
+    # (ADR 0014) so `index_source` actually runs and `report_all`'s "NOTHING SELECTED"
+    # message (Item 1, ADR 0015) reaches the user through reindex()/search(), rather than the
+    # source going silently unreported forever.
+    #
+    # The cost is real and recurring, not one-off: a permanently-stale dir source makes
+    # `search` pay TWO full os.walk passes over the WHOLE tree on every query, forever — one
+    # here, one in the reindex_source call search then makes — scaling with total tree size,
+    # not selection size. Measured ~14-15 ms/query at 500 files, ~150 ms/query at 5,000. ADR
+    # 0014 accepts the forced staleness deliberately and does not discuss this cost.
+    stale = (changed > 0 or set(indexed) != set(on_disk) or not on_disk)
     return changed, stale, False
 
 
-_staleness_cache: dict[tuple[str, str | None], tuple[float, bool]] = {}
+_staleness_cache: dict[tuple[str, str | None, str], tuple[float, bool]] = {}
+
+
+def _config_scope(src: Source) -> str:
+    """The normalized scope keys as one readable, unambiguous string.
+
+    JSON rather than a delimiter-joined string: on Linux any byte but "/" and NUL is legal in a
+    filename, so a directory named "a,b" and the pair ("a", "b") joined on a comma produce the
+    same text — and a git_repo source edited between those two scopes reads as fresh, which is
+    the exact failure this column exists to catch. Sorted, so order-independence comes from
+    sorting rather than from hashing, and the column stays readable when someone inspects the
+    index by hand (ADR 0014).
+    """
+    return json.dumps({
+        "paths": sorted(src.paths),
+        "exclude": sorted(src.exclude_paths),
+        "allow": None if src.ext_allowlist is None else sorted(src.ext_allowlist),
+        "block": None if src.ext_blocklist is None else sorted(src.ext_blocklist),
+    }, separators=(",", ":"))
 
 
 def _stale_delta_git_repo(conn: sqlite3.Connection, src: Source) -> tuple[int, bool]:
@@ -1065,9 +1171,12 @@ def _stale_delta_git_repo(conn: sqlite3.Connection, src: Source) -> tuple[int, b
     """
     try:
         row = conn.execute(
-            "SELECT git_commit FROM source_meta WHERE source=?", (src.name,)).fetchone()
+            "SELECT git_commit, config_scope FROM source_meta WHERE source=?",
+            (src.name,)).fetchone()
         if row is None:
             return 0, True  # never indexed — always stale
+        if row[1] != _config_scope(src):
+            return 0, True  # the manifest moved; a pin freezes the commit, not the scope
         repo_path = src.path if src.path is not None else _managed_repo_path(src.name)
         if not repo_path.exists():
             return 0, True  # clone vanished
@@ -1102,21 +1211,40 @@ def _default_branch(path: Path) -> str:
         return "main"  # sensible fallback
 
 
-def select(positions: list[Path], base: Path) -> list[Path]:
+def select(positions: list[Path], base: Path, src: Source) -> list[Path]:
     """Step 2 (ADR 0015): out of what we can reach, what does the user want?
 
-    Returns a bare list, deliberately, not a StepResult. Steps 1, 3A and 3B ask
-    about the world, where "partial" is an observed fact worth reporting. This
-    step asks about intent, and rtfm has no standing to call 90% filtered a
-    partial success — either something survived or nothing did. With no
-    `problems` field there is nowhere to write a step-2 partial-filtering
-    warning, so nobody can.
+    Policy, not a handler table — the manifest's `paths` prefixes and its one extension
+    list (ADR 0014). No content is inspected, ever: a file outside the lists was never a
+    candidate, which is not an error and is reported nowhere.
 
-    PR2 replaces this hardcoded set with the manifest's ext_allowlist /
-    ext_blocklist (ADR 0014); the shape of the step does not change.
+    Returns a bare list, deliberately, not a StepResult. Steps 1, 3A and 3B ask about the
+    world, where "partial" is an observed fact worth reporting. This step asks about
+    intent, and rtfm has no standing to call 90% filtered a partial success — either
+    something survived or nothing did. With no `problems` field there is nowhere to write
+    a step-2 partial-filtering warning, so nobody can.
     """
+    if src.ext_allowlist is not None:
+        def wanted_ext(ext: str) -> bool:
+            return ext in src.ext_allowlist
+    else:
+        denied = DEFAULT_EXT_BLOCKLIST | (src.ext_blocklist or frozenset())
+
+        def wanted_ext(ext: str) -> bool:
+            return ext not in denied
+
+    def wanted_path(rel: str) -> bool:
+        if any(_under(rel, p) for p in src.exclude_paths):
+            return False
+        return not src.paths or any(_under(rel, p) for p in src.paths)
+
     return [f for f in positions
-            if f.suffix.lower() == ".pdf" or f.suffix.lower() in TEXT_EXTS]
+            if wanted_ext(f.suffix.lower()) and wanted_path(_rel(f, base))]
+
+
+def _under(rel: str, prefix: str) -> bool:
+    """Is `rel` at or beneath this directory prefix? "docs" must not match "docsets/x.md"."""
+    return rel == prefix or rel.startswith(prefix + "/")
 
 
 def access(src: Source, root: Path | None = None) -> StepResult:
@@ -1185,22 +1313,6 @@ def _shadowed_by(rel: str, unreachable: set[str]) -> bool:
     return any(u == "." or rel == u or rel.startswith(u + "/") for u in unreachable)
 
 
-def _still_there(p: Path) -> bool:
-    """Is a regular file still sitting at this position?
-
-    Not `Path.is_file()`: before Python 3.14 it re-raises OSError for EACCES, so a file
-    under a directory nobody can enter raises out of the caller rather than answering.
-    An OS that refuses to say is answering "unreadable", never "absent" — the caller
-    deletes an indexed row on a False, so only a real ENOENT/ENOTDIR earns one.
-    """
-    try:
-        return stat.S_ISREG(os.stat(p).st_mode)
-    except (FileNotFoundError, NotADirectoryError):
-        return False
-    except OSError:
-        return True
-
-
 def read_bytes_for(positions: list[Path], base: Path,
                    existing: dict[str, tuple[str, float]]) -> StepResult:
     """Step 3A (ADR 0015): are those bytes even readable?
@@ -1257,13 +1369,29 @@ def handle(conn: sqlite3.Connection, read_kept: list[tuple[Path, str, float]],
         if ex.error:
             problems.extend(Problem(pos, ex.error) for pos in sorted(by_sha.get(ex.sha, [])))
         kept.append(ex)
-    return StepResult(kept, problems)
+
+    # A sha outside `need` was extracted in an earlier run and is not re-extracted here.
+    # If that earlier run failed, the file is still broken and still unsearchable, so the
+    # failure is still true: report it from the stored error rather than paying the parse
+    # cost again. Without this a corrupt file is named once, on the run that first failed,
+    # and every run afterwards reports a clean source.
+    stale_failures = {sha for sha in by_sha if sha not in jobs}
+    if stale_failures:
+        marks = ",".join("?" * len(stale_failures))
+        for sha, error in conn.execute(
+                f"SELECT sha256, error FROM contents "
+                f"WHERE extracted_ok = 0 AND sha256 IN ({marks})",
+                tuple(stale_failures)):
+            problems.extend(Problem(pos, error or "extraction failed in an earlier run")
+                            for pos in sorted(by_sha[sha]))
+    return StepResult(kept, sorted(problems))
 
 
 def iter_source_files(src: Source, root: Path | None = None) -> list[Path]:
     """Positions a source contributes, after selection. Callers that also need step 1's
     problems call `access` and `select` directly."""
-    return select(access(src, root).kept, root if root is not None else src.path)
+    base = root if root is not None else src.path
+    return select(access(src, root).kept, base, src)
 
 # --- manifest ---------------------------------------------------------------
 
@@ -1275,6 +1403,11 @@ class Source:
     url: str | None = None
     ref: str | None = None          # git refspec (branch, tag, SHA); None for dir
     mutable: bool = False
+    # --- scope (ADR 0014). Normalized at parse time; never re-normalized downstream.
+    paths: tuple[str, ...] = ()             # directory prefixes to include; () = whole tree
+    exclude_paths: tuple[str, ...] = ()     # prefixes to exclude; exclusion wins
+    ext_allowlist: frozenset[str] | None = None   # exactly one of these two is set
+    ext_blocklist: frozenset[str] | None = None
 
 
 _BOOTSTRAP_MANIFEST = '''\
@@ -1282,10 +1415,11 @@ _BOOTSTRAP_MANIFEST = '''\
 # Each [[source]] is one place rtfm indexes, in place.
 
 [[source]]
-name    = "default"   # the zero-config drop-dir; the only mutable source by default
-type    = "dir"
-path    = "{default}"
-mutable = true
+name          = "default"   # the zero-config drop-dir; the only mutable source by default
+type          = "dir"
+path          = "{default}"
+mutable       = true
+ext_blocklist = []          # index everything except rtfm's known binary and asset types
 
 # Example: a git-tracked doc repo. rtfm clones and tracks the ref automatically
 # when `path` is omitted (managed mode), or links to an existing clone when
@@ -1295,6 +1429,7 @@ mutable = true
 # type    = "git_repo"
 # url     = "https://github.com/org/specs.git"
 # ref     = "main"
+# ext_allowlist = [".md"]   # exactly one of ext_allowlist/ext_blocklist is required
 '''
 
 
@@ -1308,6 +1443,42 @@ def _ensure_bootstrap() -> None:
         mp.write_text(_BOOTSTRAP_MANIFEST.format(default=default_source_dir()))
 
 
+_GLOB_CHARS = ("*", "?", "[")
+
+
+def _normalize_paths(entries) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Split `paths` into (include, exclude) prefixes, normalized.
+
+    A bare entry includes a prefix, a `!` entry excludes one (ADR 0014). Both halves are
+    stripped of leading "./" and surrounding "/", deduped and sorted, so two manifests that
+    mean the same thing produce the same `config_scope` string and neither reads as stale
+    against the other.
+    """
+    include, exclude = set(), set()
+    for raw in entries or ():
+        text = str(raw).strip()
+        target = exclude if text.startswith("!") else include
+        text = text.lstrip("!").strip()
+        if text.startswith("./"):
+            text = text[2:]
+        text = text.strip("/")
+        if text:
+            target.add(text)
+    return tuple(sorted(include)), tuple(sorted(exclude))
+
+
+def _normalize_exts(entries) -> frozenset[str]:
+    """Lowercase, dot-prefixed extensions. "MD", ".Md" and "md" are one extension."""
+    out = set()
+    for raw in entries or ():
+        text = str(raw).strip().lower()
+        if text and not text.startswith("."):
+            text = "." + text
+        if text:
+            out.add(text)
+    return frozenset(out)
+
+
 def _source_from_table(t: dict) -> Source:
     path = t.get("path")
     url = t.get("url")
@@ -1315,6 +1486,7 @@ def _source_from_table(t: dict) -> Source:
     if not name:
         basis = path or url or "source"
         name = Path(str(basis)).name or "source"
+    include, exclude = _normalize_paths(t.get("paths"))
     return Source(
         name=name,
         type=t.get("type", "dir"),
@@ -1322,6 +1494,12 @@ def _source_from_table(t: dict) -> Source:
         url=url,
         ref=t.get("ref"),                        # None if absent → default to remote HEAD later
         mutable=bool(t.get("mutable", False)),
+        paths=include,
+        exclude_paths=exclude,
+        ext_allowlist=(_normalize_exts(t["ext_allowlist"])
+                       if "ext_allowlist" in t else None),
+        ext_blocklist=(_normalize_exts(t["ext_blocklist"])
+                       if "ext_blocklist" in t else None),
     )
 
 
@@ -1331,6 +1509,23 @@ def _validate_source(s: Source) -> str | None:
     source needs a url; in linked mode (`path` set) the path must be a git working tree whose
     origin remote matches the declared url. The point is that one bad entry never silently
     disappears and never breaks the others."""
+    if s.ext_allowlist is not None and s.ext_blocklist is not None:
+        return (f"!!! INVALID SOURCE '{s.name}' !!! declares both 'ext_allowlist' and "
+                f"'ext_blocklist' — exactly one is required, because they answer the same "
+                f"question in opposite directions. Recover: delete one in {manifest_path()}.")
+    if s.ext_allowlist is None and s.ext_blocklist is None:
+        return (f"!!! INVALID SOURCE '{s.name}' !!! declares neither 'ext_allowlist' nor "
+                f"'ext_blocklist' — rtfm does not guess what to index. Recover: add "
+                f"ext_allowlist = [\".md\", \".pdf\"] to index only those types, or "
+                f"ext_blocklist = [] to index everything except rtfm's known binary and "
+                f"asset types, in {manifest_path()}.")
+    bad = [p for p in (*s.paths, *s.exclude_paths)
+           if any(c in p for c in _GLOB_CHARS)]
+    if bad:
+        return (f"!!! INVALID SOURCE '{s.name}' !!! 'paths' takes directory prefixes, not "
+                f"globs: {', '.join(sorted(bad))}. A literal 'docs/**' directory does not "
+                f"exist, so the entry would index nothing while looking correct. Recover: "
+                f"write the prefix itself (e.g. \"docs\") in {manifest_path()}.")
     if s.type == "git_repo":
         if not s.url:
             return (f"!!! INVALID SOURCE '{s.name}' !!! git_repo source has no 'url' — "
@@ -1433,7 +1628,11 @@ def load_manifest() -> tuple[list[Source], list[str]]:
         warn = _validate_source(s)
         if warn:
             warnings.append(warn)
-            if (s.type == "dir" and s.path is None) or (s.type == "git_repo" and not s.url):
+            if ((s.type == "dir" and s.path is None)
+                    or (s.type == "git_repo" and not s.url)
+                    or (s.ext_allowlist is None) == (s.ext_blocklist is None)
+                    or any(c in p for p in (*s.paths, *s.exclude_paths)
+                           for c in _GLOB_CHARS)):
                 continue                       # unusable — drop it (loudly, above)
         seen[s.name] = s
         sources.append(s)
@@ -1645,7 +1844,12 @@ def read_document_text(src: Source, relpath: str, start: int = 1, end: int | Non
         return f"!!! ERROR !!! '{relpath}' not found in source '{src.name}'."
     if path.suffix.lower() == ".pdf":
         return extract_pdf_text(path, start=start, end=end)
-    lines = path.read_text(errors="replace").splitlines()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except UnicodeDecodeError as dec_err:
+        return (f"!!! CANNOT READ '{relpath}' !!! not valid UTF-8 ({dec_err.reason} at byte "
+                f"{dec_err.start}). rtfm indexes UTF-8 text. Recover: convert the file, or "
+                f"exclude its type in {manifest_path()}.")
     e = end if end is not None else len(lines)
     return "\n".join(lines[max(0, start - 1):e])
 
@@ -1707,6 +1911,7 @@ def search(query: str, source: str | None = None, max_files: int = 20,
                 continue
             else:  # git_repo — always auto-reindex, budget doesn't apply
                 result = reindex_source(conn, s)
+                warnings.extend(result.get("warnings", ()))
                 # Multiple sources on one clone (or one broken remote) would
                 # otherwise repeat the identical warning once per source.
                 key = (s.path if s.path is not None
@@ -1938,6 +2143,26 @@ def health_check() -> dict:
                 continue
             reachable = access(src, root)
             issues = report(src.name, reachable, "access")
+            if issues:
+                status["ok"] = False
+                status["issues"].extend(issues)
+        # Extraction failures already live in `contents.error` (Task 6 makes `handle`
+        # re-report them on every run); health_check reads that column rather than
+        # indexing, so it stays a read (ADR 0015: "search, reindex and health_check" all
+        # surface the same failures). Reuse `report` rather than writing new message text,
+        # so this says exactly what reindex/search say about the same file.
+        manifest_names = {s.name for s in sources}
+        by_source: dict[str, list[Problem]] = {}
+        for src_name, relpath, error in conn.execute(
+                "SELECT l.source, l.relpath, c.error FROM locations l "
+                "JOIN contents c ON c.sha256 = l.sha256 "
+                "WHERE c.extracted_ok = 0 ORDER BY l.source, l.relpath"):
+            if src_name not in manifest_names:
+                continue   # a row left behind by a source since deleted from the manifest
+            by_source.setdefault(src_name, []).append(
+                Problem(relpath, error or "extraction failed in an earlier run"))
+        for src_name, problems in by_source.items():
+            issues = report(src_name, StepResult([], problems), "handle")
             if issues:
                 status["ok"] = False
                 status["issues"].extend(issues)

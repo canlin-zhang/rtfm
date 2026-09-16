@@ -207,6 +207,29 @@ def test_failed_extraction_not_retried_on_unchanged_bytes(home, tmp_path):
     assert row_after_second is not None and row_after_second[0] == 0
 
 
+def test_a_handling_failure_is_reported_on_every_run(home, tmp_path):
+    (tmp_path / "broken.pdf").write_bytes(b"%PDF-1.4\nnot really a pdf\n")
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="s", type="dir", path=tmp_path, ext_blocklist=frozenset())
+
+    first = rtfm.index_source(conn, src, tmp_path)
+    assert [p.position for p in first.handled.problems] == ["broken.pdf"]
+
+    second = rtfm.index_source(conn, src, tmp_path)
+    assert [p.position for p in second.handled.problems] == ["broken.pdf"], (
+        "a file that is still broken must still be reported")
+    assert second.cache.newly_extracted == 0, "and must not be re-extracted to say so"
+
+
+def test_a_repaired_file_stops_being_reported(home, tmp_path):
+    (tmp_path / "f.md").write_bytes(b"\xff\xfe broken\n")
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="s", type="dir", path=tmp_path, ext_blocklist=frozenset())
+    assert rtfm.index_source(conn, src, tmp_path).handled.problems
+    (tmp_path / "f.md").write_text("now findable keyword")
+    assert rtfm.index_source(conn, src, tmp_path).handled.problems == []
+
+
 def test_extraction_runs_in_current_process_not_forked(home, tmp_path, monkeypatch):
     """Regression guard for the FastMCP-server deadlock: parallel extraction must run in THIS
     process (a thread pool), never a forked child. A process pool deadlocks inside the server
@@ -272,7 +295,8 @@ def test_extraction_works_from_worker_thread_with_event_loop(home, tmp_path):
 
 def test_reindex_indexes_rst_files(home, tmp_path):
     """`.rst` and `.rest` (reStructuredText) are plain text — they index like `.md`, with line
-    locators. Unlocks Sphinx doc trees. Fails before they're in TEXT_EXTS (files skipped)."""
+    locators. Unlocks Sphinx doc trees. Fails before they're selected by the manifest's
+    extension list (files skipped)."""
     d = tmp_path / "docs"
     d.mkdir()
     (d / "guide.rst").write_text(
@@ -291,8 +315,9 @@ def test_reindex_indexes_rst_files(home, tmp_path):
 def test_reindex_indexes_mdx_files(home, tmp_path):
     """`.mdx` is markdown carrying JSX components — the page format of Docusaurus- and
     Next.js-based doc sites, whose prose is otherwise unreachable. It indexes like `.md`,
-    with line locators; component tags are inert text. Fails before `.mdx` is in TEXT_EXTS
-    (the file is skipped, and the whole site indexes as nothing)."""
+    with line locators; component tags are inert text. Fails before `.mdx` is selected by
+    the manifest's extension list (the file is skipped, and the whole site indexes as
+    nothing)."""
     d = tmp_path / "docs"
     d.mkdir()
     (d / "guide.mdx").write_text(
@@ -317,13 +342,14 @@ def test_stale_delta_git_repo_current_is_not_stale(home, tmp_path, git_branch):
     rtfm._git_clone(str(remote), branch, dest, timeout=30)
     commit = rtfm._git_current_commit(dest)
     commit_date = rtfm._git_commit_date(dest, "HEAD")
-    conn = rtfm.get_index_db()
-    conn.execute(
-        "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?)",
-        ("specs", commit, commit_date))
-    conn.commit()
     src = rtfm.Source(name="specs", type="git_repo", path=dest,
                        url=str(remote), ref=branch)
+    conn = rtfm.get_index_db()
+    conn.execute(
+        "INSERT INTO source_meta(source, git_commit, git_commit_date, config_scope) "
+        "VALUES(?,?,?,?)",
+        ("specs", commit, commit_date, rtfm._config_scope(src)))
+    conn.commit()
     changed, stale = rtfm._stale_delta_git_repo(conn, src)
     assert stale is False
     assert changed == 0
@@ -338,14 +364,15 @@ def test_stale_delta_linked_dirty_is_stale(home, tmp_path, git_branch):
     dest = tmp_path / "dest"
     rtfm._git_clone(str(remote), branch, dest, timeout=30)
     commit = rtfm._git_current_commit(dest)
-    conn = rtfm.get_index_db()
-    conn.execute(
-        "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?)",
-        ("specs", commit, "2025-01-01T00:00:00+00:00"))
-    conn.commit()
-    (dest / "a.md").write_text("uncommitted v2\n")
     src = rtfm.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref=branch)
+    conn = rtfm.get_index_db()
+    conn.execute(
+        "INSERT INTO source_meta(source, git_commit, git_commit_date, config_scope) "
+        "VALUES(?,?,?,?)",
+        ("specs", commit, "2025-01-01T00:00:00+00:00", rtfm._config_scope(src)))
+    conn.commit()
+    (dest / "a.md").write_text("uncommitted v2\n")
     changed, stale = rtfm._stale_delta_git_repo(conn, src)
     assert stale is True
 
@@ -358,13 +385,14 @@ def test_stale_delta_pinned_sha_never_stale(home, tmp_path, git_branch):
     dest = tmp_path / "dest"
     rtfm._git_clone(str(remote), branch, dest, timeout=30)
     sha = rtfm._git_current_commit(dest)
-    conn = rtfm.get_index_db()
-    conn.execute(
-        "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?)",
-        ("specs", sha, "2025-01-01T00:00:00+00:00"))
-    conn.commit()
     src = rtfm.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref=sha)
+    conn = rtfm.get_index_db()
+    conn.execute(
+        "INSERT INTO source_meta(source, git_commit, git_commit_date, config_scope) "
+        "VALUES(?,?,?,?)",
+        ("specs", sha, "2025-01-01T00:00:00+00:00", rtfm._config_scope(src)))
+    conn.commit()
     changed, stale = rtfm._stale_delta_git_repo(conn, src)
     assert stale is False
 
@@ -383,12 +411,13 @@ def test_stale_delta_git_repo_behind_is_stale(home, tmp_path, git_branch):
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v2"], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "push", "origin", branch], capture_output=True)
+    src = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref=branch)
     conn = rtfm.get_index_db()
     conn.execute(
-        "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?)",
-        ("specs", old_commit, "2025-01-01T00:00:00+00:00"))
+        "INSERT INTO source_meta(source, git_commit, git_commit_date, config_scope) "
+        "VALUES(?,?,?,?)",
+        ("specs", old_commit, "2025-01-01T00:00:00+00:00", rtfm._config_scope(src)))
     conn.commit()
-    src = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref=branch)
     changed, stale = rtfm._stale_delta_git_repo(conn, src)
     assert stale is True
 
@@ -408,13 +437,14 @@ def test_stale_delta_git_repo_linked_head_moved_is_stale(home, tmp_path, git_bra
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v2"], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "push", "origin", branch], capture_output=True)
-    conn = rtfm.get_index_db()
-    conn.execute(
-        "INSERT INTO source_meta(source, git_commit, git_commit_date) VALUES(?,?,?)",
-        ("specs", old_commit, "2025-01-01T00:00:00+00:00"))
-    conn.commit()
     src = rtfm.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref=branch)
+    conn = rtfm.get_index_db()
+    conn.execute(
+        "INSERT INTO source_meta(source, git_commit, git_commit_date, config_scope) "
+        "VALUES(?,?,?,?)",
+        ("specs", old_commit, "2025-01-01T00:00:00+00:00", rtfm._config_scope(src)))
+    conn.commit()
     changed, stale = rtfm._stale_delta_git_repo(conn, src)
     assert stale is False  # remote moved, tree didn't — nothing to reindex
 
@@ -501,13 +531,18 @@ def test_markup_routine_still_extracts_headings(tmp_path):
     assert title == "Title" and "Section" in headings
 
 
+def _src(tmp_path, **kw):
+    kw.setdefault("ext_blocklist", frozenset())
+    return rtfm.Source(name="s", type="dir", path=tmp_path, **kw)
+
+
 def test_select_returns_a_bare_list_not_a_step_result(tmp_path):
     # Step 2 asks about intent, where rtfm has no standing to call 90% filtered a partial
     # success. A bare list means there is nowhere to record a step-2 partial outcome.
     t = tmp_path / "c"
     t.mkdir()
     (t / "a.md").write_text("a")
-    got = rtfm.select([t / "a.md"], t)
+    got = rtfm.select([t / "a.md"], t, _src(t))
     assert isinstance(got, list)
     assert not isinstance(got, rtfm.StepResult)
 
@@ -516,8 +551,128 @@ def test_select_keeps_supported_and_drops_the_rest(tmp_path):
     t = tmp_path / "c"
     t.mkdir()
     paths = [t / "a.md", t / "b.png", t / "c.pdf", t / "d.rst"]
-    got = rtfm.select(paths, t)
+    got = rtfm.select(paths, t, _src(t))
     assert sorted(p.name for p in got) == ["a.md", "c.pdf", "d.rst"]
+
+
+def test_allowlist_selects_only_those_types(home, tmp_path):
+    for n in ("a.md", "b.bzl", "c.png", "d.txt"):
+        (tmp_path / n).write_text("x")
+    src = rtfm.Source(name="s", type="dir", path=tmp_path,
+                      ext_allowlist=frozenset({".md", ".bzl"}))
+    got = {p.name for p in rtfm.iter_source_files(src)}
+    assert got == {"a.md", "b.bzl"}
+
+
+def test_blocklist_selects_everything_but_the_union_with_rtfms_defaults(home, tmp_path):
+    for n in ("a.md", "b.py", "c.png", "d.log"):
+        (tmp_path / n).write_text("x")
+    src = _src(tmp_path, ext_blocklist=frozenset({".log"}))
+    got = {p.name for p in rtfm.iter_source_files(src)}
+    assert got == {"a.md", "b.py"}          # .png from the default set, .log from the user's
+
+
+def test_an_allowlist_never_consults_the_default_blocklist(home, tmp_path):
+    (tmp_path / "a.png").write_text("x")
+    src = rtfm.Source(name="s", type="dir", path=tmp_path,
+                      ext_allowlist=frozenset({".png"}))
+    assert [p.name for p in rtfm.iter_source_files(src)] == ["a.png"]
+
+
+def test_paths_scopes_to_a_prefix(home, tmp_path):
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "src").mkdir()
+    (tmp_path / "docs" / "a.md").write_text("x")
+    (tmp_path / "src" / "b.md").write_text("x")
+    src = _src(tmp_path, paths=("docs",))
+    assert [p.name for p in rtfm.iter_source_files(src)] == ["a.md"]
+
+
+def test_an_exclusion_beats_an_inclusion(home, tmp_path):
+    (tmp_path / "docs" / "versions").mkdir(parents=True)
+    (tmp_path / "docs" / "a.md").write_text("x")
+    (tmp_path / "docs" / "versions" / "old.md").write_text("x")
+    src = _src(tmp_path, paths=("docs",), exclude_paths=("docs/versions",))
+    assert [p.name for p in rtfm.iter_source_files(src)] == ["a.md"]
+
+
+def test_an_exclusion_alone_scopes_the_whole_tree_minus_that_prefix(home, tmp_path):
+    (tmp_path / "keep").mkdir()
+    (tmp_path / "drop").mkdir()
+    (tmp_path / "keep" / "a.md").write_text("x")
+    (tmp_path / "drop" / "b.md").write_text("x")
+    src = _src(tmp_path, exclude_paths=("drop",))
+    assert [p.name for p in rtfm.iter_source_files(src)] == ["a.md"]
+
+
+def test_a_prefix_does_not_match_a_partial_directory_name(home, tmp_path):
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docsets").mkdir()
+    (tmp_path / "docs" / "a.md").write_text("x")
+    (tmp_path / "docsets" / "b.md").write_text("x")
+    src = _src(tmp_path, paths=("docs",))
+    assert [p.name for p in rtfm.iter_source_files(src)] == ["a.md"]
+
+
+def test_an_exclusion_that_is_a_prefix_of_an_inclusion_selects_nothing(home, tmp_path):
+    # paths=("docs/api",) narrows to a subtree that exclude_paths=("docs",) then excludes
+    # wholesale — exclusion wins unconditionally (ADR 0014), so this is the "looks correct,
+    # indexes nothing" shape the ADR warns about, not a bug in either clause alone.
+    (tmp_path / "docs" / "api").mkdir(parents=True)
+    (tmp_path / "docs" / "api" / "a.md").write_text("x")
+    src = _src(tmp_path, paths=("docs/api",), exclude_paths=("docs",))
+    assert [p.name for p in rtfm.iter_source_files(src)] == []
+
+
+def test_a_root_level_file_is_not_selected_under_a_restrictive_paths(home, tmp_path):
+    # readme.md sits at the source root, outside the "docs" prefix — paths narrows to a
+    # subtree, it never implicitly keeps the root alongside it.
+    (tmp_path / "readme.md").write_text("x")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "a.md").write_text("x")
+    src = _src(tmp_path, paths=("docs",))
+    assert [p.name for p in rtfm.iter_source_files(src)] == ["a.md"]
+
+
+def test_markup_exts_is_not_a_selection_set(home, tmp_path):
+    # The whole point of ADR 0014: a .bzl file is selected by the manifest and handled by
+    # the plain-text routine. TEXT_EXTS deciding both is the defect being deleted.
+    assert not hasattr(rtfm, "TEXT_EXTS")
+    (tmp_path / "r.bzl").write_text("def cc_shared_library(shared_lib_name): pass")
+    src = rtfm.Source(name="s", type="dir", path=tmp_path,
+                      ext_allowlist=frozenset({".bzl"}))
+    conn = rtfm.get_index_db()
+    rtfm.index_source(conn, src, tmp_path)
+    assert rtfm.search_index(conn, "shared_lib_name", source="s")
+
+
+def test_a_dotdot_paths_entry_selects_nothing(home, tmp_path):
+    # Task 1 rejects glob characters in `paths` but not a `..` segment. What's actually
+    # guaranteed: selection can never leave the source root, because the prefix match is
+    # against a relpath _rel produces relative to `base`, and access() only ever enumerates
+    # beneath that root — a relpath can neither render as absolute nor climb above it, so a
+    # ".." entry can't match anything.
+    (tmp_path / "a.md").write_text("x")
+    assert [p.name for p in rtfm.iter_source_files(_src(tmp_path, paths=("..",)))] == []
+
+
+def test_a_leading_slash_in_paths_normalizes_to_a_root_anchored_prefix(home, tmp_path):
+    # A leading "/" in a manifest's `paths` entry is root-anchoring, the same convention
+    # .gitignore uses — _normalize_paths strips it, so "/docs" becomes the source-relative
+    # prefix "docs" and DOES select the docs/ subtree. Going through _source_from_table (the
+    # real manifest parsing path), not _src: _src builds a Source directly and bypasses
+    # _normalize_paths, which is why an earlier version of this test could (wrongly) claim
+    # a leading-"/" entry matches nothing.
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "etc").mkdir()
+    (tmp_path / "docs" / "a.md").write_text("x")
+    (tmp_path / "etc" / "passwd.md").write_text("x")
+    src = rtfm._source_from_table({
+        "name": "s", "type": "dir", "path": str(tmp_path),
+        "paths": ["/docs"], "ext_blocklist": [],
+    })
+    assert src.paths == ("docs",)
+    assert [p.name for p in rtfm.iter_source_files(src)] == ["a.md"]
 
 
 def test_access_returns_reachable_positions(tmp_path):
@@ -754,3 +909,206 @@ def test_stale_delta_converges_after_a_denied_source_root(home, tmp_path, unopen
     unopenable(t, directory=True)
     rtfm.index_source(conn, src, t)  # reconcile round: the row survives, still unreachable
     assert rtfm._stale_delta(conn, src) == (0, False, False)
+
+
+def test_a_de_selected_file_is_purged(home, tmp_path):
+    # The manifest stops wanting .log; the file is untouched on disk. Step 2's answer is
+    # the only one that decides what is in this source, so the row must go. Distinct bodies:
+    # this test only asserts on `locations`, not on shared content (see the byte-identical
+    # case below for that).
+    (tmp_path / "keep.md").write_text("findable keyword")
+    (tmp_path / "drop.log").write_text("a different findable keyword")
+    conn = rtfm.get_index_db()
+    wide = rtfm.Source(name="s", type="dir", path=tmp_path, ext_blocklist=frozenset())
+    rtfm.index_source(conn, wide, tmp_path)
+    rows = {r[0] for r in conn.execute("SELECT relpath FROM locations WHERE source='s'")}
+    assert rows == {"keep.md", "drop.log"}
+
+    narrow = rtfm.Source(name="s", type="dir", path=tmp_path,
+                         ext_blocklist=frozenset({".log"}))
+    got = rtfm.index_source(conn, narrow, tmp_path)
+    assert got.cache.purged == 1
+    rows = {r[0] for r in conn.execute("SELECT relpath FROM locations WHERE source='s'")}
+    assert rows == {"keep.md"}
+
+
+def test_a_de_selected_file_leaves_no_orphan_content(home, tmp_path):
+    (tmp_path / "drop.log").write_text("unique content here")
+    conn = rtfm.get_index_db()
+    rtfm.index_source(conn, rtfm.Source(name="s", type="dir", path=tmp_path,
+                                        ext_blocklist=frozenset()), tmp_path)
+    assert conn.execute("SELECT count(*) FROM contents").fetchone()[0] == 1
+    rtfm.index_source(conn, rtfm.Source(name="s", type="dir", path=tmp_path,
+                                        ext_blocklist=frozenset({".log"})), tmp_path)
+    assert conn.execute("SELECT count(*) FROM contents").fetchone()[0] == 0
+
+
+def test_a_de_selected_files_content_survives_via_a_still_selected_twin(home, tmp_path):
+    # keep.md and drop.log are byte-identical, so they share one contents row (one sha256).
+    # De-selecting .log purges drop.log's *locations* row, but GC is global — "NOT IN (SELECT
+    # sha256 FROM locations)" — not per-source, so the shared content is NOT collected while
+    # keep.md's own locations row still references it, and keep.md must stay searchable
+    # throughout. This is the mechanism that produced a false positive during review.
+    body = "shared identical keyword body"
+    (tmp_path / "keep.md").write_text(body)
+    (tmp_path / "drop.log").write_text(body)
+    conn = rtfm.get_index_db()
+    wide = rtfm.Source(name="s", type="dir", path=tmp_path, ext_blocklist=frozenset())
+    rtfm.index_source(conn, wide, tmp_path)
+    assert conn.execute("SELECT count(*) FROM contents").fetchone()[0] == 1  # one shared sha
+    assert rtfm.search_index(conn, "shared identical keyword", source="s")
+
+    narrow = rtfm.Source(name="s", type="dir", path=tmp_path,
+                         ext_blocklist=frozenset({".log"}))
+    got = rtfm.index_source(conn, narrow, tmp_path)
+    assert got.cache.purged == 1
+    rows = {r[0] for r in conn.execute("SELECT relpath FROM locations WHERE source='s'")}
+    assert rows == {"keep.md"}
+    assert conn.execute("SELECT count(*) FROM contents").fetchone()[0] == 1  # content survives
+    assert rtfm.search_index(conn, "shared identical keyword", source="s")
+
+
+def test_key_order_does_not_change_the_scope(home, tmp_path):
+    a = rtfm.Source(name="s", type="dir", path=tmp_path,
+                    paths=("a", "b"), ext_allowlist=frozenset({".md", ".pdf"}))
+    b = rtfm.Source(name="s", type="dir", path=tmp_path,
+                    paths=("b", "a"), ext_allowlist=frozenset({".pdf", ".md"}))
+    assert rtfm._config_scope(a) == rtfm._config_scope(b)
+
+
+def test_config_scope_does_not_collide_on_a_comma_in_a_path(home, tmp_path):
+    # A directory literally named "a,b" and the pair ("a", "b") joined on a comma used to
+    # serialize to the same string — a git_repo source edited between the two configs read
+    # as not-stale, defeating the exact check ADR 0014 added config_scope for. JSON encoding
+    # keeps the two shapes distinct because "," inside a JSON string element is not the same
+    # as "," used as JSON's own array separator.
+    one_entry = rtfm.Source(name="s", type="dir", path=tmp_path, paths=("a,b",))
+    two_entries = rtfm.Source(name="s", type="dir", path=tmp_path, paths=("a", "b"))
+    assert rtfm._config_scope(one_entry) != rtfm._config_scope(two_entries)
+
+
+def test_config_scope_distinguishes_declared_empty_from_undeclared(home, tmp_path):
+    # ext_allowlist=frozenset() ("index nothing extra") and ext_allowlist=None ("not declared,
+    # ext_blocklist governs instead") are different configurations and must scope differently.
+    declared_empty = rtfm.Source(name="s", type="dir", path=tmp_path,
+                                 ext_allowlist=frozenset())
+    undeclared = rtfm.Source(name="s", type="dir", path=tmp_path, ext_allowlist=None)
+    assert rtfm._config_scope(declared_empty) != rtfm._config_scope(undeclared)
+
+
+def test_a_source_selecting_nothing_is_forced_stale(home, tmp_path):
+    # indexed == on_disk == {} reads as fresh forever, so the source is skipped on every
+    # query and its step report is never even computed (ADR 0014).
+    (tmp_path / "a.png").write_text("x")
+    src = rtfm.Source(name="s", type="dir", path=tmp_path,
+                      ext_allowlist=frozenset({".md"}))
+    conn = rtfm.get_index_db()
+    rtfm.index_source(conn, src, tmp_path)
+    assert rtfm._stale_delta(conn, src)[1] is True
+
+
+def test_a_non_utf8_file_fails_loudly_rather_than_indexing_mangled(home, tmp_path):
+    (tmp_path / "cp1252.md").write_bytes(b"caf\xe9 keyword\n")
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="s", type="dir", path=tmp_path, ext_blocklist=frozenset())
+    got = rtfm.index_source(conn, src, tmp_path)
+    assert [p.position for p in got.handled.problems] == ["cp1252.md"]
+    assert "utf-8" in got.handled.problems[0].reason.lower()
+    row = conn.execute("SELECT extracted_ok, error FROM contents").fetchone()
+    assert row[0] == 0 and row[1]
+
+
+def test_no_replacement_character_reaches_the_index(home, tmp_path):
+    (tmp_path / "b.md").write_bytes(b"\x00\x01\x02 keyword\n")
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="s", type="dir", path=tmp_path, ext_blocklist=frozenset())
+    rtfm.index_source(conn, src, tmp_path)
+    texts = [r[0] for r in conn.execute("SELECT text FROM content_fts")]
+    assert not any("�" in t for t in texts)
+
+
+def test_errors_replace_is_gone_from_the_source():
+    # Both ADRs state it is removed. A grep is the only assertion that stays true when
+    # someone adds a fourth decode site.
+    import pathlib
+    assert 'errors="replace"' not in pathlib.Path(rtfm.__file__).read_text()
+
+
+def test_nothing_selected_names_the_reachable_count_and_the_policy(home, tmp_path):
+    # A manifest whose extension list matches nothing indexes zero files and, before this,
+    # gave no reason (ADR 0015's opening example).
+    d = tmp_path / "c"
+    d.mkdir()
+    for n in ("a.md", "b.md", "c.md"):
+        (d / n).write_text("x")
+    src = rtfm.Source(name="bazel", type="dir", path=d, ext_allowlist=frozenset({".nomatch"}))
+    conn = rtfm.get_index_db()
+    result = rtfm.index_source(conn, src, d)
+    [msg] = rtfm.report_all(src, result)
+    assert "NOTHING SELECTED 'bazel'" in msg
+    assert "3 path(s) reachable" in msg
+    assert "ext_allowlist = .nomatch" in msg
+
+
+def test_nothing_selected_names_the_paths_policy_too(home, tmp_path):
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "a.md").write_text("x")
+    src = rtfm.Source(name="s", type="dir", path=tmp_path, paths=("nope",),
+                      ext_blocklist=frozenset())
+    conn = rtfm.get_index_db()
+    result = rtfm.index_source(conn, src, tmp_path)
+    [msg] = rtfm.report_all(src, result)
+    assert "paths = nope" in msg
+
+
+def test_nothing_selected_in_blocklist_mode_summarizes_defaults_by_count(home, tmp_path):
+    # The effective blocklist is the user's list unioned with rtfm's ~70 defaults. Dumping
+    # the whole union produced a 700-character wall the user could not act on and that
+    # buried the `paths` clause (fix round 1: a real defect, not a style choice). Name what
+    # the user wrote; summarize the rest by count, and never show a default extension the
+    # user never declared.
+    d = tmp_path / "c"
+    d.mkdir()
+    (d / "a.png").write_bytes(b"x")          # blocked by rtfm's default set, not by the user
+    src = rtfm.Source(name="s", type="dir", path=d, ext_blocklist=frozenset({".md"}))
+    conn = rtfm.get_index_db()
+    result = rtfm.index_source(conn, src, d)
+    [msg] = rtfm.report_all(src, result)
+    assert "ext_blocklist = .md" in msg
+    assert f"rtfm's {len(rtfm.DEFAULT_EXT_BLOCKLIST)} default" in msg
+    assert ".png" not in msg                 # the user never wrote it; the wall is gone
+
+
+def test_nothing_selected_in_blocklist_mode_with_an_empty_user_list(home, tmp_path):
+    d = tmp_path / "c"
+    d.mkdir()
+    (d / "a.png").write_bytes(b"x")
+    src = rtfm.Source(name="s", type="dir", path=d, ext_blocklist=frozenset())
+    conn = rtfm.get_index_db()
+    result = rtfm.index_source(conn, src, d)
+    [msg] = rtfm.report_all(src, result)
+    assert "ext_blocklist = []" in msg
+    assert f"rtfm's {len(rtfm.DEFAULT_EXT_BLOCKLIST)} default" in msg
+    assert ".png" not in msg
+
+
+def test_an_empty_source_directory_selects_silently(home, tmp_path):
+    # An empty folder is not a manifest error — reachable.kept is empty too, which is step
+    # 1's story (silence), never step 2's.
+    d = tmp_path / "c"
+    d.mkdir()
+    src = rtfm.Source(name="s", type="dir", path=d, ext_allowlist=frozenset({".md"}))
+    conn = rtfm.get_index_db()
+    result = rtfm.index_source(conn, src, d)
+    assert rtfm.report_all(src, result) == []
+
+
+def test_an_unreadable_root_reports_access_only_not_nothing_selected(home, tmp_path, unopenable):
+    t = tmp_path / "c"
+    unopenable(t, directory=True)
+    src = rtfm.Source(name="s", type="dir", path=t, ext_allowlist=frozenset({".md"}))
+    conn = rtfm.get_index_db()
+    result = rtfm.index_source(conn, src, t)
+    msgs = rtfm.report_all(src, result)
+    assert any("COULD NOT OPEN" in m for m in msgs)
+    assert not any("NOTHING SELECTED" in m for m in msgs)

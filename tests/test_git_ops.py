@@ -2,6 +2,7 @@ import os
 import subprocess
 
 import pytest
+from conftest import make_git_repo
 
 import rtfm_server as rtfm
 
@@ -379,7 +380,7 @@ def test_search_then_read_managed_git_repo(home, tmp_path):
     rtfm.load_manifest()
     mp = rtfm.manifest_path()
     mp.write_text(
-        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\n'
+        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\next_blocklist=[]\n'
     )
 
     # search auto-reindexes the managed clone and returns hit locations with relpaths
@@ -412,7 +413,7 @@ def test_search_auto_reindexes_stale_git_repo(home, tmp_path):
     rtfm.load_manifest()  # bootstrap default
     mp = rtfm.manifest_path()
     mp.write_text(
-        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\n'
+        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\next_blocklist=[]\n'
     )
 
     # First search clones and indexes v1
@@ -449,7 +450,7 @@ def test_search_auto_reindexes_linked_after_user_refresh(home, tmp_path):
     rtfm.load_manifest()  # bootstrap default
     mp = rtfm.manifest_path()
     mp.write_text(
-        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\n'
+        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\next_blocklist=[]\n'
     )
 
     # First search indexes v1
@@ -503,7 +504,7 @@ def test_search_warns_when_git_repo_fetch_fails(home, tmp_path, monkeypatch):
     rtfm.load_manifest()
     mp = rtfm.manifest_path()
     mp.write_text(
-        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\n'
+        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\next_blocklist=[]\n'
     )
     out = rtfm.search(query="widget")
     # Should serve v1 (stale) with a warning
@@ -671,7 +672,7 @@ def test_search_warns_on_dirty_linked(home, tmp_path):
     rtfm.load_manifest()
     mp = rtfm.manifest_path()
     mp.write_text(
-        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\n'
+        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\next_blocklist=[]\n'
     )
     out = rtfm.search(query="widget protocol")
     assert any("v1" in h["snippet"] for h in out["results"])
@@ -719,7 +720,7 @@ def test_clone_vanished_is_recreated(home, tmp_path):
 
     rtfm.load_manifest()
     mp = rtfm.manifest_path()
-    mp.write_text(f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\n')
+    mp.write_text(f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\next_blocklist=[]\n')
     out = rtfm.search(query="alpha bravo")
     assert any("alpha bravo" in h["snippet"] for h in out["results"])
 
@@ -852,7 +853,7 @@ def test_hex_named_branch_not_detached(home, tmp_path):
     mp = rtfm.manifest_path()
     mp.write_text(
         f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\n'
-        f'ref="deadbeef"\npath="{dest}"\n'
+        f'ref="deadbeef"\npath="{dest}"\next_blocklist=[]\n'
     )
     out = rtfm.list_sources()
     specs = next(s for s in out["sources"] if s["name"] == "specs")
@@ -1045,7 +1046,7 @@ def test_managed_hex_branch_first_run(home, tmp_path):
     rtfm.load_manifest()
     mp = rtfm.manifest_path()
     mp.write_text(
-        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="deadbeef"\n'
+        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="deadbeef"\next_blocklist=[]\n'
     )
     out = rtfm.list_sources()
     specs = next(s for s in out["sources"] if s["name"] == "specs")
@@ -1098,7 +1099,7 @@ def test_list_sources_error_status(home, tmp_path):
     rtfm.load_manifest()
     mp = rtfm.manifest_path()
     mp.write_text(
-        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\n'
+        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\next_blocklist=[]\n'
     )
     out = rtfm.list_sources()
     specs = next(s for s in out["sources"] if s["name"] == "specs")
@@ -1112,7 +1113,7 @@ def test_health_check_git_probe(home, tmp_path, monkeypatch):
     mp = rtfm.manifest_path()
     mp.write_text(
         '[[source]]\nname="specs"\ntype="git_repo"\n'
-        'url="https://example.com/repo.git"\nref="main"\n'
+        'url="https://example.com/repo.git"\nref="main"\next_blocklist=[]\n'
     )
     _no_git(monkeypatch, tmp_path)
     out = rtfm.health_check()
@@ -1243,7 +1244,7 @@ def test_search_does_not_reattempt_broken_source_within_ttl(home, tmp_path, monk
     mp = rtfm.manifest_path()
     mp.write_text(
         f'[[source]]\nname="specs"\ntype="git_repo"\n'
-        f'url="{tmp_path / "no-such-remote.git"}"\nref="main"\n'
+        f'url="{tmp_path / "no-such-remote.git"}"\nref="main"\next_blocklist=[]\n'
     )
     attempts = []
     real_reindex = rtfm.reindex_source
@@ -1286,7 +1287,7 @@ def test_managed_pin_change_detected_on_search(home, tmp_path):
 
     def write_manifest(ref):
         mp.write_text(
-            f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="{ref}"\n'
+            f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="{ref}"\next_blocklist=[]\n'
         )
 
     write_manifest(sha1)
@@ -1318,8 +1319,8 @@ def test_search_dedupes_warnings_per_clone(home, tmp_path):
     rtfm.load_manifest()
     mp = rtfm.manifest_path()
     mp.write_text(
-        f'[[source]]\nname="s1"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\n'
-        f'[[source]]\nname="s2"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\n'
+        f'[[source]]\nname="s1"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\next_blocklist=[]\n'
+        f'[[source]]\nname="s2"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\next_blocklist=[]\n'
     )
     (dest / "a.md").write_text("uncommitted edit\n")  # dirty the shared clone
 
@@ -1397,8 +1398,8 @@ def test_search_sources_searched_respects_filter(home, tmp_path):
     rtfm.load_manifest()
     mp = rtfm.manifest_path()
     mp.write_text(
-        f'[[source]]\nname="docs"\ntype="dir"\npath="{d}"\n'
-        '[[source]]\nname="typoed"\ntype="Git_Repo"\nurl="https://example.com/r.git"\n'
+        f'[[source]]\nname="docs"\ntype="dir"\npath="{d}"\next_blocklist=[]\n'
+        '[[source]]\nname="typoed"\ntype="Git_Repo"\nurl="https://example.com/r.git"\next_blocklist=[]\n'
     )
     out = rtfm.search(query="filtered keyword", source="docs")
     assert out["sources_searched"] == ["docs"]
@@ -1427,3 +1428,109 @@ def test_reindex_unreadable_clone_is_git_failed(home, tmp_path):
         assert "GIT_FAILED" in summary["error"]
     finally:
         dest.chmod(0o755)  # let pytest clean up the tmp dir
+
+
+# --- config_scope staleness (ADR 0014) ---
+
+def test_editing_a_git_repo_scope_makes_it_stale(home, tmp_path, git_branch):
+    remote, seed, branch = make_git_repo(tmp_path, git_branch)
+    conn = rtfm.get_index_db()
+    wide = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=branch,
+                       ext_blocklist=frozenset())
+    rtfm.reindex_source(conn, wide)
+    assert rtfm._stale_delta(conn, wide)[1] is False
+
+    narrow = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=branch,
+                         ext_allowlist=frozenset({".md"}))
+    assert rtfm._stale_delta(conn, narrow)[1] is True
+
+
+def test_editing_a_git_repo_scope_by_exclude_paths_alone_makes_it_stale(
+        home, tmp_path, git_branch):
+    # Same regression as above, but for exclude_paths specifically: only ext_allowlist edits
+    # were covered, so a refactor that dropped exclude_paths from _config_scope would go
+    # unnoticed. Two sources differing only in exclude_paths must scope differently and the
+    # second must read stale against the first's indexed state.
+    remote, seed, branch = make_git_repo(tmp_path, git_branch)
+    conn = rtfm.get_index_db()
+    unscoped = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=branch,
+                           ext_blocklist=frozenset())
+    rtfm.reindex_source(conn, unscoped)
+    assert rtfm._stale_delta(conn, unscoped)[1] is False
+
+    excluded = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=branch,
+                           exclude_paths=("nope",), ext_blocklist=frozenset())
+    assert rtfm._config_scope(unscoped) != rtfm._config_scope(excluded)
+    assert rtfm._stale_delta(conn, excluded)[1] is True
+
+
+def test_a_scope_edit_beats_a_sha_pin(home, tmp_path, git_branch):
+    # A pin freezes the commit, not the manifest (ADR 0014). Compared before every other
+    # branch, including the pin short-circuit that returns early.
+    remote, seed, branch = make_git_repo(tmp_path, git_branch)
+    sha = subprocess.run(["git", "-C", str(seed), "rev-parse", "HEAD"],
+                         capture_output=True, text=True).stdout.strip()
+    conn = rtfm.get_index_db()
+    pinned = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=sha,
+                         path=seed, ext_blocklist=frozenset())
+    rtfm.reindex_source(conn, pinned)
+    assert rtfm._stale_delta(conn, pinned)[1] is False
+
+    rescoped = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=sha,
+                           path=seed, ext_allowlist=frozenset({".md"}))
+    assert rtfm._stale_delta(conn, rescoped)[1] is True
+
+
+def test_git_repo_scope_selects_only_the_matching_subset(home, tmp_path):
+    # Task 2 wired paths/ext_allowlist into select() for every source type, but no test
+    # anywhere had exercised them for git_repo specifically — this seeds a real clone with
+    # files in and out of scope and checks the index only holds the matches.
+    remote, seed, branch = make_git_repo(tmp_path, "main")
+    (seed / "docs").mkdir()
+    (seed / "docs" / "a.md").write_text("in scope by path and extension\n")
+    (seed / "docs" / "b.txt").write_text("wrong extension, right path\n")
+    (seed / "other").mkdir()
+    (seed / "other" / "c.md").write_text("right extension, wrong path\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "more files"],
+                   capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", branch],
+                   capture_output=True)
+
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=branch,
+                      paths=("docs",), ext_allowlist=frozenset({".md"}))
+    rtfm.reindex_source(conn, src)
+    rows = {r[0] for r in conn.execute("SELECT relpath FROM locations WHERE source='g'")}
+    assert rows == {"docs/a.md"}
+
+
+def test_two_git_repo_sources_sharing_one_clone_keep_separate_scopes(home, tmp_path):
+    # Two linked sources can point `path` at the very same clone (test_search_dedupes_
+    # warnings_per_clone already covers that for warnings). Each source's own `locations`
+    # rows must hold only its own scope's matches — the clone is shared, the scope isn't.
+    remote, seed, branch = make_git_repo(tmp_path, "main")
+    (seed / "docs").mkdir()
+    (seed / "docs" / "a.md").write_text("docs content\n")
+    (seed / "other").mkdir()
+    (seed / "other" / "b.md").write_text("other content\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "more files"],
+                   capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", branch],
+                   capture_output=True)
+    dest = tmp_path / "dest"
+    rtfm._git_clone(str(remote), branch, dest, timeout=30)
+
+    conn = rtfm.get_index_db()
+    src1 = rtfm.Source(name="s1", type="git_repo", path=dest, url=str(remote), ref=branch,
+                       paths=("docs",), ext_blocklist=frozenset())
+    src2 = rtfm.Source(name="s2", type="git_repo", path=dest, url=str(remote), ref=branch,
+                       paths=("other",), ext_blocklist=frozenset())
+    rtfm.reindex_source(conn, src1)
+    rtfm.reindex_source(conn, src2)
+
+    rows1 = {r[0] for r in conn.execute("SELECT relpath FROM locations WHERE source='s1'")}
+    rows2 = {r[0] for r in conn.execute("SELECT relpath FROM locations WHERE source='s2'")}
+    assert rows1 == {"docs/a.md"}
+    assert rows2 == {"other/b.md"}
