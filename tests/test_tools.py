@@ -196,6 +196,18 @@ def test_search_auto_reindex_disabled_with_zero_budget(home, tmp_path, monkeypat
     assert "WARNING" in out and any("manual" in w for w in out["WARNING"])
 
 
+def test_search_reports_a_file_it_could_not_open(home, tmp_path, unopenable):
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "a.md").write_text("alpha keyword")
+    unopenable(t / "locked.md")
+    (home / "manifest.toml").write_text(
+        f'[[source]]\nname="s"\ntype="dir"\npath="{t}"\n')
+    resp = rtfm.search("keyword")
+    assert resp["results"], "the readable file must still be searchable"
+    assert any("COULD NOT OPEN" in w and "locked.md" in w for w in resp.get("WARNING", []))
+
+
 def test_default_self_heals_on_search(home):
     rtfm.load_manifest()
     (rtfm.default_source_dir() / "n.md").write_text("zephyr keyword here\n")
@@ -359,6 +371,20 @@ def test_health_check_reports_schema_version(home):
     out = rtfm.health_check()
     assert out["ok"] is True
     assert out["schema_version"] == rtfm.SCHEMA_VERSION
+
+
+def test_health_check_calls_step_one_without_indexing(home, tmp_path, unopenable):
+    # health_check wants "can rtfm reach this source's bytes" without extracting anything.
+    # Under the old shape that forced a second implementation of the walk, which drifted.
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "a.md").write_text("alpha")
+    unopenable(t / "vault", directory=True)
+    (home / "manifest.toml").write_text(
+        f'[[source]]\nname="s"\ntype="dir"\npath="{t}"\n')
+    health = rtfm.health_check()
+    assert health["ok"] is False
+    assert any("vault" in i for i in health["issues"])
 
 
 def test_find_duplicates_groups_by_content(home, tmp_path):

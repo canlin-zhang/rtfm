@@ -618,6 +618,38 @@ class Indexed(NamedTuple):
     cache: CacheStats
 
 
+_STEP_MESSAGES = {
+    "access": ("COULD NOT OPEN", "could not be reached",
+               "fix the permissions, or point the source elsewhere"),
+    "read": ("COULD NOT READ", "could not give up their bytes",
+             "fix storage or permissions"),
+    "handle": ("COULD NOT HANDLE", "could not be processed",
+               "convert them, or exclude their file types"),
+}
+
+
+def report(src_name: str, result: StepResult, step: str) -> list[str]:
+    """Turn one step's problems into messages. The only place a Problem becomes text.
+
+    Each step names itself and gives its own remedy, because merging them tells a user to
+    convert a file they simply lack permission to open (ADR 0015)."""
+    if not result.problems:
+        return []
+    tag, what, recover = _STEP_MESSAGES[step]
+    shown = ", ".join(p.position for p in result.problems[:3])
+    more = f" (+{len(result.problems) - 3} more)" if len(result.problems) > 3 else ""
+    reasons = ", ".join(sorted({p.reason for p in result.problems})[:2])
+    return [f"!!! {tag} '{src_name}' !!! {len(result.problems)} path(s) {what}: "
+            f"{shown}{more} — {reasons}. Recover: {recover} in {manifest_path()}."]
+
+
+def report_all(src_name: str, result: Indexed) -> list[str]:
+    """Every step's report, in pipeline order."""
+    return (report(src_name, result.reachable, "access")
+            + report(src_name, result.read, "read")
+            + report(src_name, result.handled, "handle"))
+
+
 def _extract_many(jobs: list[tuple[str, str]]) -> list[_Extracted]:
     """jobs: [(sha, path)] -> [_Extracted(sha, rows, title, headings, error)]. Parallel over unique
     contents (dedup has already cut the job count) with a THREAD pool. A process pool is
@@ -882,10 +914,8 @@ def index_source(conn: sqlite3.Connection, src: Source, root: Path) -> Indexed:
                          purged=len(vanished)))
 
 
-def _index_files(conn: sqlite3.Connection, source_name: str, root: Path) -> dict:
-    """Today's counter dict, now a projection of `Indexed`. Kept so `reindex_source` and
-    `_reindex_git_repo` are unchanged; the JSON wire format does not move."""
-    result = index_source(conn, Source(name=source_name, type="dir", path=root), root)
+def _as_summary(result: Indexed) -> dict:
+    """Today's counter dict, as a projection of `Indexed`. The JSON wire format does not move."""
     errors = sum(1 for ex in result.handled.kept if ex.error)
     return {"files_seen": len(result.wanted),
             "unique_contents": result.cache.unique_contents,
@@ -893,6 +923,12 @@ def _index_files(conn: sqlite3.Connection, source_name: str, root: Path) -> dict
             "extraction_skips": result.cache.extraction_skips,
             "purged": result.cache.purged,
             "errors": errors}
+
+
+def _index_files(conn: sqlite3.Connection, source_name: str, root: Path) -> dict:
+    """Kept so `_reindex_git_repo` is unchanged."""
+    result = index_source(conn, Source(name=source_name, type="dir", path=root), root)
+    return _as_summary(result)
 
 
 def _reindex_git_repo(conn: sqlite3.Connection, src: Source) -> dict:
@@ -953,7 +989,9 @@ def reindex_source(conn: sqlite3.Connection, src: Source) -> dict:
                "newly_extracted": 0, "extraction_skips": 0, "purged": 0, "errors": 0}
     if src.path is None or not src.path.exists():
         return summary
-    summary.update(_index_files(conn, src.name, src.path))
+    result = index_source(conn, src, src.path)
+    summary.update(_as_summary(result))
+    summary["warnings"] = report_all(src.name, result)
     return summary
 
 
@@ -1613,7 +1651,8 @@ def search(query: str, source: str | None = None, max_files: int = 20,
                 continue
             if s.type == "dir":
                 if changed <= budget:
-                    reindex_source(conn, s)          # inline: only `changed` files extract
+                    res = reindex_source(conn, s)    # inline: only `changed` files extract
+                    warnings.extend(res.get("warnings", ()))
                 else:
                     warnings.append(
                         f"!!! STALE SOURCE '{s.name}' !!! {changed} new/changed files exceed the "
@@ -1699,6 +1738,8 @@ def reindex(source: str | None = None) -> dict:
         if dropped:
             conn.commit()
     resp: dict = {"reindexed": [reindex_source(conn, s) for s in targets]}
+    for summary in resp["reindexed"]:
+        warnings.extend(summary.pop("warnings", ()))
     if dropped:
         resp["purged_sources"] = dropped
     if warnings:
@@ -1848,6 +1889,17 @@ def health_check() -> dict:
         status["sources"] = [{"name": s.name, "type": s.type,
                               **( {"url": s.url, "ref": s.ref} if s.type == "git_repo" else {})}
                              for s in sources]
+        for src in sources:
+            if src.type not in ("dir", "git_repo"):
+                continue
+            root = src.path if src.path is not None else _managed_repo_path(src.name)
+            if not root.exists():
+                continue
+            reachable = access(src, root)
+            issues = report(src.name, reachable, "access")
+            if issues:
+                status["ok"] = False
+                status["issues"].extend(issues)
         if not status.get("git") and any(s.type == "git_repo" for s in sources):
             # git_repo sources cannot be refreshed without git — a green 'ok' with
             # an impossible corpus is a silent failure.
