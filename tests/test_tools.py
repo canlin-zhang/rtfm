@@ -152,7 +152,7 @@ def test_search_survives_inline_reindex_failure(home, tmp_path, monkeypatch):
 
     def boom(*a, **k):
         raise OSError("simulated mid-rebuild failure")
-    monkeypatch.setattr(rtfm, "reindex_source", boom)             # ...then blow up the rebuild
+    monkeypatch.setattr(rtfm, "_ingest", boom)                    # ...then blow up the rebuild
     out = rtfm.search(query="widget protocol", source="manual")
     assert any("widget protocol" in h["snippet"] for h in out["results"])   # prior content served
     assert "WARNING" in out and any("AUTO-REINDEX FAILED" in w and "manual" in w
@@ -664,3 +664,118 @@ def test_the_zero_path_summary_has_the_same_keys_as_a_real_one(home, tmp_path):
     (tmp_path / "a.md").write_text("x")
     assert (set(rtfm.reindex_source(conn, missing))
             == set(rtfm.reindex_source(conn, real)) - {"warnings"})
+
+
+# --- rtfm#29: step reports reach every query, and a query walks once ---------
+
+def _warnings(out):
+    return out.get("WARNING", [])
+
+
+def test_search_reports_a_denied_file_on_every_run(home, tmp_path, unopenable):
+    """A denied position keeps the mtime it already had, so the source never goes stale
+    again. Reporting used to hang off staleness, which meant search named the file once and
+    then went quiet about it forever while reindex and health_check kept naming it."""
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "guide.md").write_text("the widget protocol defines flits\n")
+    unopenable(d / "locked.md")
+    rtfm.load_manifest()                 # bootstraps the manifest file
+    _add_source("docs", d)
+    for run in (1, 2, 3):
+        out = rtfm.search(query="widget protocol", source="docs")
+        assert any("COULD NOT OPEN" in w and "locked.md" in w for w in _warnings(out)), \
+            f"step 1's report went silent on run {run}"
+
+
+def test_search_reports_a_denied_directory_on_every_run(home, tmp_path, unopenable):
+    """A directory rtfm cannot enter is reported by os.walk's onerror, not by os.access —
+    a different path into step 1's problems, and it has to survive the same three runs."""
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "guide.md").write_text("the widget protocol defines flits\n")
+    unopenable(d / "vault", directory=True)
+    rtfm.load_manifest()                 # bootstraps the manifest file
+    _add_source("docs", d)
+    for run in (1, 2, 3):
+        out = rtfm.search(query="widget protocol", source="docs")
+        assert any("COULD NOT OPEN" in w and "vault" in w for w in _warnings(out)), \
+            f"step 1's report went silent on run {run}"
+
+
+def test_search_reports_nothing_selected_on_every_run(home, tmp_path):
+    """A source whose selection is empty is FRESH now — the forced-stale clause that used to
+    carry this report is gone (ADR 0014), so the report has to come off the scan instead."""
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "a.png").write_text("x")
+    rtfm.load_manifest()                 # bootstraps the manifest file
+    mp = rtfm.manifest_path()
+    mp.write_text(mp.read_text()
+                  + f'\n[[source]]\nname="shots"\ntype="dir"\npath="{d}"\next_allowlist=[".md"]\n')
+    for run in (1, 2, 3):
+        out = rtfm.search(query="widget protocol", source="shots")
+        assert any("NOTHING SELECTED" in w for w in _warnings(out)), \
+            f"step 2's sad path went silent on run {run}"
+
+
+def test_search_reports_a_broken_file_on_every_run(home, tmp_path):
+    """Step 3B's stored failure: the content is not re-extracted, so `handle` has nothing to
+    say about it. The report comes from `contents.error` via `unsearchable`, which is the one
+    reader search, reindex and health_check share."""
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "guide.md").write_text("the widget protocol defines flits\n")
+    (d / "broken.pdf").write_bytes(b"%PDF-1.4\nnot really a pdf\n")
+    rtfm.load_manifest()                 # bootstraps the manifest file
+    _add_source("docs", d)
+    for run in (1, 2, 3):
+        out = rtfm.search(query="widget protocol", source="docs")
+        assert any("COULD NOT HANDLE" in w and "broken.pdf" in w for w in _warnings(out)), \
+            f"step 3B's stored failure went silent on run {run}"
+
+
+def test_a_query_walks_the_tree_once(home, tmp_path, monkeypatch):
+    """The whole point of folding freshness into step 1 (rtfm#29). `_freshness` used to
+    walk to decide and the ingest walked again to act — two full traversals per query on
+    a stale source, scaling with total tree size. `access` is the only thing that walks
+    (one `os.walk` call site), so counting it counts traversals."""
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "guide.md").write_text("the widget protocol defines flits\n")
+    rtfm.load_manifest()                 # bootstraps the manifest file
+    _add_source("docs", d)
+
+    calls = []
+    real_access = rtfm.access
+
+    def counting_access(*a, **k):
+        calls.append(1)
+        return real_access(*a, **k)
+
+    monkeypatch.setattr(rtfm, "access", counting_access)
+    for run in (1, 2, 3):
+        (d / "guide.md").write_text(f"the widget protocol defines flits {run}\n")  # stale again
+        rtfm.search(query="widget protocol", source="docs")
+        assert len(calls) == run, f"run {run} walked {len(calls) - run + 1} times, not once"
+
+
+def test_search_reports_a_broken_file_in_a_fresh_git_source(home, tmp_path):
+    """A Repo source has no scan to report from — its freshness is a commit comparison, and
+    walking the clone to manufacture a report is the cost that comparison exists to avoid
+    (ADR 0015). The store still answers for free, so a broken file stays named even on the
+    queries that run no pipeline at all."""
+    remote, seed, branch = make_git_repo(tmp_path, "main", content="widget protocol flits\n")
+    (seed / "broken.pdf").write_bytes(b"%PDF-1.4\nnot really a pdf\n")
+    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "commit", "-m", "broken"], capture_output=True)
+    subprocess.run(["git", "-C", str(seed), "push", "origin", branch], capture_output=True)
+    rtfm.load_manifest()
+    mp = rtfm.manifest_path()
+    mp.write_text(mp.read_text() + f'\n[[source]]\nname="specs"\ntype="git_repo"\n'
+                                   f'url="{remote}"\nref="{branch}"\next_blocklist=[]\n')
+    for run in (1, 2, 3):
+        out = rtfm.search(query="widget protocol", source="specs")
+        assert any("COULD NOT HANDLE" in w and "broken.pdf" in w for w in _warnings(out)), \
+            f"a broken file in a fresh Repo source went silent on run {run}"
+        assert sum("broken.pdf" in w for w in _warnings(out)) == 1, "named once, not twice"

@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import sqlite3
+import stat as stat_mod
 import subprocess
 import time
 import tomllib
@@ -627,6 +628,27 @@ def _is_empty(r: StepResult) -> bool:
     return not r.kept
 
 
+class _Reached(NamedTuple):
+    """Step 1's product. The mtime is step 1's own stat — the freshness fact, recorded where
+    it is already paid for rather than re-fetched by a second walk (ADR 0015)."""
+    path: Path
+    mtime: float
+
+
+class _Hashed(NamedTuple):
+    """Step 3A's product: a position that gave up its bytes, and their hash."""
+    path: Path
+    sha: str
+    mtime: float
+
+
+class _Scan(NamedTuple):
+    """Steps 1 and 2 together. One value because its two consumers — the freshness handler
+    that decides and the ingest that acts — must see the same walk (ADR 0015)."""
+    reachable: StepResult
+    wanted: list[_Reached]
+
+
 class CacheStats(NamedTuple):
     """Telemetry about the content-addressed store (ADR 0010), not about failures.
     Kept apart from step results so a cache detail can never reach a user-facing
@@ -714,12 +736,26 @@ def _report_nothing_selected(src: Source, result: Indexed) -> list[str]:
             f"Recover: widen the extension list or the paths in {manifest_path()}."]
 
 
-def report_all(src: Source, result: Indexed) -> list[str]:
-    """Every step's report, in pipeline order."""
+def report_unsearchable(conn: sqlite3.Connection, src_name: str) -> list[str]:
+    """What cannot be searched here because its content failed extraction. A question about
+    the store, so a caller that ran no pipeline can still ask it; the join fans a failed sha
+    out over every position it lives at (ADR 0015)."""
+    return report(src_name, StepResult([], [
+        Problem(relpath, error or "extraction failed in an earlier run")
+        for relpath, error in conn.execute(
+            "SELECT l.relpath, c.error FROM locations l JOIN contents c "
+            "ON c.sha256 = l.sha256 WHERE l.source = ? AND c.extracted_ok = 0 "
+            "ORDER BY l.relpath", (src_name,))]), "handle")
+
+
+def report_all(conn: sqlite3.Connection, src: Source, result: Indexed) -> list[str]:
+    """Every step's report, in pipeline order. Step 3B's line comes from the store, not from
+    `result.handled`, so a run that indexed nothing still names what is broken and the three
+    callers cannot drift."""
     return (report(src.name, result.reachable, "access")
             + _report_nothing_selected(src, result)
             + report(src.name, result.read, "read")
-            + report(src.name, result.handled, "handle"))
+            + report_unsearchable(conn, src.name))
 
 
 def _extract_many(jobs: list[tuple[str, str]]) -> list[_Extracted]:
@@ -906,8 +942,10 @@ def _ensure_git_repo_ready(src: Source) -> tuple[Path, str | None]:
     return repo_path, None
 
 
-def index_source(conn: sqlite3.Connection, src: Source, root: Path) -> Indexed:
-    """Run the four questions over one source and sync the index (ADR 0015).
+def _ingest(conn: sqlite3.Connection, src: Source, root: Path, scan: _Scan) -> Indexed:
+    """Steps 3A and 3B over an already-scanned source, and sync the index. Takes the `_Scan`
+    rather than making one, so a caller that already walked to decide freshness does not walk
+    again (ADR 0015).
 
     `locations` is reconciled against what step 2 WANTED, not what step 3A read. A position
     that failed step 1 or 3A is present in the tree and unreadable — not absent. Computing
@@ -918,34 +956,27 @@ def index_source(conn: sqlite3.Connection, src: Source, root: Path) -> Indexed:
     existing = {r[0]: (r[1], r[2]) for r in conn.execute(
         "SELECT relpath, sha256, mtime FROM locations WHERE source=?", (source_name,))}
 
-    reachable = access(src, root)
-    wanted = select(reachable.kept, root, src)
-    read = read_bytes_for(wanted, root, existing)
+    read = read_bytes_for(scan.wanted, root, existing)
 
-    # Reconcile against what step 2 wanted, and nothing else. A position that failed 3A is
-    # still in `wanted` (read_bytes_for reports it as a problem, not by omission), so it
-    # keeps its row. A position step 1 could not reach never arrives at step 2 at all, so
-    # step 1's own report is what keeps it — the filesystem is not asked, because "the file
-    # is still there" and "the manifest still wants it" stopped being the same fact once
-    # step 2 became policy: a de-selected file is present on disk and must still be purged.
-    wanted_rels = {_rel(f, root) for f in wanted}
-    unreachable = {p.position for p in reachable.problems}
-    vanished = {rel for rel in existing
-                if rel not in wanted_rels and not _shadowed_by(rel, unreachable)}
+    # A position that failed 3A is still in `wanted` (read_bytes_for reports it as a problem,
+    # not by omission), so it keeps its row. A de-selected file is present on disk and must
+    # still be purged: presence is step 2's answer, not the filesystem's.
+    vanished = set(existing) - set(_still_present(
+        {rel: mtime for rel, (_sha, mtime) in existing.items()}, scan, root))
     for rel in vanished:
         conn.execute("DELETE FROM locations WHERE source=? AND relpath=?", (source_name, rel))
-    for f, sha, mtime in read.kept:
+    for h in read.kept:
         conn.execute(
             "INSERT INTO locations(source, relpath, sha256, mtime) VALUES(?,?,?,?) "
             "ON CONFLICT(source, relpath) DO UPDATE SET "
             "sha256=excluded.sha256, mtime=excluded.mtime",
-            (source_name, _rel(f, root), sha, mtime))
+            (source_name, _rel(h.path, root), h.sha, h.mtime))
     conn.commit()
 
-    shas_here = {sha for (_f, sha, _m) in read.kept}
+    shas_here = {h.sha for h in read.kept}
     already = {r[0] for r in conn.execute("SELECT sha256 FROM contents")}
     need = shas_here - already
-    handled = handle(conn, read.kept, need, root)
+    handled = handle(read.kept, need, root)
 
     for ex in handled.kept:
         kind = ex.rows[0][0] if ex.rows else "line"
@@ -971,10 +1002,10 @@ def index_source(conn: sqlite3.Connection, src: Source, root: Path) -> Indexed:
 
     errors = sum(1 for ex in handled.kept if ex.error)
     return Indexed(
-        reachable=reachable, wanted=wanted, read=read, handled=handled,
+        reachable=scan.reachable, wanted=scan.wanted, read=read, handled=handled,
         cache=CacheStats(unique_contents=len(shas_here),
                          newly_extracted=len(handled.kept) - errors,
-                         extraction_skips=len(wanted) - len(need),
+                         extraction_skips=len(scan.wanted) - len(need),
                          purged=len(vanished)))
 
 
@@ -1019,10 +1050,10 @@ def _reindex_git_repo(conn: sqlite3.Connection, src: Source) -> dict:
         (src.name, commit, commit_date, _config_scope(src)))
     conn.commit()
     # A fresh index makes any cached verdict for this source+ref stale, whichever scope it
-    # was memoized under — the key now includes config_scope (see _stale_delta), so a plain
+    # was memoized under — the key now includes config_scope (see _freshness), so a plain
     # tuple lookup would miss.
-    for key in [k for k in _staleness_cache if k[0] == src.name and k[1] == src.ref]:
-        _staleness_cache.pop(key, None)
+    for key in [k for k in _freshness_cache if k[0] == src.name and k[1] == src.ref]:
+        _freshness_cache.pop(key, None)
 
     # Now run the file-level indexing (shared core with dir sources)
     summary = {"source": src.name, "commit": commit, "commit_date": commit_date}
@@ -1037,9 +1068,9 @@ def _reindex_git_repo(conn: sqlite3.Connection, src: Source) -> dict:
                 f"spelling in the manifest, or the ref may not be fetched into the "
                 f"clone yet (run 'git fetch --tags' there); list_sources reports "
                 f"'unknown'.")
-    result = index_source(conn, src, repo_path)
+    result = _ingest(conn, src, repo_path, _scan(src, repo_path))
     summary.update(_as_summary(result))
-    summary["warnings"] = report_all(src, result)
+    summary["warnings"] = report_all(conn, src, result)
     return summary
 
 
@@ -1058,21 +1089,28 @@ def reindex_source(conn: sqlite3.Connection, src: Source) -> dict:
     summary = {"source": src.name, **_as_summary(_EMPTY_INDEXED)}
     if src.path is None or not src.path.exists():
         return summary
-    result = index_source(conn, src, src.path)
+    result = _ingest(conn, src, src.path, _scan(src, src.path))
     summary.update(_as_summary(result))
-    summary["warnings"] = report_all(src, result)
+    summary["warnings"] = report_all(conn, src, result)
     return summary
 
 
 STALENESS_TTL = 30  # seconds: git_repo verdicts are memoized in-process for this long
 
 
-def _stale_delta(conn: sqlite3.Connection, src: Source) -> tuple[int, bool, bool]:
-    """Cheap staleness check. Dispatches on source type.
-    Returns (changed, stale, cached):
-      changed  count of new/changed items (files for dir, always 0 for git_repo)
-      stale    whether the index differs from reality
-      cached   True when a git_repo verdict came from the memo (<= STALENESS_TTL old)
+class _Freshness(NamedTuple):
+    """A freshness handler's verdict, and what it had to look at to reach it. `scan` is None
+    for a handler that proves freshness without traversing (git compares commits); `changed`
+    bounds an inline auto-reindex; `cached` means the verdict came from the memo (ADR 0015)."""
+    changed: int
+    stale: bool
+    cached: bool
+    scan: _Scan | None
+
+
+def _freshness(conn: sqlite3.Connection, src: Source) -> _Freshness:
+    """Freshness (CONTEXT.md): does the index still match this source? A handler table, one
+    entry per source type (ADR 0015).
 
     git_repo verdicts cost git subprocesses (and a fetch for managed sources) and
     feed the auto-reindex attempt and its failure warning — both are memoized per
@@ -1087,54 +1125,32 @@ def _stale_delta(conn: sqlite3.Connection, src: Source) -> tuple[int, bool, bool
     if src.type == "git_repo":
         now = time.monotonic()
         key = (src.name, src.ref, _config_scope(src))
-        hit = _staleness_cache.get(key)
+        hit = _freshness_cache.get(key)
         if hit and now - hit[0] < STALENESS_TTL:
-            return 0, hit[1], True
-        _, stale = _stale_delta_git_repo(conn, src)
-        _staleness_cache[key] = (now, stale)
-        return 0, stale, False
-    # dir sources: stat + (relpath, mtime) compare — no hashing or extraction.
-    # `changed` counts files that would need fresh extraction and bounds the cost of an
-    # inline auto-reindex (see _auto_reindex_max); `stale` also catches files that vanished
-    # on disk (a reindex purges them essentially for free, so they don't inflate `changed`).
+            return _Freshness(0, hit[1], True, None)
+        _, stale = _repo_freshness(conn, src)
+        _freshness_cache[key] = (now, stale)
+        return _Freshness(0, stale, False, None)
+    return _dir_freshness(conn, src)
+
+
+def _dir_freshness(conn: sqlite3.Connection, src: Source) -> _Freshness:
+    """Bookkeeping freshness: a (relpath, mtime) compare — no hashing, no extraction. The
+    stat it needs is step 1's, so it scans, decides from that scan, and returns it for the
+    ingest to re-use rather than walking a second time (ADR 0015)."""
     if src.path is None or not src.path.exists():
-        return 0, False, False
+        return _Freshness(0, False, False, None)
     indexed = {r[0]: r[1] for r in conn.execute(
         "SELECT relpath, mtime FROM locations WHERE source=?", (src.name,))}
-    # access()/select() directly, not iter_source_files: step 1's problems (a position denied
-    # or a directory it could not enter) are needed here too. index_source's reconcile keeps
-    # an unreadable-but-present position's row on purpose (it has not vanished) — so on_disk
-    # must count it present as well, or set(indexed) != set(on_disk) forever and every search
-    # of that source runs a full reindex, unconditionally (RTFM_AUTO_REINDEX_MAX=0 does not
-    # help: `changed` stays 0 while `stale` never clears).
-    reachable = access(src)
-    on_disk = {str(f.relative_to(src.path)): f.stat().st_mtime
-               for f in select(reachable.kept, src.path, src)}
-    unreachable = {p.position for p in reachable.problems}
-    for rel, mtime in indexed.items():
-        if rel in on_disk or not _shadowed_by(rel, unreachable):
-            continue
-        try:
-            on_disk[rel] = (src.path / rel).stat().st_mtime
-        except OSError:
-            on_disk[rel] = mtime   # shadowed by an unreachable ancestor dir: can't re-read
+    scan = _scan(src, src.path)
+    on_disk = _still_present(indexed, scan, src.path)
     changed = sum(1 for rel, mtime in on_disk.items() if indexed.get(rel) != mtime)
-    # An empty selection has indexed == on_disk == {}, which reads as fresh forever: the
-    # source is skipped on every query and its step report is never even computed. Force it
-    # (ADR 0014) so `index_source` actually runs and `report_all`'s "NOTHING SELECTED"
-    # message (Item 1, ADR 0015) reaches the user through reindex()/search(), rather than the
-    # source going silently unreported forever.
-    #
-    # The cost is real and recurring, not one-off: a permanently-stale dir source makes
-    # `search` pay TWO full os.walk passes over the WHOLE tree on every query, forever — one
-    # here, one in the reindex_source call search then makes — scaling with total tree size,
-    # not selection size. Measured ~14-15 ms/query at 500 files, ~150 ms/query at 5,000. ADR
-    # 0014 accepts the forced staleness deliberately and does not discuss this cost.
-    stale = (changed > 0 or set(indexed) != set(on_disk) or not on_disk)
-    return changed, stale, False
+    # An empty selection reads as fresh, which is correct: nothing to index, nothing to
+    # purge. The forced-stale clause that used to carry its report is gone (ADR 0014).
+    return _Freshness(changed, changed > 0 or set(indexed) != set(on_disk), False, scan)
 
 
-_staleness_cache: dict[tuple[str, str | None, str], tuple[float, bool]] = {}
+_freshness_cache: dict[tuple[str, str | None, str], tuple[float, bool]] = {}
 
 
 def _config_scope(src: Source) -> str:
@@ -1155,7 +1171,7 @@ def _config_scope(src: Source) -> str:
     }, separators=(",", ":"))
 
 
-def _stale_delta_git_repo(conn: sqlite3.Connection, src: Source) -> tuple[int, bool]:
+def _repo_freshness(conn: sqlite3.Connection, src: Source) -> tuple[int, bool]:
     """Commit-based staleness for git_repo. Returns (0, stale).
 
     Linked mode is read-only (ADR 0013): rtfm never fetches the user's clone, so the
@@ -1211,7 +1227,7 @@ def _default_branch(path: Path) -> str:
         return "main"  # sensible fallback
 
 
-def select(positions: list[Path], base: Path, src: Source) -> list[Path]:
+def select(positions: list[_Reached], base: Path, src: Source) -> list[_Reached]:
     """Step 2 (ADR 0015): out of what we can reach, what does the user want?
 
     Policy, not a handler table — the manifest's `paths` prefixes and its one extension
@@ -1238,8 +1254,8 @@ def select(positions: list[Path], base: Path, src: Source) -> list[Path]:
             return False
         return not src.paths or any(_under(rel, p) for p in src.paths)
 
-    return [f for f in positions
-            if wanted_ext(f.suffix.lower()) and wanted_path(_rel(f, base))]
+    return [r for r in positions
+            if wanted_ext(r.path.suffix.lower()) and wanted_path(_rel(r.path, base))]
 
 
 def _under(rel: str, prefix: str) -> bool:
@@ -1264,11 +1280,12 @@ def access(src: Source, root: Path | None = None) -> StepResult:
 
     This scans; it does not read. `os.access` is a stat, and it may assert the negative but
     only ever suggest the positive — mode bits denying you is conclusive, mode bits allowing
-    you is a hint, and step 3A owns the truth."""
+    you is a hint, and step 3A owns the truth. The stat it already pays for leaves on each
+    `_Reached`, so the freshness handler decides from this walk (ADR 0015)."""
     base = root if root is not None else src.path
     if base is None or not base.exists():
         return StepResult([], [])
-    kept: list[Path] = []
+    kept: list[_Reached] = []
     problems: list[Problem] = []
 
     def _denied(err: OSError) -> None:
@@ -1283,13 +1300,24 @@ def access(src: Source, root: Path | None = None) -> StepResult:
             if name.startswith("."):
                 continue
             f = d / name
-            if not f.is_file():
+            try:
+                st = f.stat()
+            except OSError:
+                continue          # `is_file()` swallowed these too: same silent skip
+            if not stat_mod.S_ISREG(st.st_mode):
                 continue
             if os.access(f, os.R_OK):
-                kept.append(f)
+                kept.append(_Reached(f, st.st_mtime))
             else:
                 problems.append(Problem(_rel(f, base), "Permission denied"))
     return StepResult(sorted(kept), problems)
+
+
+def _scan(src: Source, root: Path) -> _Scan:
+    """Steps 1 and 2 over one source, and the only place `access` is called on the indexing
+    path — so a query walks once, however many consumers the result has."""
+    reachable = access(src, root)
+    return _Scan(reachable, select(reachable.kept, root, src))
 
 
 def _rel(p: Path, base: Path) -> str:
@@ -1298,6 +1326,26 @@ def _rel(p: Path, base: Path) -> str:
         return p.relative_to(base).as_posix()
     except ValueError:
         return str(p)
+
+
+def _still_present(indexed: dict[str, float], scan: _Scan, root: Path) -> dict[str, float]:
+    """Positions this source still has, and their mtimes: what step 2 wants, plus indexed
+    rows sitting behind something step 1 could not enter.
+
+    Unreadable is not absent. A position denied by step 1 never reaches step 2, so asking
+    step 2 alone would call it vanished, delete its row and GC its content because someone
+    ran chmod. Freshness and the ingest both need this exact set — freshness to stop going
+    stale forever, the ingest to stop purging — and one function is how they agree."""
+    present = {_rel(r.path, root): r.mtime for r in scan.wanted}
+    unreachable = {p.position for p in scan.reachable.problems}
+    for rel, mtime in indexed.items():
+        if rel in present or not _shadowed_by(rel, unreachable):
+            continue
+        try:
+            present[rel] = (root / rel).stat().st_mtime
+        except OSError:
+            present[rel] = mtime      # behind an unreachable ancestor: can't re-read
+    return present
 
 
 def _shadowed_by(rel: str, unreachable: set[str]) -> bool:
@@ -1313,7 +1361,7 @@ def _shadowed_by(rel: str, unreachable: set[str]) -> bool:
     return any(u == "." or rel == u or rel.startswith(u + "/") for u in unreachable)
 
 
-def read_bytes_for(positions: list[Path], base: Path,
+def read_bytes_for(positions: list[_Reached], base: Path,
                    existing: dict[str, tuple[str, float]]) -> StepResult:
     """Step 3A (ADR 0015): are those bytes even readable?
 
@@ -1326,25 +1374,26 @@ def read_bytes_for(positions: list[Path], base: Path,
     hash, never a gate on the read: a position whose key misses is read, and one
     whose key hits was already confirmed reachable by step 1.
 
+    The mtime is step 1's: if a file changes between scan and read we store the older mtime
+    against the new content, so the next run re-reads it once — never the reverse.
+
     PR2 widens the cache key from mtime to mtime+size."""
-    kept: list[tuple[Path, str, float]] = []
+    kept: list[_Hashed] = []
     problems: list[Problem] = []
-    for f in positions:
-        rel = _rel(f, base)
+    for r in positions:
+        rel = _rel(r.path, base)
         try:
-            mtime = f.stat().st_mtime
             prev = existing.get(rel)
-            sha = prev[0] if prev and prev[1] == mtime else \
-                hashlib.sha256(f.read_bytes()).hexdigest()
+            sha = prev[0] if prev and prev[1] == r.mtime else \
+                hashlib.sha256(r.path.read_bytes()).hexdigest()
         except OSError as e:
             problems.append(Problem(rel, e.strerror or type(e).__name__))
             continue
-        kept.append((f, sha, mtime))
+        kept.append(_Hashed(r.path, sha, r.mtime))
     return StepResult(kept, problems)
 
 
-def handle(conn: sqlite3.Connection, read_kept: list[tuple[Path, str, float]],
-           need: set[str], base: Path) -> StepResult:
+def handle(read_kept: list[_Hashed], need: set[str], base: Path) -> StepResult:
     """Step 3B (ADR 0015): can we handle those bytes?
 
     One handler per format, each reporting in its own terms — a corrupt PDF failed to parse
@@ -1355,13 +1404,16 @@ def handle(conn: sqlite3.Connection, read_kept: list[tuple[Path, str, float]],
     Extraction is per content (ADR 0010): N byte-identical positions are one job. But the
     problems returned are per POSITION, fanned out here at this boundary, so that a position
     is the only identity anywhere downstream and no consumer ever converts a content count
-    into a file count."""
+    into a file count.
+
+    Reports what THIS run failed to handle, nothing else: what is currently unsearchable is a
+    question about the store, and `report_unsearchable` owns it (ADR 0015)."""
     by_sha: dict[str, list[str]] = {}
     jobs: dict[str, str] = {}
-    for f, sha, _mtime in read_kept:
-        by_sha.setdefault(sha, []).append(_rel(f, base))
-        if sha in need and sha not in jobs:
-            jobs[sha] = str(f)
+    for h in read_kept:
+        by_sha.setdefault(h.sha, []).append(_rel(h.path, base))
+        if h.sha in need and h.sha not in jobs:
+            jobs[h.sha] = str(h.path)
 
     kept: list[_Extracted] = []
     problems: list[Problem] = []
@@ -1369,29 +1421,8 @@ def handle(conn: sqlite3.Connection, read_kept: list[tuple[Path, str, float]],
         if ex.error:
             problems.extend(Problem(pos, ex.error) for pos in sorted(by_sha.get(ex.sha, [])))
         kept.append(ex)
-
-    # A sha outside `need` was extracted in an earlier run and is not re-extracted here.
-    # If that earlier run failed, the file is still broken and still unsearchable, so the
-    # failure is still true: report it from the stored error rather than paying the parse
-    # cost again. Without this a corrupt file is named once, on the run that first failed,
-    # and every run afterwards reports a clean source.
-    stale_failures = {sha for sha in by_sha if sha not in jobs}
-    if stale_failures:
-        marks = ",".join("?" * len(stale_failures))
-        for sha, error in conn.execute(
-                f"SELECT sha256, error FROM contents "
-                f"WHERE extracted_ok = 0 AND sha256 IN ({marks})",
-                tuple(stale_failures)):
-            problems.extend(Problem(pos, error or "extraction failed in an earlier run")
-                            for pos in sorted(by_sha[sha]))
     return StepResult(kept, sorted(problems))
 
-
-def iter_source_files(src: Source, root: Path | None = None) -> list[Path]:
-    """Positions a source contributes, after selection. Callers that also need step 1's
-    problems call `access` and `select` directly."""
-    base = root if root is not None else src.path
-    return select(access(src, root).kept, base, src)
 
 # --- manifest ---------------------------------------------------------------
 
@@ -1891,45 +1922,56 @@ def search(query: str, source: str | None = None, max_files: int = 20,
         if s.type not in ("dir", "git_repo"):
             continue
         try:                                         # one source's refresh never fails the query
-            changed, stale, cached = _stale_delta(conn, s)
-            if not stale:
-                continue
+            verdict = _freshness(conn, s)
             if s.type == "dir":
-                if changed <= budget:
-                    res = reindex_source(conn, s)    # inline: only `changed` files extract
-                    warnings.extend(res.get("warnings", ()))
-                else:
+                result = None
+                if verdict.stale and verdict.changed <= budget:
+                    # Re-uses the freshness handler's walk: one traversal per query.
+                    result = _ingest(conn, s, s.path, verdict.scan)
+                elif verdict.stale:
                     warnings.append(
-                        f"!!! STALE SOURCE '{s.name}' !!! {changed} new/changed files exceed the "
-                        f"auto-reindex budget ({budget}) — searching previously indexed content "
-                        f"only. Recover: run reindex('{s.name}').")
-            elif cached:
+                        f"!!! STALE SOURCE '{s.name}' !!! {verdict.changed} new/changed files "
+                        f"exceed the auto-reindex budget ({budget}) — searching previously "
+                        f"indexed content only. Recover: run reindex('{s.name}').")
+                if result is None and verdict.scan is not None:
+                    # Fresh, or too big to index inline: steps 1 and 2 still have something to
+                    # say and the scan is in hand. An empty 3A/3B tail keeps `report_all` the
+                    # one reporting path (ADR 0015).
+                    result = _EMPTY_INDEXED._replace(reachable=verdict.scan.reachable,
+                                                     wanted=verdict.scan.wanted)
+                if result is not None:
+                    warnings.extend(report_all(conn, s, result))
+                continue
+            # Not reindexing this query: no scan to report from, but the store answers free.
+            if not verdict.stale:
+                warnings.extend(report_unsearchable(conn, s.name))
+                continue
+            if verdict.cached:
                 # The verdict came from the memo (<= STALENESS_TTL old): the reindex
                 # attempt and its failure warning run once per window, not on every
                 # query — a persistently broken or dirty source must not block or
                 # spam every search (ADR 0013).
+                warnings.extend(report_unsearchable(conn, s.name))
                 continue
-            else:  # git_repo — always auto-reindex, budget doesn't apply
-                result = reindex_source(conn, s)
-                warnings.extend(result.get("warnings", ()))
-                # Multiple sources on one clone (or one broken remote) would
-                # otherwise repeat the identical warning once per source.
-                key = (s.path if s.path is not None
-                       else str(_managed_repo_path(s.name)))
-                message = None
-                if isinstance(result, dict) and result.get("error"):
-                    message = (f"!!! AUTO-REINDEX FAILED '{s.name}' !!! {result['error']} — "
-                               f"searching previously indexed content only. "
-                               f"Recover: run reindex('{s.name}').")
-                elif isinstance(result, dict) and result.get("warning"):
-                    # A non-blocking warning (e.g. a linked ref that doesn't
-                    # resolve) — surface it when a refresh does run.
-                    message = f"!!! SOURCE WARNING '{s.name}' !!! {result['warning']}"
-                if message:
-                    if key in warned_repo_paths:
-                        continue
-                    warned_repo_paths.add(key)
-                    warnings.append(message)
+            # git_repo — always auto-reindex, budget doesn't apply
+            summary = reindex_source(conn, s)
+            warnings.extend(summary.get("warnings", ()))
+            # Multiple sources on one clone (or one broken remote) would
+            # otherwise repeat the identical warning once per source.
+            key = (s.path if s.path is not None
+                   else str(_managed_repo_path(s.name)))
+            message = None
+            if summary.get("error"):
+                message = (f"!!! AUTO-REINDEX FAILED '{s.name}' !!! {summary['error']} — "
+                           f"searching previously indexed content only. "
+                           f"Recover: run reindex('{s.name}').")
+            elif summary.get("warning"):
+                # A non-blocking warning (e.g. a linked ref that doesn't
+                # resolve) — surface it when a refresh does run.
+                message = f"!!! SOURCE WARNING '{s.name}' !!! {summary['warning']}"
+            if message and key not in warned_repo_paths:
+                warned_repo_paths.add(key)
+                warnings.append(message)
         except Exception as e:
             warnings.append(
                 f"!!! AUTO-REINDEX FAILED '{s.name}' !!! {type(e).__name__}: {e} — searching "
@@ -1979,8 +2021,8 @@ def reindex(source: str | None = None) -> dict:
         for name in dropped:
             conn.execute("DELETE FROM locations WHERE source=?", (name,))
             conn.execute("DELETE FROM source_meta WHERE source=?", (name,))
-            for key in [k for k in _staleness_cache if k[0] == name]:
-                _staleness_cache.pop(key, None)
+            for key in [k for k in _freshness_cache if k[0] == name]:
+                _freshness_cache.pop(key, None)
         if dropped:
             conn.commit()
     resp: dict = {"reindexed": [reindex_source(conn, s) for s in targets]}
@@ -2146,23 +2188,10 @@ def health_check() -> dict:
             if issues:
                 status["ok"] = False
                 status["issues"].extend(issues)
-        # Extraction failures already live in `contents.error` (Task 6 makes `handle`
-        # re-report them on every run); health_check reads that column rather than
-        # indexing, so it stays a read (ADR 0015: "search, reindex and health_check" all
-        # surface the same failures). Reuse `report` rather than writing new message text,
-        # so this says exactly what reindex/search say about the same file.
-        manifest_names = {s.name for s in sources}
-        by_source: dict[str, list[Problem]] = {}
-        for src_name, relpath, error in conn.execute(
-                "SELECT l.source, l.relpath, c.error FROM locations l "
-                "JOIN contents c ON c.sha256 = l.sha256 "
-                "WHERE c.extracted_ok = 0 ORDER BY l.source, l.relpath"):
-            if src_name not in manifest_names:
-                continue   # a row left behind by a source since deleted from the manifest
-            by_source.setdefault(src_name, []).append(
-                Problem(relpath, error or "extraction failed in an earlier run"))
-        for src_name, problems in by_source.items():
-            issues = report(src_name, StepResult([], problems), "handle")
+        # Asking per manifest source also skips rows left behind by a source since deleted
+        # from the manifest, with no name filtering of its own.
+        for src in sources:
+            issues = report_unsearchable(conn, src.name)
             if issues:
                 status["ok"] = False
                 status["issues"].extend(issues)
