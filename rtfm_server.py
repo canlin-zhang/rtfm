@@ -1133,6 +1133,35 @@ def read_bytes_for(positions: list[Path], base: Path,
     return StepResult(kept, problems)
 
 
+def handle(conn: sqlite3.Connection, read_kept: list[tuple[Path, str, float]],
+           need: set[str], base: Path) -> StepResult:
+    """Step 3B (ADR 0015): can we handle those bytes?
+
+    One handler per format, each reporting in its own terms — a corrupt PDF failed to parse
+    and is not "invalid UTF-8". Decoding belongs inside the markup and plain-text handlers;
+    the PDF handler reads bytes through a parser and never decodes. Failing here is the file:
+    the user converts it or excludes its type.
+
+    Extraction is per content (ADR 0010): N byte-identical positions are one job. But the
+    problems returned are per POSITION, fanned out here at this boundary, so that a position
+    is the only identity anywhere downstream and no consumer ever converts a content count
+    into a file count."""
+    by_sha: dict[str, list[str]] = {}
+    jobs: dict[str, str] = {}
+    for f, sha, _mtime in read_kept:
+        by_sha.setdefault(sha, []).append(_rel(f, base))
+        if sha in need and sha not in jobs:
+            jobs[sha] = str(f)
+
+    kept: list[_Extracted] = []
+    problems: list[Problem] = []
+    for ex in _extract_many(list(jobs.items())):
+        if ex.error:
+            problems.extend(Problem(pos, ex.error) for pos in sorted(by_sha.get(ex.sha, [])))
+        kept.append(ex)
+    return StepResult(kept, problems)
+
+
 def iter_source_files(src: Source, root: Path | None = None) -> list[Path]:
     """Positions a source contributes, after selection. Callers that also need step 1's
     problems call `access` and `select` directly."""

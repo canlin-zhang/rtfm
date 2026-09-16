@@ -604,3 +604,21 @@ def test_read_reuses_a_cached_hash(tmp_path):
     mtime = f.stat().st_mtime
     got = rtfm.read_bytes_for([f], t, {"a.md": ("cafebabe", mtime)})
     assert got.kept[0][1] == "cafebabe"      # no re-hash when the key matches
+
+
+def test_handle_fans_a_failed_content_out_to_every_position(home, tmp_path):
+    # Three byte-identical corrupt files are one extraction and three broken files. Reporting
+    # the sha would make every consumer convert contents into files — the conversion that
+    # printed a content count as "N file(s)".
+    t = tmp_path / "c"
+    t.mkdir()
+    bad = b"%PDF-1.4 not really a pdf" + bytes(range(256))
+    for n in ("v1.pdf", "v2.pdf", "v3.pdf"):
+        (t / n).write_bytes(bad)
+    conn = rtfm.get_index_db()
+    read = rtfm.read_bytes_for([t / "v1.pdf", t / "v2.pdf", t / "v3.pdf"], t, {})
+    sha = read.kept[0][1]
+    got = rtfm.handle(conn, read.kept, {sha}, t)
+    assert sorted(p.position for p in got.problems) == ["v1.pdf", "v2.pdf", "v3.pdf"]
+    assert all("pdf" not in p.reason.lower() or "utf-8" not in p.reason.lower()
+               for p in got.problems)          # reported in the handler's own terms
