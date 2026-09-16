@@ -567,6 +567,95 @@ def test_search_surfaces_a_handling_failure(home, tmp_path):
     assert any("COULD NOT HANDLE" in w for w in out.get("WARNING", []))
 
 
+def _add_allowlisted_source(name, path, allow):
+    mp = rtfm.manifest_path()
+    exts = ", ".join(f'"{e}"' for e in allow)
+    mp.write_text(
+        mp.read_text()
+        + f'\n[[source]]\nname="{name}"\ntype="dir"\npath="{path}"\next_allowlist=[{exts}]\n'
+    )
+
+
+def test_reindex_reports_nothing_selected(home, tmp_path):
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "a.md").write_text("x")
+    rtfm.load_manifest()
+    _add_allowlisted_source("docs", d, [".nomatch"])
+    out = rtfm.reindex(source="docs")
+    assert any("NOTHING SELECTED" in w for w in out.get("WARNING", []))
+
+
+def test_search_reports_nothing_selected(home, tmp_path):
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "a.md").write_text("findable keyword")
+    rtfm.load_manifest()
+    _add_allowlisted_source("docs", d, [".nomatch"])
+    out = rtfm.search(query="keyword", source="docs")
+    assert any("NOTHING SELECTED" in w for w in out.get("WARNING", []))
+
+
+def test_health_check_reports_an_extraction_failure_on_every_run(home, tmp_path):
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "broken.pdf").write_bytes(b"%PDF-1.4\nnot really a pdf\n")
+    rtfm.load_manifest()
+    _add_source("docs", d)
+    rtfm.reindex(source="docs")
+    out = rtfm.health_check()
+    assert out["ok"] is False
+    assert any("broken.pdf" in i for i in out["issues"])
+    # No reindex between the two calls — the row is already in `contents`, so this must
+    # say the same thing without re-extracting anything.
+    again = rtfm.health_check()
+    assert again["ok"] is False
+    assert any("broken.pdf" in i for i in again["issues"])
+
+
+def test_health_check_clean_corpus_has_no_extraction_issue(home, tmp_path):
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "ok.md").write_text("clean content")
+    rtfm.load_manifest()
+    _add_source("docs", d)
+    rtfm.reindex(source="docs")
+    out = rtfm.health_check()
+    assert out["ok"] is True
+    assert out["issues"] == []
+
+
+def test_health_check_names_every_broken_position_not_a_content_count(home, tmp_path):
+    d = tmp_path / "docs"
+    d.mkdir()
+    body = b"%PDF-1.4\nnot really a pdf\n"
+    for n in ("a.pdf", "b.pdf", "c.pdf"):
+        (d / n).write_bytes(body)
+    rtfm.load_manifest()
+    _add_source("docs", d)
+    rtfm.reindex(source="docs")
+    out = rtfm.health_check()
+    [issue] = [i for i in out["issues"] if "COULD NOT HANDLE" in i]
+    assert "3 path(s)" in issue
+    for n in ("a.pdf", "b.pdf", "c.pdf"):
+        assert n in issue
+
+
+def test_health_check_skips_extraction_rows_for_a_source_dropped_from_the_manifest(
+        home, tmp_path):
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "broken.pdf").write_bytes(b"%PDF-1.4\nnot really a pdf\n")
+    rtfm.load_manifest()
+    mp = rtfm.manifest_path()
+    original = mp.read_text()
+    _add_source("docs", d)
+    rtfm.reindex(source="docs")
+    mp.write_text(original)   # 'docs' no longer declared, but its contents.error row remains
+    out = rtfm.health_check()
+    assert not any("broken.pdf" in i for i in out["issues"])
+
+
 def test_the_zero_path_summary_has_the_same_keys_as_a_real_one(home, tmp_path):
     conn = rtfm.get_index_db()
     missing = rtfm.Source(name="s", type="dir", path=tmp_path / "nope",

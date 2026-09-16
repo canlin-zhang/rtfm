@@ -948,3 +948,83 @@ def test_errors_replace_is_gone_from_the_source():
     # someone adds a fourth decode site.
     import pathlib
     assert 'errors="replace"' not in pathlib.Path(rtfm.__file__).read_text()
+
+
+def test_nothing_selected_names_the_reachable_count_and_the_policy(home, tmp_path):
+    # A manifest whose extension list matches nothing indexes zero files and, before this,
+    # gave no reason (ADR 0015's opening example).
+    d = tmp_path / "c"
+    d.mkdir()
+    for n in ("a.md", "b.md", "c.md"):
+        (d / n).write_text("x")
+    src = rtfm.Source(name="bazel", type="dir", path=d, ext_allowlist=frozenset({".nomatch"}))
+    conn = rtfm.get_index_db()
+    result = rtfm.index_source(conn, src, d)
+    [msg] = rtfm.report_all(src, result)
+    assert "NOTHING SELECTED 'bazel'" in msg
+    assert "3 path(s) reachable" in msg
+    assert "ext_allowlist = .nomatch" in msg
+
+
+def test_nothing_selected_names_the_paths_policy_too(home, tmp_path):
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "a.md").write_text("x")
+    src = rtfm.Source(name="s", type="dir", path=tmp_path, paths=("nope",),
+                      ext_blocklist=frozenset())
+    conn = rtfm.get_index_db()
+    result = rtfm.index_source(conn, src, tmp_path)
+    [msg] = rtfm.report_all(src, result)
+    assert "paths = nope" in msg
+
+
+def test_nothing_selected_in_blocklist_mode_summarizes_defaults_by_count(home, tmp_path):
+    # The effective blocklist is the user's list unioned with rtfm's ~70 defaults. Dumping
+    # the whole union produced a 700-character wall the user could not act on and that
+    # buried the `paths` clause (fix round 1: a real defect, not a style choice). Name what
+    # the user wrote; summarize the rest by count, and never show a default extension the
+    # user never declared.
+    d = tmp_path / "c"
+    d.mkdir()
+    (d / "a.png").write_bytes(b"x")          # blocked by rtfm's default set, not by the user
+    src = rtfm.Source(name="s", type="dir", path=d, ext_blocklist=frozenset({".md"}))
+    conn = rtfm.get_index_db()
+    result = rtfm.index_source(conn, src, d)
+    [msg] = rtfm.report_all(src, result)
+    assert "ext_blocklist = .md" in msg
+    assert f"rtfm's {len(rtfm.DEFAULT_EXT_BLOCKLIST)} default" in msg
+    assert ".png" not in msg                 # the user never wrote it; the wall is gone
+
+
+def test_nothing_selected_in_blocklist_mode_with_an_empty_user_list(home, tmp_path):
+    d = tmp_path / "c"
+    d.mkdir()
+    (d / "a.png").write_bytes(b"x")
+    src = rtfm.Source(name="s", type="dir", path=d, ext_blocklist=frozenset())
+    conn = rtfm.get_index_db()
+    result = rtfm.index_source(conn, src, d)
+    [msg] = rtfm.report_all(src, result)
+    assert "ext_blocklist = []" in msg
+    assert f"rtfm's {len(rtfm.DEFAULT_EXT_BLOCKLIST)} default" in msg
+    assert ".png" not in msg
+
+
+def test_an_empty_source_directory_selects_silently(home, tmp_path):
+    # An empty folder is not a manifest error — reachable.kept is empty too, which is step
+    # 1's story (silence), never step 2's.
+    d = tmp_path / "c"
+    d.mkdir()
+    src = rtfm.Source(name="s", type="dir", path=d, ext_allowlist=frozenset({".md"}))
+    conn = rtfm.get_index_db()
+    result = rtfm.index_source(conn, src, d)
+    assert rtfm.report_all(src, result) == []
+
+
+def test_an_unreadable_root_reports_access_only_not_nothing_selected(home, tmp_path, unopenable):
+    t = tmp_path / "c"
+    unopenable(t, directory=True)
+    src = rtfm.Source(name="s", type="dir", path=t, ext_allowlist=frozenset({".md"}))
+    conn = rtfm.get_index_db()
+    result = rtfm.index_source(conn, src, t)
+    msgs = rtfm.report_all(src, result)
+    assert any("COULD NOT OPEN" in m for m in msgs)
+    assert not any("NOTHING SELECTED" in m for m in msgs)

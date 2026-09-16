@@ -679,11 +679,46 @@ def report(src_name: str, result: StepResult, step: str) -> list[str]:
             f"Recover: {recover.format(manifest=manifest_path())}."]
 
 
-def report_all(src_name: str, result: Indexed) -> list[str]:
+def _report_nothing_selected(src: Source, result: Indexed) -> list[str]:
+    """Step 2's sad path (ADR 0015): step 1 reached something and step 2 kept none of it.
+
+    Derived here from `Indexed`, not stored on a `StepResult` — step 2 returns a bare list on
+    purpose (see `select`): rtfm has no standing to call 90% filtered a partial success, so
+    there is nowhere for a step-2 outcome to live except this comparison of two already-stored
+    results. `reachable.kept` empty is step 1's sad path, not this one — the access report (or,
+    for a merely-empty directory, nothing at all) already says everything there is to say, so
+    the condition below requires step 1 to have reached something."""
+    if not (result.reachable.kept and not result.wanted):
+        return []
+    if src.ext_allowlist is not None:
+        ext_clause = f"ext_allowlist = {', '.join(sorted(src.ext_allowlist)) or '(empty)'}"
+    else:
+        # The effective set is the user's list unioned with rtfm's ~70 defaults, but dumping
+        # all of it is a wall of extensions the user never wrote and cannot act on, burying
+        # the `paths` clause that is often the actual cause. Name what the user declared and
+        # summarize the defaults by count — never hardcoded, so it can't drift when
+        # DEFAULT_EXT_BLOCKLIST grows.
+        n_defaults = len(DEFAULT_EXT_BLOCKLIST)
+        user = sorted(src.ext_blocklist or frozenset())
+        if user:
+            ext_clause = (f"ext_blocklist = {', '.join(user)} "
+                          f"(plus rtfm's {n_defaults} default binary and asset types)")
+        else:
+            ext_clause = (f"ext_blocklist = [] "
+                          f"(rtfm's {n_defaults} default binary and asset types only)")
+    parts = list(src.paths) + [f"!{p}" for p in src.exclude_paths]
+    paths_clause = f" — and paths = {', '.join(parts)}" if parts else ""
+    return [f"!!! NOTHING SELECTED '{src.name}' !!! {len(result.reachable.kept):,} path(s) "
+            f"reachable, none selected. {ext_clause}{paths_clause}. "
+            f"Recover: widen the extension list or the paths in {manifest_path()}."]
+
+
+def report_all(src: Source, result: Indexed) -> list[str]:
     """Every step's report, in pipeline order."""
-    return (report(src_name, result.reachable, "access")
-            + report(src_name, result.read, "read")
-            + report(src_name, result.handled, "handle"))
+    return (report(src.name, result.reachable, "access")
+            + _report_nothing_selected(src, result)
+            + report(src.name, result.read, "read")
+            + report(src.name, result.handled, "handle"))
 
 
 def _extract_many(jobs: list[tuple[str, str]]) -> list[_Extracted]:
@@ -1003,7 +1038,7 @@ def _reindex_git_repo(conn: sqlite3.Connection, src: Source) -> dict:
                 f"'unknown'.")
     result = index_source(conn, src, repo_path)
     summary.update(_as_summary(result))
-    summary["warnings"] = report_all(src.name, result)
+    summary["warnings"] = report_all(src, result)
     return summary
 
 
@@ -1024,7 +1059,7 @@ def reindex_source(conn: sqlite3.Connection, src: Source) -> dict:
         return summary
     result = index_source(conn, src, src.path)
     summary.update(_as_summary(result))
-    summary["warnings"] = report_all(src.name, result)
+    summary["warnings"] = report_all(src, result)
     return summary
 
 
@@ -1085,7 +1120,15 @@ def _stale_delta(conn: sqlite3.Connection, src: Source) -> tuple[int, bool, bool
     changed = sum(1 for rel, mtime in on_disk.items() if indexed.get(rel) != mtime)
     # An empty selection has indexed == on_disk == {}, which reads as fresh forever: the
     # source is skipped on every query and its step report is never even computed. Force it
-    # (ADR 0014) so the user hears that their manifest selects nothing.
+    # (ADR 0014) so `index_source` actually runs and `report_all`'s "NOTHING SELECTED"
+    # message (Item 1, ADR 0015) reaches the user through reindex()/search(), rather than the
+    # source going silently unreported forever.
+    #
+    # The cost is real and recurring, not one-off: a permanently-stale dir source makes
+    # `search` pay TWO full os.walk passes over the WHOLE tree on every query, forever — one
+    # here, one in the reindex_source call search then makes — scaling with total tree size,
+    # not selection size. Measured ~14-15 ms/query at 500 files, ~150 ms/query at 5,000. ADR
+    # 0014 accepts the forced staleness deliberately and does not discuss this cost.
     stale = (changed > 0 or set(indexed) != set(on_disk) or not on_disk)
     return changed, stale, False
 
@@ -1797,9 +1840,9 @@ def read_document_text(src: Source, relpath: str, start: int = 1, end: int | Non
         return extract_pdf_text(path, start=start, end=end)
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-    except UnicodeDecodeError as e:
-        return (f"!!! CANNOT READ '{relpath}' !!! not valid UTF-8 ({e.reason} at byte "
-                f"{e.start}). rtfm indexes UTF-8 text. Recover: convert the file, or "
+    except UnicodeDecodeError as dec_err:
+        return (f"!!! CANNOT READ '{relpath}' !!! not valid UTF-8 ({dec_err.reason} at byte "
+                f"{dec_err.start}). rtfm indexes UTF-8 text. Recover: convert the file, or "
                 f"exclude its type in {manifest_path()}.")
     e = end if end is not None else len(lines)
     return "\n".join(lines[max(0, start - 1):e])
@@ -2094,6 +2137,26 @@ def health_check() -> dict:
                 continue
             reachable = access(src, root)
             issues = report(src.name, reachable, "access")
+            if issues:
+                status["ok"] = False
+                status["issues"].extend(issues)
+        # Extraction failures already live in `contents.error` (Task 6 makes `handle`
+        # re-report them on every run); health_check reads that column rather than
+        # indexing, so it stays a read (ADR 0015: "search, reindex and health_check" all
+        # surface the same failures). Reuse `report` rather than writing new message text,
+        # so this says exactly what reindex/search say about the same file.
+        manifest_names = {s.name for s in sources}
+        by_source: dict[str, list[Problem]] = {}
+        for src_name, relpath, error in conn.execute(
+                "SELECT l.source, l.relpath, c.error FROM locations l "
+                "JOIN contents c ON c.sha256 = l.sha256 "
+                "WHERE c.extracted_ok = 0 ORDER BY l.source, l.relpath"):
+            if src_name not in manifest_names:
+                continue   # a row left behind by a source since deleted from the manifest
+            by_source.setdefault(src_name, []).append(
+                Problem(relpath, error or "extraction failed in an earlier run"))
+        for src_name, problems in by_source.items():
+            issues = report(src_name, StepResult([], problems), "handle")
             if issues:
                 status["ok"] = False
                 status["issues"].extend(issues)
