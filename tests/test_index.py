@@ -898,3 +898,30 @@ def test_a_source_selecting_nothing_is_forced_stale(home, tmp_path):
     conn = rtfm.get_index_db()
     rtfm.index_source(conn, src, tmp_path)
     assert rtfm._stale_delta(conn, src)[1] is True
+
+
+def test_a_non_utf8_file_fails_loudly_rather_than_indexing_mangled(home, tmp_path):
+    (tmp_path / "cp1252.md").write_bytes(b"caf\xe9 keyword\n")
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="s", type="dir", path=tmp_path, ext_blocklist=frozenset())
+    got = rtfm.index_source(conn, src, tmp_path)
+    assert [p.position for p in got.handled.problems] == ["cp1252.md"]
+    assert "utf-8" in got.handled.problems[0].reason.lower()
+    row = conn.execute("SELECT extracted_ok, error FROM contents").fetchone()
+    assert row[0] == 0 and row[1]
+
+
+def test_no_replacement_character_reaches_the_index(home, tmp_path):
+    (tmp_path / "b.md").write_bytes(b"\x00\x01\x02 keyword\n")
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="s", type="dir", path=tmp_path, ext_blocklist=frozenset())
+    rtfm.index_source(conn, src, tmp_path)
+    texts = [r[0] for r in conn.execute("SELECT text FROM content_fts")]
+    assert not any("�" in t for t in texts)
+
+
+def test_errors_replace_is_gone_from_the_source():
+    # Both ADRs state it is removed. A grep is the only assertion that stays true when
+    # someone adds a fourth decode site.
+    import pathlib
+    assert 'errors="replace"' not in pathlib.Path(rtfm.__file__).read_text()

@@ -79,6 +79,15 @@ def test_read_text_line_range(home, tmp_path):
     assert "widget protocol" in text and "intro line" not in text
 
 
+def test_read_reports_a_non_utf8_file_instead_of_raising(home, tmp_path):
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "cp1252.md").write_bytes(b"caf\xe9 keyword\n")
+    msg = rtfm.read_document_text(rtfm.Source("docs", "dir", d), "cp1252.md")
+    assert "cp1252.md" in msg
+    assert "utf-8" in msg.lower()
+
+
 def test_search_auto_reindexes_small_unindexed_source(home, tmp_path):
     """A newly-added small source (within the auto-reindex budget) is indexed inline on search;
     the user no longer has to call reindex first. Phase 2 amends the old query-only behavior."""

@@ -446,7 +446,7 @@ def _pdf_rows(path: Path) -> list[tuple[str, str, str]]:
 def _text_rows(path: Path) -> list[tuple[str, str, str]]:
     """Line locators, CHUNK_LINES per row (ADR 0004)."""
     rows: list[tuple[str, str, str]] = []
-    lines = path.read_text(errors="replace").splitlines()
+    lines = path.read_text(encoding="utf-8").splitlines()
     for i in range(0, max(1, len(lines)), CHUNK_LINES):
         chunk = "\n".join(ln.rstrip() for ln in lines[i:i + CHUNK_LINES])
         if chunk.strip():
@@ -501,7 +501,7 @@ def _text_doc_signal(path: Path) -> tuple[str, str]:
     (`paragraph\\n---` is a heading; a `---` after a blank line is a horizontal rule, not a
     heading). A leading `---` YAML frontmatter block is skipped first so its closing fence isn't
     misread as an underline (which would make a frontmatter key the title)."""
-    lines = path.read_text(errors="replace").splitlines()
+    lines = path.read_text(encoding="utf-8").splitlines()
     start = 0
     if lines and lines[0].strip() == "---":
         for j in range(1, len(lines)):
@@ -1768,7 +1768,12 @@ def read_document_text(src: Source, relpath: str, start: int = 1, end: int | Non
         return f"!!! ERROR !!! '{relpath}' not found in source '{src.name}'."
     if path.suffix.lower() == ".pdf":
         return extract_pdf_text(path, start=start, end=end)
-    lines = path.read_text(errors="replace").splitlines()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except UnicodeDecodeError as e:
+        return (f"!!! CANNOT READ '{relpath}' !!! not valid UTF-8 ({e.reason} at byte "
+                f"{e.start}). rtfm indexes UTF-8 text. Recover: convert the file, or "
+                f"exclude its type in {manifest_path()}.")
     e = end if end is not None else len(lines)
     return "\n".join(lines[max(0, start - 1):e])
 
