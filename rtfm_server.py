@@ -802,56 +802,47 @@ def _ensure_git_repo_ready(src: Source) -> tuple[Path, str | None]:
     return repo_path, None
 
 
-def _index_files(conn: sqlite3.Connection, source_name: str, root: Path) -> dict:
-    """Scan `root` for supported files and sync the index for `source_name`: hash new or
-    mtime-changed files, purge vanished ones, extract new contents, GC orphaned rows.
-    Returns a summary of the shared counters. Shared by the dir and git_repo reindex
-    paths so the two can never drift apart."""
-    summary = {"files_seen": 0, "unique_contents": 0, "newly_extracted": 0,
-               "extraction_skips": 0, "purged": 0, "errors": 0}
-    files = iter_source_files(Source(name=source_name, type="dir", path=root))
-    summary["files_seen"] = len(files)
+def index_source(conn: sqlite3.Connection, src: Source, root: Path) -> Indexed:
+    """Run the four questions over one source and sync the index (ADR 0015).
 
+    `locations` is reconciled against what step 2 WANTED, not what step 3A read. A position
+    that failed step 1 or 3A is present in the tree and unreadable — not absent. Computing
+    `vanished` from what succeeded would delete its row and GC its content, losing indexed
+    content because a file's permissions changed. Only step 2's output answers "what is in
+    this source"."""
+    source_name = src.name
     existing = {r[0]: (r[1], r[2]) for r in conn.execute(
         "SELECT relpath, sha256, mtime FROM locations WHERE source=?", (source_name,))}
 
-    present: dict[str, tuple[str, float]] = {}
-    for f in files:
-        rel = str(f.relative_to(root))
-        mtime = f.stat().st_mtime
-        prev = existing.get(rel)
-        if prev and prev[1] == mtime:
-            sha = prev[0]                                   # mtime match: reuse stored sha
-        else:
-            sha = hashlib.sha256(f.read_bytes()).hexdigest()
-        present[rel] = (sha, mtime)
+    reachable = access(src, root)
+    wanted = select(reachable.kept, root)
+    read = read_bytes_for(wanted, root, existing)
 
-    vanished = set(existing) - set(present)
+    # Reconcile against what step 2 wanted. A position that failed 3A is still in `wanted`
+    # (read_bytes_for reports it as a problem, not by omission), so it keeps its row via
+    # wanted_rels alone. A position that failed step 1 never reaches `wanted` at all — access()
+    # excludes what it could not open — so for anything wanted_rels does not cover, fall back to
+    # asking the filesystem directly: a relpath that still names a file (however unreadable) has
+    # not vanished, only a relpath with nothing there at all has.
+    wanted_rels = {_rel(f, root) for f in wanted}
+    vanished = {rel for rel in existing
+                if rel not in wanted_rels and not (root / rel).is_file()}
     for rel in vanished:
         conn.execute("DELETE FROM locations WHERE source=? AND relpath=?", (source_name, rel))
-    summary["purged"] = len(vanished)
-
-    for rel, (sha, mtime) in present.items():
+    for f, sha, mtime in read.kept:
         conn.execute(
             "INSERT INTO locations(source, relpath, sha256, mtime) VALUES(?,?,?,?) "
             "ON CONFLICT(source, relpath) DO UPDATE SET "
             "sha256=excluded.sha256, mtime=excluded.mtime",
-            (source_name, rel, sha, mtime))
+            (source_name, _rel(f, root), sha, mtime))
     conn.commit()
 
-    shas_here = {sha for (sha, _) in present.values()}
-    summary["unique_contents"] = len(shas_here)
+    shas_here = {sha for (_f, sha, _m) in read.kept}
     already = {r[0] for r in conn.execute("SELECT sha256 FROM contents")}
     need = shas_here - already
-    summary["extraction_skips"] = summary["files_seen"] - len(need)
+    handled = handle(conn, read.kept, need, root)
 
-    jobs: dict[str, str] = {}
-    for rel in sorted(present):                             # deterministic representative path
-        sha = present[rel][0]
-        if sha in need and sha not in jobs:
-            jobs[sha] = str(root / rel)
-
-    for ex in _extract_many(list(jobs.items())):
+    for ex in handled.kept:
         kind = ex.rows[0][0] if ex.rows else "line"
         conn.execute("DELETE FROM content_fts WHERE sha256=?", (ex.sha,))
         conn.executemany(
@@ -866,14 +857,33 @@ def _index_files(conn: sqlite3.Connection, source_name: str, root: Path) -> dict
             "locator_kind=excluded.locator_kind, n_chunks=excluded.n_chunks, "
             "extracted_ok=excluded.extracted_ok, error=excluded.error",
             (ex.sha, kind, len(ex.rows), 0 if ex.error else 1, ex.error))
-        summary["errors" if ex.error else "newly_extracted"] += 1
     conn.commit()
 
-    for tbl in ("content_fts", "doc_fts", "contents"):           # GC contents with no live path
+    for tbl in ("content_fts", "doc_fts", "contents"):       # GC contents with no live path
         conn.execute(
             f"DELETE FROM {tbl} WHERE sha256 NOT IN (SELECT DISTINCT sha256 FROM locations)")
     conn.commit()
-    return summary
+
+    errors = sum(1 for ex in handled.kept if ex.error)
+    return Indexed(
+        reachable=reachable, wanted=wanted, read=read, handled=handled,
+        cache=CacheStats(unique_contents=len(shas_here),
+                         newly_extracted=len(handled.kept) - errors,
+                         extraction_skips=len(wanted) - len(need),
+                         purged=len(vanished)))
+
+
+def _index_files(conn: sqlite3.Connection, source_name: str, root: Path) -> dict:
+    """Today's counter dict, now a projection of `Indexed`. Kept so `reindex_source` and
+    `_reindex_git_repo` are unchanged; the JSON wire format does not move."""
+    result = index_source(conn, Source(name=source_name, type="dir", path=root), root)
+    errors = sum(1 for ex in result.handled.kept if ex.error)
+    return {"files_seen": len(result.wanted),
+            "unique_contents": result.cache.unique_contents,
+            "newly_extracted": result.cache.newly_extracted,
+            "extraction_skips": result.cache.extraction_skips,
+            "purged": result.cache.purged,
+            "errors": errors}
 
 
 def _reindex_git_repo(conn: sqlite3.Connection, src: Source) -> dict:

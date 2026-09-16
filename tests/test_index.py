@@ -622,3 +622,39 @@ def test_handle_fans_a_failed_content_out_to_every_position(home, tmp_path):
     assert sorted(p.position for p in got.problems) == ["v1.pdf", "v2.pdf", "v3.pdf"]
     assert all("pdf" not in p.reason.lower() or "utf-8" not in p.reason.lower()
                for p in got.problems)          # reported in the handler's own terms
+
+
+def test_index_source_returns_each_step_s_result(home, tmp_path):
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "a.md").write_text("alpha keyword")
+    conn = rtfm.get_index_db()
+    got = rtfm.index_source(conn, rtfm.Source(name="s", type="dir", path=t), t)
+    assert isinstance(got, rtfm.Indexed)
+    assert [p.name for p in got.reachable.kept] == ["a.md"]
+    assert [p.name for p in got.wanted] == ["a.md"]
+    assert len(got.read.kept) == 1
+    assert got.cache.unique_contents == 1
+
+
+def test_an_unreadable_file_is_not_treated_as_vanished(home, tmp_path, unopenable):
+    # Failing a step is not the same as ceasing to exist. Reconciling against what SUCCEEDED
+    # would delete the row and GC the content — losing indexed content because a file's
+    # permissions changed.
+    t = tmp_path / "c"
+    t.mkdir()
+    f = t / "a.md"
+    f.write_text("findable keyword")
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="s", type="dir", path=t)
+    rtfm.index_source(conn, src, t)
+    assert rtfm.search_index(conn, "keyword", source="s")
+    f.chmod(0o000)
+    try:
+        got = rtfm.index_source(conn, src, t)
+        assert got.cache.purged == 0
+        rows = {r[0] for r in conn.execute(
+            "SELECT relpath FROM locations WHERE source='s'")}
+        assert rows == {"a.md"}
+    finally:
+        f.chmod(0o644)
