@@ -207,6 +207,29 @@ def test_failed_extraction_not_retried_on_unchanged_bytes(home, tmp_path):
     assert row_after_second is not None and row_after_second[0] == 0
 
 
+def test_a_handling_failure_is_reported_on_every_run(home, tmp_path):
+    (tmp_path / "broken.pdf").write_bytes(b"%PDF-1.4\nnot really a pdf\n")
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="s", type="dir", path=tmp_path, ext_blocklist=frozenset())
+
+    first = rtfm.index_source(conn, src, tmp_path)
+    assert [p.position for p in first.handled.problems] == ["broken.pdf"]
+
+    second = rtfm.index_source(conn, src, tmp_path)
+    assert [p.position for p in second.handled.problems] == ["broken.pdf"], (
+        "a file that is still broken must still be reported")
+    assert second.cache.newly_extracted == 0, "and must not be re-extracted to say so"
+
+
+def test_a_repaired_file_stops_being_reported(home, tmp_path):
+    (tmp_path / "f.md").write_bytes(b"\xff\xfe broken\n")
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="s", type="dir", path=tmp_path, ext_blocklist=frozenset())
+    assert rtfm.index_source(conn, src, tmp_path).handled.problems
+    (tmp_path / "f.md").write_text("now findable keyword")
+    assert rtfm.index_source(conn, src, tmp_path).handled.problems == []
+
+
 def test_extraction_runs_in_current_process_not_forked(home, tmp_path, monkeypatch):
     """Regression guard for the FastMCP-server deadlock: parallel extraction must run in THIS
     process (a thread pool), never a forked child. A process pool deadlocks inside the server

@@ -1308,7 +1308,22 @@ def handle(conn: sqlite3.Connection, read_kept: list[tuple[Path, str, float]],
         if ex.error:
             problems.extend(Problem(pos, ex.error) for pos in sorted(by_sha.get(ex.sha, [])))
         kept.append(ex)
-    return StepResult(kept, problems)
+
+    # A sha outside `need` was extracted in an earlier run and is not re-extracted here.
+    # If that earlier run failed, the file is still broken and still unsearchable, so the
+    # failure is still true: report it from the stored error rather than paying the parse
+    # cost again. Without this a corrupt file is named once, on the run that first failed,
+    # and every run afterwards reports a clean source.
+    stale_failures = {sha for sha in by_sha if sha not in jobs}
+    if stale_failures:
+        marks = ",".join("?" * len(stale_failures))
+        for sha, error in conn.execute(
+                f"SELECT sha256, error FROM contents "
+                f"WHERE extracted_ok = 0 AND sha256 IN ({marks})",
+                tuple(stale_failures)):
+            problems.extend(Problem(pos, error or "extraction failed in an earlier run")
+                            for pos in sorted(by_sha[sha]))
+    return StepResult(kept, sorted(problems))
 
 
 def iter_source_files(src: Source, root: Path | None = None) -> list[Path]:
