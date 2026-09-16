@@ -513,3 +513,65 @@ def test_health_check_reports_git_repo_sources(home, tmp_path):
     names = [s["name"] for s in out["sources"]]
     assert "specs" in names
     assert any(s["type"] == "git_repo" for s in out["sources"])
+
+
+def test_a_read_failure_does_not_tell_you_to_edit_the_manifest(home, tmp_path, unopenable):
+    (tmp_path / "a.md").write_text("findable keyword")
+    result = rtfm.StepResult([], [rtfm.Problem("a.md", "Permission denied")])
+    [msg] = rtfm.report("s", result, "read")
+    assert "storage" in msg
+    assert str(rtfm.manifest_path()) not in msg
+
+
+def test_an_access_failure_does_name_the_manifest(home, tmp_path):
+    result = rtfm.StepResult([], [rtfm.Problem("vault", "Permission denied")])
+    [msg] = rtfm.report("s", result, "access")
+    assert str(rtfm.manifest_path()) in msg
+
+
+def test_report_marks_elided_positions_and_reasons(home):
+    problems = [rtfm.Problem(f"f{i}.md", f"reason {i}") for i in range(5)]
+    [msg] = rtfm.report("s", rtfm.StepResult([], problems), "handle")
+    assert "(+2 more)" in msg          # 5 positions, 3 shown
+    assert "(+3 more)" in msg          # 5 distinct reasons, 2 shown
+
+
+def test_a_git_repo_source_reports_its_steps(home, tmp_path, git_branch):
+    remote, seed, branch = make_git_repo(tmp_path, git_branch, filename="broken.pdf",
+                                         content="%PDF-1.4\nnot really a pdf\n")
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=branch,
+                      ext_blocklist=frozenset())
+    summary = rtfm.reindex_source(conn, src)
+    assert any("COULD NOT HANDLE" in w for w in summary.get("warnings", []))
+
+
+def test_reindex_surfaces_a_handling_failure(home, tmp_path):
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "broken.pdf").write_bytes(b"%PDF-1.4\nnot really a pdf\n")
+    rtfm.load_manifest()
+    _add_source("docs", d)
+    out = rtfm.reindex(source="docs")
+    assert any("COULD NOT HANDLE" in w for w in out.get("WARNING", []))
+
+
+def test_search_surfaces_a_handling_failure(home, tmp_path):
+    d = tmp_path / "docs"
+    d.mkdir()
+    (d / "ok.md").write_text("findable keyword")
+    (d / "broken.pdf").write_bytes(b"%PDF-1.4\nnot really a pdf\n")
+    rtfm.load_manifest()
+    _add_source("docs", d)
+    out = rtfm.search(query="keyword", source="docs")
+    assert any("COULD NOT HANDLE" in w for w in out.get("WARNING", []))
+
+
+def test_the_zero_path_summary_has_the_same_keys_as_a_real_one(home, tmp_path):
+    conn = rtfm.get_index_db()
+    missing = rtfm.Source(name="s", type="dir", path=tmp_path / "nope",
+                          ext_blocklist=frozenset())
+    real = rtfm.Source(name="s", type="dir", path=tmp_path, ext_blocklist=frozenset())
+    (tmp_path / "a.md").write_text("x")
+    assert (set(rtfm.reindex_source(conn, missing))
+            == set(rtfm.reindex_source(conn, real)) - {"warnings"})

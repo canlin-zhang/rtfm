@@ -649,11 +649,11 @@ class Indexed(NamedTuple):
 
 _STEP_MESSAGES = {
     "access": ("COULD NOT OPEN", "could not be reached",
-               "fix the permissions, or point the source elsewhere"),
-    "read": ("COULD NOT READ", "could not give up their bytes",
-             "fix storage or permissions"),
+               "fix the permissions, or point the source elsewhere in {manifest}"),
+    "read":   ("COULD NOT READ", "could not give up their bytes",
+               "fix storage or permissions where the source lives"),
     "handle": ("COULD NOT HANDLE", "could not be processed",
-               "convert them, or exclude their file types"),
+               "convert them, or exclude their file types in {manifest}"),
 }
 
 
@@ -661,15 +661,22 @@ def report(src_name: str, result: StepResult, step: str) -> list[str]:
     """Turn one step's problems into messages. The only place a Problem becomes text.
 
     Each step names itself and gives its own remedy, because merging them tells a user to
-    convert a file they simply lack permission to open (ADR 0015)."""
+    convert a file they simply lack permission to open (ADR 0015). The manifest is named
+    only where editing it is the actual fix — step 3A's failure is infrastructure (a failing
+    disk, a permission bit), and telling someone to fix that by editing TOML is the
+    merged-step defect ADR 0015 deletes, wearing a different hat."""
     if not result.problems:
         return []
     tag, what, recover = _STEP_MESSAGES[step]
     shown = ", ".join(p.position for p in result.problems[:3])
     more = f" (+{len(result.problems) - 3} more)" if len(result.problems) > 3 else ""
-    reasons = ", ".join(sorted({p.reason for p in result.problems})[:2])
+    distinct = sorted({p.reason for p in result.problems})
+    reasons = ", ".join(distinct[:2])
+    if len(distinct) > 2:
+        reasons += f" (+{len(distinct) - 2} more)"
     return [f"!!! {tag} '{src_name}' !!! {len(result.problems)} path(s) {what}: "
-            f"{shown}{more} — {reasons}. Recover: {recover} in {manifest_path()}."]
+            f"{shown}{more} — {reasons}. "
+            f"Recover: {recover.format(manifest=manifest_path())}."]
 
 
 def report_all(src_name: str, result: Indexed) -> list[str]:
@@ -946,6 +953,11 @@ def _as_summary(result: Indexed) -> dict:
             "errors": errors}
 
 
+_EMPTY_INDEXED = Indexed(reachable=StepResult([], []), wanted=[],
+                         read=StepResult([], []), handled=StepResult([], []),
+                         cache=CacheStats(0, 0, 0, 0))
+
+
 def _reindex_git_repo(conn: sqlite3.Connection, src: Source) -> dict:
     """Rebuild a git_repo source."""
     repo_path, error = _ensure_git_repo_ready(src)
@@ -991,6 +1003,7 @@ def _reindex_git_repo(conn: sqlite3.Connection, src: Source) -> dict:
                 f"'unknown'.")
     result = index_source(conn, src, repo_path)
     summary.update(_as_summary(result))
+    summary["warnings"] = report_all(src.name, result)
     return summary
 
 
@@ -1006,8 +1019,7 @@ def reindex_source(conn: sqlite3.Connection, src: Source) -> dict:
     """
     if src.type == "git_repo":
         return _reindex_git_repo(conn, src)
-    summary = {"source": src.name, "files_seen": 0, "unique_contents": 0,
-               "newly_extracted": 0, "extraction_skips": 0, "purged": 0, "errors": 0}
+    summary = {"source": src.name, **_as_summary(_EMPTY_INDEXED)}
     if src.path is None or not src.path.exists():
         return summary
     result = index_source(conn, src, src.path)
@@ -1850,6 +1862,7 @@ def search(query: str, source: str | None = None, max_files: int = 20,
                 continue
             else:  # git_repo — always auto-reindex, budget doesn't apply
                 result = reindex_source(conn, s)
+                warnings.extend(result.get("warnings", ()))
                 # Multiple sources on one clone (or one broken remote) would
                 # otherwise repeat the identical warning once per source.
                 key = (s.path if s.path is not None
