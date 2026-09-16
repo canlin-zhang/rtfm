@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import sqlite3
+import stat
 import subprocess
 import time
 import tomllib
@@ -854,21 +855,15 @@ def index_source(conn: sqlite3.Connection, src: Source, root: Path) -> Indexed:
     # Reconcile against what step 2 wanted. A position that failed 3A is still in `wanted`
     # (read_bytes_for reports it as a problem, not by omission), so it keeps its row via
     # wanted_rels alone. A position that failed step 1 never reaches `wanted` at all — access()
-    # excludes what it could not open — so for anything wanted_rels does not cover, fall back to
-    # asking the filesystem directly: a relpath that still names a file (however unreadable) has
-    # not vanished. Nor has one sitting under a directory step 1 could not enter — Path.is_file()
-    # swallows that OSError and reports False, which would read as vanished even though the file
-    # is untouched; unreachable_dirs catches that case. Only a relpath with nothing there at all,
-    # and not shadowed by an unreachable ancestor, has actually vanished.
+    # excludes what it could not open — so for anything wanted_rels does not cover, ask step 1's
+    # own report first and the filesystem second. Only a relpath that no unreachable position
+    # shadows, and that nothing sits at any more, has actually vanished.
     wanted_rels = {_rel(f, root) for f in wanted}
-    unreachable_dirs = {p.position for p in reachable.problems}
-
-    def _shadowed(rel: str) -> bool:
-        return any(rel == u or rel.startswith(u + "/") for u in unreachable_dirs)
-
+    unreachable = {p.position for p in reachable.problems}
     vanished = {rel for rel in existing
-                if rel not in wanted_rels and not (root / rel).is_file()
-                and not _shadowed(rel)}
+                if rel not in wanted_rels
+                and not _shadowed_by(rel, unreachable)
+                and not _still_there(root / rel)}
     for rel in vanished:
         conn.execute("DELETE FROM locations WHERE source=? AND relpath=?", (source_name, rel))
     for f, sha, mtime in read.kept:
@@ -1039,12 +1034,8 @@ def _stale_delta(conn: sqlite3.Connection, src: Source) -> tuple[int, bool, bool
     on_disk = {str(f.relative_to(src.path)): f.stat().st_mtime
                for f in select(reachable.kept, src.path)}
     unreachable = {p.position for p in reachable.problems}
-
-    def _shadowed(rel: str) -> bool:
-        return any(rel == u or rel.startswith(u + "/") for u in unreachable)
-
     for rel, mtime in indexed.items():
-        if rel in on_disk or not _shadowed(rel):
+        if rel in on_disk or not _shadowed_by(rel, unreachable):
             continue
         try:
             on_disk[rel] = (src.path / rel).stat().st_mtime
@@ -1179,6 +1170,35 @@ def _rel(p: Path, base: Path) -> str:
         return p.relative_to(base).as_posix()
     except ValueError:
         return str(p)
+
+
+def _shadowed_by(rel: str, unreachable: set[str]) -> bool:
+    """Does a position step 1 could not reach sit on this relpath's way down?
+
+    `_rel` renders the source root as ".", which is the one position no relpath equals or
+    is prefixed by, so a denied root has to be matched on its own terms. Miss it and every
+    indexed row of that source reads as vanished while every file is still on disk.
+
+    Both reconcilers ask this, and they have to agree: index_source deletes rows on a False
+    and _stale_delta stops converging on one.
+    """
+    return any(u == "." or rel == u or rel.startswith(u + "/") for u in unreachable)
+
+
+def _still_there(p: Path) -> bool:
+    """Is a regular file still sitting at this position?
+
+    Not `Path.is_file()`: before Python 3.14 it re-raises OSError for EACCES, so a file
+    under a directory nobody can enter raises out of the caller rather than answering.
+    An OS that refuses to say is answering "unreadable", never "absent" — the caller
+    deletes an indexed row on a False, so only a real ENOENT/ENOTDIR earns one.
+    """
+    try:
+        return stat.S_ISREG(os.stat(p).st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return True
 
 
 def read_bytes_for(positions: list[Path], base: Path,

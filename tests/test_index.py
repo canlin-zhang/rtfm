@@ -662,10 +662,10 @@ def test_an_unreadable_file_is_not_treated_as_vanished(home, tmp_path, unopenabl
 
 def test_a_file_under_an_unreadable_directory_is_not_treated_as_vanished(
         home, tmp_path, unopenable):
-    # Path.is_file() swallows the OSError from stat'ing a path under a directory it cannot
-    # enter and reports False — indistinguishable from "gone" unless step 1's own report of
-    # the unreachable directory is consulted too. The file is untouched; rtfm just can't see
-    # it right now.
+    # Asking the filesystem about a path under a directory it cannot enter gets no usable
+    # answer — Path.is_file() raises EACCES before 3.14 and reports a bare False from 3.14
+    # on, which is indistinguishable from "gone". Only step 1's own report of the
+    # unreachable directory settles it. The file is untouched; rtfm just can't see it now.
     t = tmp_path / "c"
     t.mkdir()
     (t / "vault").mkdir()
@@ -720,4 +720,37 @@ def test_stale_delta_converges_after_an_unreadable_directory(home, tmp_path, uno
     rtfm.index_source(conn, src, t)
     unopenable(t / "vault", directory=True)
     rtfm.index_source(conn, src, t)  # reconcile round: the row survives, still unreadable
+    assert rtfm._stale_delta(conn, src) == (0, False, False)
+
+
+def test_a_denied_source_root_does_not_purge_the_whole_source(home, tmp_path, unopenable):
+    # The root is the one position _rel renders as "." — no relpath equals it or starts with
+    # "./", so a prefix test alone never shadows anything and every row of the source reads as
+    # vanished at once, content GC'd, while every file is still sitting on disk untouched.
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "a.md").write_text("findable keyword")
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="s", type="dir", path=t)
+    rtfm.index_source(conn, src, t)
+    unopenable(t, directory=True)
+    got = rtfm.index_source(conn, src, t)
+    assert got.reachable.problems == [rtfm.Problem(position=".", reason="Permission denied")]
+    assert got.cache.purged == 0
+    rows = {r[0] for r in conn.execute("SELECT relpath FROM locations WHERE source='s'")}
+    assert rows == {"a.md"}
+    assert rtfm.search_index(conn, "keyword", source="s")
+
+
+def test_stale_delta_converges_after_a_denied_source_root(home, tmp_path, unopenable):
+    # Same root blind spot on the freshness side: nothing shadowed means the surviving rows
+    # never rejoin on_disk, so the source reads stale on every query and never converges.
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "a.md").write_text("findable keyword")
+    conn = rtfm.get_index_db()
+    src = rtfm.Source(name="s", type="dir", path=t)
+    rtfm.index_source(conn, src, t)
+    unopenable(t, directory=True)
+    rtfm.index_source(conn, src, t)  # reconcile round: the row survives, still unreachable
     assert rtfm._stale_delta(conn, src) == (0, False, False)
