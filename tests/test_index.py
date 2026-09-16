@@ -477,3 +477,25 @@ def test_a_problem_names_a_position_not_a_hash():
     p = rtfm.Problem("docs/a.md", "Permission denied")
     assert p.position == "docs/a.md"
     assert p._fields == ("position", "reason")
+
+
+def test_one_registry_drives_body_and_signal(tmp_path):
+    # These dispatched independently and could disagree about a file — a .bzl was
+    # selected by one and ignored by the other, so it indexed to zero rows.
+    assert rtfm._routine_for(".pdf").name == "pdf"
+    assert rtfm._routine_for(".md").name == "markup"
+    assert rtfm._routine_for(".bzl").name == "text"
+    assert rtfm._routine_for("").name == "text"
+
+
+def test_the_fallback_is_not_a_member_of_the_ordered_registry():
+    # Inside the tuple it would match unconditionally, shadowing anything after it.
+    assert rtfm.DEFAULT_ROUTINE not in rtfm.ROUTINES
+    assert all(r.exts for r in rtfm.ROUTINES)
+
+
+def test_markup_routine_still_extracts_headings(tmp_path):
+    f = tmp_path / "x.md"
+    f.write_text("# Title\n\nbody text\n\n## Section\n")
+    title, headings = rtfm._doc_signal_for_file(f)
+    assert title == "Title" and "Section" in headings

@@ -18,6 +18,7 @@ import sqlite3
 import subprocess
 import time
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
@@ -404,23 +405,30 @@ def _auto_reindex_max() -> int:
     return AUTO_REINDEX_MAX_FILES
 
 
-def _rows_for_file(path: Path) -> list[tuple[str, str, str]]:
-    """Return (locator_kind, locator_value, text) rows for a supported file, else []."""
-    ext = path.suffix.lower()
+def _pdf_rows(path: Path) -> list[tuple[str, str, str]]:
+    """Page locators, one row per page with text (ADR 0004)."""
     rows: list[tuple[str, str, str]] = []
-    if ext == ".pdf":
-        text = extract_pdf_text(path)
-        for page_num, page_text in enumerate(text.split("\f"), 1):
-            content = "\n".join(ln.strip() for ln in page_text.splitlines() if ln.strip())
-            if content:
-                rows.append(("page", str(page_num), content))
-    elif ext in TEXT_EXTS:
-        lines = path.read_text(errors="replace").splitlines()
-        for i in range(0, max(1, len(lines)), CHUNK_LINES):
-            chunk = "\n".join(ln.rstrip() for ln in lines[i:i + CHUNK_LINES])
-            if chunk.strip():
-                rows.append(("line", str(i + 1), chunk))
+    for page_num, page_text in enumerate(extract_pdf_text(path).split("\f"), 1):
+        content = "\n".join(ln.strip() for ln in page_text.splitlines() if ln.strip())
+        if content:
+            rows.append(("page", str(page_num), content))
     return rows
+
+
+def _text_rows(path: Path) -> list[tuple[str, str, str]]:
+    """Line locators, CHUNK_LINES per row (ADR 0004)."""
+    rows: list[tuple[str, str, str]] = []
+    lines = path.read_text(errors="replace").splitlines()
+    for i in range(0, max(1, len(lines)), CHUNK_LINES):
+        chunk = "\n".join(ln.rstrip() for ln in lines[i:i + CHUNK_LINES])
+        if chunk.strip():
+            rows.append(("line", str(i + 1), chunk))
+    return rows
+
+
+def _rows_for_file(path: Path) -> list[tuple[str, str, str]]:
+    """Return (locator_kind, locator_value, text) rows for a file, via its routine."""
+    return _routine_for(path.suffix.lower()).rows(path)
 
 
 def _sane_title(s: str) -> bool:
@@ -484,17 +492,48 @@ def _text_doc_signal(path: Path) -> tuple[str, str]:
     return (headings[0] if headings else ""), "\n".join(headings)
 
 
+def _no_doc_signal(_path: Path) -> tuple[str, str]:
+    """No title/heading signal. A file whose format rtfm has no structural reader for is
+    body-searchable only — guessing structure from '#' comment lines would put a source
+    file's licence header into doc-level ranking (ADR 0012)."""
+    return "", ""
+
+
+class _Routine(NamedTuple):
+    """One handling routine: how a family of files becomes rows and a doc-level signal.
+
+    Body and signal live in the same record so the two dispatches cannot disagree about
+    which routine a file belongs to. Adding a format is adding a routine."""
+    name: str
+    exts: frozenset[str]
+    rows: Callable[[Path], list[tuple[str, str, str]]]
+    signal: Callable[[Path], tuple[str, str]]
+
+
+ROUTINES: tuple[_Routine, ...] = (
+    _Routine("pdf", frozenset({".pdf"}), _pdf_rows, _pdf_doc_signal),
+    _Routine("markup", frozenset(TEXT_EXTS), _text_rows, _text_doc_signal),
+)
+
+# The fallback sits outside ROUTINES. Inside, it would match unconditionally, so placing
+# it anywhere but last would silently shadow every routine after it — .pdf quietly getting
+# plain-text rows and no signal, with nothing raised. Out here there is no ordering to get
+# wrong.
+DEFAULT_ROUTINE = _Routine("text", frozenset(), _text_rows, _no_doc_signal)
+
+
+def _routine_for(ext: str) -> _Routine:
+    """The routine handling `ext`, else the plain-text fallback."""
+    return next((r for r in ROUTINES if ext in r.exts), DEFAULT_ROUTINE)
+
+
 def _doc_signal_for_file(path: Path) -> tuple[str, str]:
     """Doc-level (title, headings) for ranking. Best-effort — a failure yields ("", "") so the
     document still ranks on body text and signal extraction never blocks body extraction. The
     failure is logged (not silent): a broken/absent pymupdf would otherwise strip title/heading
     ranking corpus-wide with nothing to grep."""
-    ext = path.suffix.lower()
     try:
-        if ext == ".pdf":
-            return _pdf_doc_signal(path)
-        if ext in TEXT_EXTS:
-            return _text_doc_signal(path)
+        return _routine_for(path.suffix.lower()).signal(path)
     except ImportError as e:
         _log.warning("doc-signal disabled for %s (%s) — body search unaffected; reinstall to "
                      "restore title/heading ranking", path, e)
