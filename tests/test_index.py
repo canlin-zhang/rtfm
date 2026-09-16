@@ -572,3 +572,35 @@ def test_iter_source_files_still_works_for_its_callers(tmp_path):
     (t / "b.png").write_text("b")
     s = rtfm.Source(name="s", type="dir", path=t)
     assert [p.name for p in rtfm.iter_source_files(s)] == ["a.md"]
+
+
+def test_read_hashes_what_it_can(tmp_path):
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "a.md").write_text("alpha")
+    got = rtfm.read_bytes_for([t / "a.md"], t, {})
+    assert len(got.kept) == 1
+    path, sha, mtime = got.kept[0]
+    assert path.name == "a.md" and len(sha) == 64
+    assert got.problems == []
+
+
+def test_read_names_a_file_whose_bytes_it_cannot_get(tmp_path, unopenable):
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "a.md").write_text("alpha")
+    unopenable(t / "locked.md")
+    got = rtfm.read_bytes_for([t / "a.md", t / "locked.md"], t, {})
+    # One unreadable file used to raise straight out of the reindex.
+    assert [p.position for p in got.problems] == ["locked.md"]
+    assert len(got.kept) == 1
+
+
+def test_read_reuses_a_cached_hash(tmp_path):
+    t = tmp_path / "c"
+    t.mkdir()
+    f = t / "a.md"
+    f.write_text("alpha")
+    mtime = f.stat().st_mtime
+    got = rtfm.read_bytes_for([f], t, {"a.md": ("cafebabe", mtime)})
+    assert got.kept[0][1] == "cafebabe"      # no re-hash when the key matches

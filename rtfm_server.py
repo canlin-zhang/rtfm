@@ -1103,6 +1103,36 @@ def _rel(p: Path, base: Path) -> str:
         return str(p)
 
 
+def read_bytes_for(positions: list[Path], base: Path,
+                   existing: dict[str, tuple[str, float]]) -> StepResult:
+    """Step 3A (ADR 0015): are those bytes even readable?
+
+    Step 1 scanned; this one actually reads. Stale NFS/CIFS handles, EIO, ACLs
+    beyond the mode bits, a file moved underneath us between the scan and the
+    read. Failing here is infrastructure — the user fixes storage or permissions,
+    not files.
+
+    `existing` lets an unchanged position skip re-hashing. It is a cache on the
+    hash, never a gate on the read: a position whose key misses is read, and one
+    whose key hits was already confirmed reachable by step 1.
+
+    PR2 widens the cache key from mtime to mtime+size."""
+    kept: list[tuple[Path, str, float]] = []
+    problems: list[Problem] = []
+    for f in positions:
+        rel = _rel(f, base)
+        try:
+            mtime = f.stat().st_mtime
+            prev = existing.get(rel)
+            sha = prev[0] if prev and prev[1] == mtime else \
+                hashlib.sha256(f.read_bytes()).hexdigest()
+        except OSError as e:
+            problems.append(Problem(rel, e.strerror or type(e).__name__))
+            continue
+        kept.append((f, sha, mtime))
+    return StepResult(kept, problems)
+
+
 def iter_source_files(src: Source, root: Path | None = None) -> list[Path]:
     """Positions a source contributes, after selection. Callers that also need step 1's
     problems call `access` and `select` directly."""
