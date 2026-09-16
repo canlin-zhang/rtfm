@@ -17,7 +17,10 @@ def _seed(home, tmp_path, name="docs"):
 
 def _add_source(name, path):
     mp = rtfm.manifest_path()
-    mp.write_text(mp.read_text() + f'\n[[source]]\nname="{name}"\ntype="dir"\npath="{path}"\n')
+    mp.write_text(
+        mp.read_text()
+        + f'\n[[source]]\nname="{name}"\ntype="dir"\npath="{path}"\next_blocklist=[]\n'
+    )
 
 
 def test_search_hit_shape_and_locations(home, tmp_path):
@@ -202,7 +205,7 @@ def test_search_reports_a_file_it_could_not_open(home, tmp_path, unopenable):
     (t / "a.md").write_text("alpha keyword")
     unopenable(t / "locked.md")
     (home / "manifest.toml").write_text(
-        f'[[source]]\nname="s"\ntype="dir"\npath="{t}"\n')
+        f'[[source]]\nname="s"\ntype="dir"\npath="{t}"\next_blocklist=[]\n')
     resp = rtfm.search("keyword")
     assert resp["results"], "the readable file must still be searchable"
     assert any("COULD NOT OPEN" in w and "locked.md" in w for w in resp.get("WARNING", []))
@@ -240,7 +243,7 @@ def _status_of(home, tmp_path, name="specs", src=None, remote=None, ref=None):
     path = f'\npath="{src.path}"' if src.path is not None else ""
     mp.write_text(
         f'[[source]]\nname="{name}"\ntype="git_repo"\nurl="{url}"\n'
-        f'ref="{ref if ref is not None else src.ref}"\n{path}\n'
+        f'ref="{ref if ref is not None else src.ref}"\n{path}\next_blocklist=[]\n'
     )
     out = rtfm.list_sources()
     return next(s for s in out["sources"] if s["name"] == name)["git_status"]
@@ -381,7 +384,7 @@ def test_health_check_calls_step_one_without_indexing(home, tmp_path, unopenable
     (t / "a.md").write_text("alpha")
     unopenable(t / "vault", directory=True)
     (home / "manifest.toml").write_text(
-        f'[[source]]\nname="s"\ntype="dir"\npath="{t}"\n')
+        f'[[source]]\nname="s"\ntype="dir"\npath="{t}"\next_blocklist=[]\n')
     health = rtfm.health_check()
     assert health["ok"] is False
     assert any("vault" in i for i in health["issues"])
@@ -481,7 +484,7 @@ def test_reindex_tool_handles_git_repo(home, tmp_path, git_branch):
     mp = rtfm.manifest_path()
     mp.write_text(
         f'[[source]]\nname="specs"\ntype="git_repo"\n'
-        f'url="{remote}"\nref="{branch}"\npath="{dest}"\n'
+        f'url="{remote}"\nref="{branch}"\npath="{dest}"\next_blocklist=[]\n'
     )
     out = rtfm.reindex(source="specs")
     assert len(out["reindexed"]) == 1
@@ -495,7 +498,7 @@ def test_health_check_reports_git_repo_sources(home, tmp_path):
     mp = rtfm.manifest_path()
     mp.write_text(
         '[[source]]\nname="specs"\ntype="git_repo"\n'
-        'url="https://example.com/repo.git"\nref="feat-x"\n'
+        'url="https://example.com/repo.git"\nref="feat-x"\next_blocklist=[]\n'
     )
     out = rtfm.health_check()
     names = [s["name"] for s in out["sources"]]

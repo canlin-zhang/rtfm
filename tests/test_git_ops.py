@@ -379,7 +379,7 @@ def test_search_then_read_managed_git_repo(home, tmp_path):
     rtfm.load_manifest()
     mp = rtfm.manifest_path()
     mp.write_text(
-        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\n'
+        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\next_blocklist=[]\n'
     )
 
     # search auto-reindexes the managed clone and returns hit locations with relpaths
@@ -412,7 +412,7 @@ def test_search_auto_reindexes_stale_git_repo(home, tmp_path):
     rtfm.load_manifest()  # bootstrap default
     mp = rtfm.manifest_path()
     mp.write_text(
-        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\n'
+        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\next_blocklist=[]\n'
     )
 
     # First search clones and indexes v1
@@ -449,7 +449,7 @@ def test_search_auto_reindexes_linked_after_user_refresh(home, tmp_path):
     rtfm.load_manifest()  # bootstrap default
     mp = rtfm.manifest_path()
     mp.write_text(
-        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\n'
+        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\next_blocklist=[]\n'
     )
 
     # First search indexes v1
@@ -503,7 +503,7 @@ def test_search_warns_when_git_repo_fetch_fails(home, tmp_path, monkeypatch):
     rtfm.load_manifest()
     mp = rtfm.manifest_path()
     mp.write_text(
-        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\n'
+        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\next_blocklist=[]\n'
     )
     out = rtfm.search(query="widget")
     # Should serve v1 (stale) with a warning
@@ -671,7 +671,7 @@ def test_search_warns_on_dirty_linked(home, tmp_path):
     rtfm.load_manifest()
     mp = rtfm.manifest_path()
     mp.write_text(
-        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\n'
+        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\next_blocklist=[]\n'
     )
     out = rtfm.search(query="widget protocol")
     assert any("v1" in h["snippet"] for h in out["results"])
@@ -719,7 +719,7 @@ def test_clone_vanished_is_recreated(home, tmp_path):
 
     rtfm.load_manifest()
     mp = rtfm.manifest_path()
-    mp.write_text(f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\n')
+    mp.write_text(f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\next_blocklist=[]\n')
     out = rtfm.search(query="alpha bravo")
     assert any("alpha bravo" in h["snippet"] for h in out["results"])
 
@@ -852,7 +852,7 @@ def test_hex_named_branch_not_detached(home, tmp_path):
     mp = rtfm.manifest_path()
     mp.write_text(
         f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\n'
-        f'ref="deadbeef"\npath="{dest}"\n'
+        f'ref="deadbeef"\npath="{dest}"\next_blocklist=[]\n'
     )
     out = rtfm.list_sources()
     specs = next(s for s in out["sources"] if s["name"] == "specs")
@@ -1045,7 +1045,7 @@ def test_managed_hex_branch_first_run(home, tmp_path):
     rtfm.load_manifest()
     mp = rtfm.manifest_path()
     mp.write_text(
-        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="deadbeef"\n'
+        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="deadbeef"\next_blocklist=[]\n'
     )
     out = rtfm.list_sources()
     specs = next(s for s in out["sources"] if s["name"] == "specs")
@@ -1098,7 +1098,7 @@ def test_list_sources_error_status(home, tmp_path):
     rtfm.load_manifest()
     mp = rtfm.manifest_path()
     mp.write_text(
-        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\n'
+        f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\next_blocklist=[]\n'
     )
     out = rtfm.list_sources()
     specs = next(s for s in out["sources"] if s["name"] == "specs")
@@ -1112,7 +1112,7 @@ def test_health_check_git_probe(home, tmp_path, monkeypatch):
     mp = rtfm.manifest_path()
     mp.write_text(
         '[[source]]\nname="specs"\ntype="git_repo"\n'
-        'url="https://example.com/repo.git"\nref="main"\n'
+        'url="https://example.com/repo.git"\nref="main"\next_blocklist=[]\n'
     )
     _no_git(monkeypatch, tmp_path)
     out = rtfm.health_check()
@@ -1243,7 +1243,7 @@ def test_search_does_not_reattempt_broken_source_within_ttl(home, tmp_path, monk
     mp = rtfm.manifest_path()
     mp.write_text(
         f'[[source]]\nname="specs"\ntype="git_repo"\n'
-        f'url="{tmp_path / "no-such-remote.git"}"\nref="main"\n'
+        f'url="{tmp_path / "no-such-remote.git"}"\nref="main"\next_blocklist=[]\n'
     )
     attempts = []
     real_reindex = rtfm.reindex_source
@@ -1286,7 +1286,7 @@ def test_managed_pin_change_detected_on_search(home, tmp_path):
 
     def write_manifest(ref):
         mp.write_text(
-            f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="{ref}"\n'
+            f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="{ref}"\next_blocklist=[]\n'
         )
 
     write_manifest(sha1)
@@ -1318,8 +1318,8 @@ def test_search_dedupes_warnings_per_clone(home, tmp_path):
     rtfm.load_manifest()
     mp = rtfm.manifest_path()
     mp.write_text(
-        f'[[source]]\nname="s1"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\n'
-        f'[[source]]\nname="s2"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\n'
+        f'[[source]]\nname="s1"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\next_blocklist=[]\n'
+        f'[[source]]\nname="s2"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\next_blocklist=[]\n'
     )
     (dest / "a.md").write_text("uncommitted edit\n")  # dirty the shared clone
 
@@ -1397,8 +1397,8 @@ def test_search_sources_searched_respects_filter(home, tmp_path):
     rtfm.load_manifest()
     mp = rtfm.manifest_path()
     mp.write_text(
-        f'[[source]]\nname="docs"\ntype="dir"\npath="{d}"\n'
-        '[[source]]\nname="typoed"\ntype="Git_Repo"\nurl="https://example.com/r.git"\n'
+        f'[[source]]\nname="docs"\ntype="dir"\npath="{d}"\next_blocklist=[]\n'
+        '[[source]]\nname="typoed"\ntype="Git_Repo"\nurl="https://example.com/r.git"\next_blocklist=[]\n'
     )
     out = rtfm.search(query="filtered keyword", source="docs")
     assert out["sources_searched"] == ["docs"]
