@@ -499,3 +499,22 @@ def test_markup_routine_still_extracts_headings(tmp_path):
     f.write_text("# Title\n\nbody text\n\n## Section\n")
     title, headings = rtfm._doc_signal_for_file(f)
     assert title == "Title" and "Section" in headings
+
+
+def test_select_returns_a_bare_list_not_a_step_result(tmp_path):
+    # Step 2 asks about intent, where rtfm has no standing to call 90% filtered a partial
+    # success. A bare list means there is nowhere to record a step-2 partial outcome.
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "a.md").write_text("a")
+    got = rtfm.select([t / "a.md"], t)
+    assert isinstance(got, list)
+    assert not isinstance(got, rtfm.StepResult)
+
+
+def test_select_keeps_supported_and_drops_the_rest(tmp_path):
+    t = tmp_path / "c"
+    t.mkdir()
+    paths = [t / "a.md", t / "b.png", t / "c.pdf", t / "d.rst"]
+    got = rtfm.select(paths, t)
+    assert sorted(p.name for p in got) == ["a.md", "c.pdf", "d.rst"]

@@ -1033,6 +1033,23 @@ def _default_branch(path: Path) -> str:
         return "main"  # sensible fallback
 
 
+def select(positions: list[Path], base: Path) -> list[Path]:
+    """Step 2 (ADR 0015): out of what we can reach, what does the user want?
+
+    Returns a bare list, deliberately, not a StepResult. Steps 1, 3A and 3B ask
+    about the world, where "partial" is an observed fact worth reporting. This
+    step asks about intent, and rtfm has no standing to call 90% filtered a
+    partial success — either something survived or nothing did. With no
+    `problems` field there is nowhere to write a step-2 partial-filtering
+    warning, so nobody can.
+
+    PR2 replaces this hardcoded set with the manifest's ext_allowlist /
+    ext_blocklist (ADR 0014); the shape of the step does not change.
+    """
+    return [f for f in positions
+            if f.suffix.lower() == ".pdf" or f.suffix.lower() in TEXT_EXTS]
+
+
 def iter_source_files(src: Source) -> list[Path]:
     """Supported files under a dir source, recursively, skipping hidden dirs."""
     if src.path is None or not src.path.exists():
