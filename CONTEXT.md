@@ -3,7 +3,7 @@
 A local MCP server that makes large, can't-read-by-hand technical documentation — PDF spec
 sets and documentation repositories — searchable, with grounded, cited answers. Published
 as one thin Front per agent harness — a Claude Code plugin and an OpenCode plugin (skill
-`read-the-manual`; `audit` planned with Plan 4). The "F" is for *Full*: it ingests the
+`read-the-manual`; `audit` planned alongside the mutation tools). The "F" is for *Full*: it ingests the
 whole manual so you can search all of it, not just skim.
 
 ## Language

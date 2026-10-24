@@ -44,7 +44,7 @@ Deferred scope, each with the decision that parked it. Not yet implemented.
       surfaces noise. Evaluate against the real corpus as its own change, not bundled into the
       Tier 1 doc-signal work.
 
-- **Mutation tools + the `audit` skill (Plan 4)** — `rename`/`delete` gated to `mutable`
+- **Mutation tools + the `audit` skill** — `rename`/`delete` gated to `mutable`
   Sources (ADR 0001), plus the de-vendored `audit` skill (sha256 dedup via `find_duplicates`
   + title-page version extraction + collision-checked, approval-gated rename proposals; ADR
   0008). `audit` is designed but deferred until the mutation tools land — without them it can

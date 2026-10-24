@@ -47,12 +47,12 @@ def test_read_version_falls_back_to_claude_manifest(tmp_path):
 
 
 def test_data_dir_prefers_claude_plugin_data(monkeypatch, tmp_path):
+    monkeypatch.setenv("RTFM_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(tmp_path / "data"))
     assert bootstrap.data_dir("claude") == tmp_path / "data"
-    monkeypatch.delenv("CLAUDE_PLUGIN_DATA")
-    monkeypatch.setenv("RTFM_HOME", str(tmp_path / "home"))
-    assert bootstrap.data_dir("claude") == tmp_path / "home" / "fronts" / "claude"
     assert bootstrap.data_dir("opencode") == tmp_path / "home" / "fronts" / "opencode"
+    monkeypatch.delenv("CLAUDE_PLUGIN_DATA")
+    assert bootstrap.data_dir("claude") == tmp_path / "home" / "fronts" / "claude"
 
 
 def test_resolve_command_prefers_uvx(monkeypatch):
