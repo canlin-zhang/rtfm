@@ -24,10 +24,10 @@ Cross-module behavior gets named exceptions: `test_repo_sources.py` (git source
 lifecycle), `test_search_quality.py`, and `test_e2e.py`. `test_facade.py` pins
 the `rtfm_server` contract. The version-script tests split into
 `test_check_version_consistency.py` and `test_bump_version.py` with one shared
-fixture helper. `test_git_ops` splits into `test_git.py` and
-`test_repo_sources.py`; `test_index` into `test_extract.py`, `test_staging.py`,
-and `test_index.py`; `test_tools` into `test_query.py` and a small
-`test_tools.py` that pins the MCP registration.
+fixture helper. `test_git_ops` keeps its primitive tests and its name; its
+source-lifecycle tests move to `test_repo_sources.py`. `test_index` splits into
+`test_extract.py`, `test_staging.py`, and `test_index.py`; `test_tools` into
+`test_query.py` and a small `test_tools.py` that pins the MCP registration.
 
 **Import surface.** Unit tests import the owning `rtfm.<module>`. They do not
 use `rtfm_server` as a proxy for internals. `test_facade.py` is the only test
@@ -90,7 +90,7 @@ path. The suite stays fast enough to run on every change.
 ## Consequences
 
 - The split moves and renames tests. That is intentionally a large diff; it is
-  mechanical and the 430-test suite is the gate.
+  mechanical and the full test suite is the gate.
 - The eight monkeypatch sites retarget to public seams or become state tests.
 - The PEP-723 mirror tests disappear with the single dependency source; the
   version tests keep only the four version declarations.

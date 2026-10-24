@@ -20,7 +20,9 @@ officially supported.
 
 ## Layout
 
-- `rtfm_server.py` — the entire server (FastMCP). **One file on purpose** (see below).
+- `rtfm/` — the core package: `config`, `manifest`, `git_ops`, `extract`, `staging`,
+  `index`, `query`, `tools`, `app` (ADR 0017).
+- `rtfm_server.py` — the thin console facade: six public tools, `mcp`, and `main()`.
 - `bin/launch` — source/development launcher: prefers `uv run`, else a self-managed venv.
 - `manifest.example.toml` — documented source-manifest template.
 - `plugins/claude/` — Claude Code front: manifest, `.mcp.json`, bootstrap, skill copy.
@@ -30,17 +32,22 @@ officially supported.
 - `opencode.json` — points at `docs/opencode-dev.md`, the OpenCode-only notes.
 - `.claude-plugin/marketplace.json` — the Claude marketplace catalog (the only root plugin file).
 - `docs/adr/` — architecture decisions (numbered). `docs/ROADMAP.md` — deferred scope.
-- `tests/` — pytest, one file per concern.
+- `tests/` — pytest, mirroring the modules (`test_<module>.py`) plus named behavior
+  exceptions (`test_repo_sources.py`, `test_search_quality.py`, `test_e2e.py`) and
+  `test_facade.py` (ADR 0018).
 
 ## Hard structural rules
 
-1. **`rtfm_server.py` stays a single file until the package split (ADR 0017).**
-   Dependencies come from `pyproject.toml`; there is no PEP-723 block. The file is
-   organized into labelled sections (`config` / `index` / `manifest` / `extractors` /
-   `tools`); keep logic in importable module-level functions.
-2. **MCP tools are thin `@mcp.tool()` wrappers** over those plain functions, so tests call
-   the helpers directly. The `mcp = FastMCP("rtfm")` line must precede the tool defs; the
-   `def main(): mcp.run()` plus the `if __name__ == "__main__": main()` guard stays last.
+1. **The core is the `rtfm/` package; `rtfm_server.py` is a facade** (ADR 0017).
+   Dependencies come from `pyproject.toml`; there is no PEP-723 block. Cross-module calls
+   go through the module object (`git_ops.fetch(...)`, `staging.access(...)`) so a fake or
+   monkeypatch at a public seam affects every caller. Public, test-facing functions drop the
+   leading underscore; true internals keep it.
+2. **MCP tools are plain functions in `rtfm/query.py`; `rtfm/tools.py` registers them**
+   with `mcp.add_tool`, and `rtfm/app.py` owns the single `mcp = FastMCP("rtfm")` object.
+   Tests call the plain functions directly. `rtfm_server.py` imports `rtfm.tools` for the
+   registration side effect, re-exports the six names, and keeps `main()` plus the
+   `if __name__ == "__main__": main()` guard.
 3. **A front never contains `rtfm_server.py`.** `plugins/claude/` and `plugins/opencode/`
    are thin: each installs `rtfm-mcp` at the version declared by its own manifest. The core
    is published once; the fronts only register it and deliver the skill.

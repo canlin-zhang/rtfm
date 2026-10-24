@@ -24,10 +24,10 @@ install step for development.
 
 ## Conventions
 
-All coding conventions, the single-file constraint, and the design invariants live in
-[AGENTS.md](AGENTS.md) — please read it. The short version: keep `rtfm_server.py` a single
-file with thin MCP wrappers; comment the *why*; loud, actionable errors; `snake_case`; type
-hints on public signatures; ruff-clean.
+All coding conventions, the package layout, and the design invariants live in
+[AGENTS.md](AGENTS.md) — please read it. The short version: the core is the `rtfm/` package
+behind a thin `rtfm_server.py` facade; comment the *why*; loud, actionable errors;
+`snake_case`; type hints on public signatures; ruff-clean.
 
 ## Design changes
 

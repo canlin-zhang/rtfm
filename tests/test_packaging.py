@@ -7,23 +7,23 @@ ROOT = Path(__file__).resolve().parent.parent
 CLAUDE_FRONT = ROOT / "plugins" / "claude"
 
 
-def test_plugin_manifest_valid():
+def test_plugin_manifest_is_valid():
     m = json.loads((CLAUDE_FRONT / ".claude-plugin" / "plugin.json").read_text())
     assert m["name"] == "rtfm" and m["description"]
 
 
-def test_claude_mcp_points_at_bootstrap():
+def test_claude_mcp_config_points_at_the_bootstrap():
     server = json.loads((CLAUDE_FRONT / ".mcp.json").read_text())["mcpServers"]["rtfm"]
     assert server["command"] == "python3"
     assert server["args"] == ["${CLAUDE_PLUGIN_ROOT}/bootstrap.py", "--front", "claude"]
 
 
-def test_marketplace_source_points_at_claude_front():
+def test_marketplace_source_points_at_the_claude_front():
     entries = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text())["plugins"]
     assert [(p["name"], p["source"]) for p in entries] == [("rtfm", "./plugins/claude")]
 
 
-def test_claude_skill_bundled_and_devendored():
+def test_claude_skill_is_bundled_and_devendored():
     """The Claude front bundles the skill; every tool it names is rtfm's own (ADR 0008)."""
     text = (CLAUDE_FRONT / "skills" / "read-the-manual" / "SKILL.md").read_text()
     assert text.startswith("---")

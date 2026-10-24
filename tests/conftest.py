@@ -1,17 +1,24 @@
-import subprocess
+import os
 
 import pytest
 
-import rtfm_server as rtfm
+from rtfm import index
+
+# Fresh `git init` repos must get a `main` branch — the tests assume main, but the
+# machine default may be `master`. Pass init.defaultBranch=main to every git
+# subprocess spawned with git's GIT_CONFIG_* environment mechanism.
+os.environ.setdefault("GIT_CONFIG_COUNT", "1")
+os.environ.setdefault("GIT_CONFIG_KEY_0", "init.defaultBranch")
+os.environ.setdefault("GIT_CONFIG_VALUE_0", "main")
 
 
 @pytest.fixture(autouse=True)
 def _clear_freshness_cache():
     """The git_repo freshness memo is module-level and TTL'd — a verdict cached by
     one test must not leak into the next (or the same test's later assertions)."""
-    rtfm._freshness_cache.clear()
+    index.freshness_cache.clear()
     yield
-    rtfm._freshness_cache.clear()
+    index.freshness_cache.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -30,25 +37,6 @@ def _git_identity(monkeypatch):
 def git_branch(request):
     """Branch names to test against — covers common defaults and edge cases."""
     return request.param
-
-
-def make_git_repo(tmp_path, branch, remote_name="remote.git", seed_name="seed",
-                  filename="f.md", content="placeholder\n"):
-    """Create a bare remote, seed it with one commit on `branch`, push, return
-    (remote_path, seed_path, branch)."""
-    remote = tmp_path / remote_name
-    subprocess.run(
-        ["git", "-c", f"init.defaultBranch={branch}", "init", "--bare", str(remote)],
-        capture_output=True)
-    seed = tmp_path / seed_name
-    subprocess.run(["git", "clone", str(remote), str(seed)], capture_output=True)
-    (seed / filename).write_text(content)
-    subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "commit", "-m", "seed"],
-                   capture_output=True)
-    subprocess.run(["git", "-C", str(seed), "push", "origin", branch],
-                   capture_output=True)
-    return remote, seed, branch
 
 
 @pytest.fixture

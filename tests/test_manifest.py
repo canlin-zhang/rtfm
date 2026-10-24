@@ -1,8 +1,9 @@
 # tests/test_manifest.py
 import pathlib
 import subprocess
+from pathlib import Path
 
-import rtfm_server as rtfm
+from rtfm import config, manifest, query
 
 # --- scope (ADR 0014): paths and extension lists ---
 
@@ -12,8 +13,8 @@ def test_the_example_manifest_documents_all_four_keys():
     for key in ("paths", "ext_allowlist", "ext_blocklist"):
         assert key in text, key
 
-def test_paths_split_into_include_and_exclude(home, tmp_path):
-    src = rtfm._source_from_table({
+def test_paths_split_into_include_and_exclude_prefixes(home, tmp_path):
+    src = manifest.source_from_table({
         "name": "s", "type": "dir", "path": str(tmp_path),
         "paths": ["docs", "!docs/versions"], "ext_blocklist": [],
     })
@@ -22,7 +23,7 @@ def test_paths_split_into_include_and_exclude(home, tmp_path):
 
 
 def test_paths_are_normalized_and_sorted(home, tmp_path):
-    src = rtfm._source_from_table({
+    src = manifest.source_from_table({
         "name": "s", "type": "dir", "path": str(tmp_path),
         "paths": ["/b/", "./a", "b"], "ext_blocklist": [],
     })
@@ -30,7 +31,7 @@ def test_paths_are_normalized_and_sorted(home, tmp_path):
 
 
 def test_extensions_are_normalized(home, tmp_path):
-    src = rtfm._source_from_table({
+    src = manifest.source_from_table({
         "name": "s", "type": "dir", "path": str(tmp_path),
         "ext_allowlist": ["MD", ".PDF", "bzl"],
     })
@@ -39,61 +40,61 @@ def test_extensions_are_normalized(home, tmp_path):
 
 
 def test_declaring_both_extension_lists_is_refused(home, tmp_path):
-    s = rtfm._source_from_table({
+    s = manifest.source_from_table({
         "name": "s", "type": "dir", "path": str(tmp_path),
         "ext_allowlist": [".md"], "ext_blocklist": [".png"],
     })
-    warn = rtfm._validate_source(s)
+    warn = manifest.validate_source(s)
     assert warn is not None
     assert "ext_allowlist" in warn and "ext_blocklist" in warn
 
 
 def test_declaring_neither_extension_list_is_refused(home, tmp_path):
-    s = rtfm._source_from_table({"name": "s", "type": "dir", "path": str(tmp_path)})
-    warn = rtfm._validate_source(s)
+    s = manifest.source_from_table({"name": "s", "type": "dir", "path": str(tmp_path)})
+    warn = manifest.validate_source(s)
     assert warn is not None
     assert "ext_allowlist" in warn and "ext_blocklist" in warn
 
 
 def test_a_glob_in_paths_is_a_config_error(home, tmp_path):
     for bad in ("docs/**", "docs/*.md", "docs/v?", "docs/[abc]"):
-        s = rtfm._source_from_table({
+        s = manifest.source_from_table({
             "name": "s", "type": "dir", "path": str(tmp_path),
             "paths": [bad], "ext_blocklist": [],
         })
-        warn = rtfm._validate_source(s)
+        warn = manifest.validate_source(s)
         assert warn is not None, bad
         assert "prefix" in warn.lower(), bad
 
 
 def test_a_source_declaring_neither_list_is_dropped_not_kept(home, tmp_path):
     (tmp_path / "a.md").write_text("x")
-    rtfm.manifest_path().parent.mkdir(parents=True, exist_ok=True)
-    rtfm.manifest_path().write_text(
+    config.manifest_path().parent.mkdir(parents=True, exist_ok=True)
+    config.manifest_path().write_text(
         f'[[source]]\nname = "s"\ntype = "dir"\npath = "{tmp_path}"\n')
-    sources, warnings = rtfm.load_manifest()
+    sources, warnings = manifest.load_manifest()
     assert [s.name for s in sources] == []
     assert any("ext_allowlist" in w for w in warnings)
 
 
-def test_bootstrap_creates_default(home):
-    sources, warnings = rtfm.load_manifest()           # no manifest yet -> bootstrap
-    assert rtfm.manifest_path().exists()
-    assert rtfm.default_source_dir().is_dir()
+def test_load_manifest_bootstraps_a_default_source(home):
+    sources, warnings = manifest.load_manifest()           # no manifest yet -> bootstrap
+    assert config.manifest_path().exists()
+    assert config.default_source_dir().is_dir()
     assert warnings == []
     assert [s.name for s in sources] == ["default"]
     d = sources[0]
     assert d.type == "dir" and d.mutable is True
-    assert d.path == rtfm.default_source_dir()
+    assert d.path == config.default_source_dir()
 
 
-def test_load_explicit_sources(home):
-    default = rtfm.default_source_dir()
+def test_load_manifest_returns_explicit_sources_in_order(home):
+    default = config.default_source_dir()
     (home / "manifest.toml").write_text(
         f'[[source]]\nname="default"\ntype="dir"\npath="{default}"\nmutable=true\next_blocklist=[]\n'
         '[[source]]\nname="vendor"\ntype="dir"\npath="/opt/vendor/doc"\next_blocklist=[]\n'
     )
-    sources, warnings = rtfm.load_manifest()
+    sources, warnings = manifest.load_manifest()
     assert [s.name for s in sources] == ["default", "vendor"]
     assert sources[1].mutable is False           # defaults false
 
@@ -103,28 +104,28 @@ def test_duplicate_names_first_wins_with_warning(home):
         '[[source]]\nname="pa"\ntype="dir"\npath="/opt/a"\next_blocklist=[]\n'
         '[[source]]\nname="pa"\ntype="dir"\npath="/opt/b"\next_blocklist=[]\n'
     )
-    sources, warnings = rtfm.load_manifest()
+    sources, warnings = manifest.load_manifest()
     assert [s.name for s in sources] == ["pa"]    # second refused
-    assert sources[0].path == rtfm.Path("/opt/a")
+    assert sources[0].path == Path("/opt/a")
     assert any("pa" in w and "/opt/b" in w for w in warnings)
 
 
-def test_name_derived_from_path_when_omitted(home):
+def test_source_name_derives_from_path_when_omitted(home):
     (home / "manifest.toml").write_text(
         '[[source]]\ntype="dir"\npath="/opt/acme-docs-2025.06"\next_blocklist=[]\n'
     )
-    sources, warnings = rtfm.load_manifest()
+    sources, warnings = manifest.load_manifest()
     assert sources[0].name == "acme-docs-2025.06"
 
 
 def test_malformed_manifest_degrades_loudly(home):
-    rtfm.load_manifest()                                   # bootstrap a valid manifest
-    rtfm.manifest_path().write_text("this is not valid toml = = [[[\n")
-    sources, warnings = rtfm.load_manifest()
+    manifest.load_manifest()                                   # bootstrap a valid manifest
+    config.manifest_path().write_text("this is not valid toml = = [[[\n")
+    sources, warnings = manifest.load_manifest()
     assert sources == []
     assert warnings and "MALFORMED" in warnings[0]
     # the search tool must degrade without raising
-    out = rtfm.search(query="anything")
+    out = query.search(query="anything")
     assert out["results"] == [] and "WARNING" in out
 
 
@@ -137,7 +138,7 @@ def test_missing_path_source_warns_but_keeps_it_and_others(home, tmp_path):
         f'[[source]]\nname="good"\ntype="dir"\npath="{good}"\next_blocklist=[]\n'
         '[[source]]\nname="missing"\ntype="dir"\npath="/no/such/place"\next_blocklist=[]\n'
     )
-    sources, warnings = rtfm.load_manifest()
+    sources, warnings = manifest.load_manifest()
     assert {s.name for s in sources} == {"good", "missing"}
     assert any("missing" in w and "/no/such/place" in w for w in warnings)
 
@@ -145,7 +146,7 @@ def test_missing_path_source_warns_but_keeps_it_and_others(home, tmp_path):
 def test_dir_source_without_path_is_dropped_with_warning(home):
     """A dir source with no `path` at all is unusable, so it is dropped — but loudly."""
     (home / "manifest.toml").write_text('[[source]]\nname="nopath"\ntype="dir"\next_blocklist=[]\n')
-    sources, warnings = rtfm.load_manifest()
+    sources, warnings = manifest.load_manifest()
     assert all(s.name != "nopath" for s in sources)
     assert any("nopath" in w for w in warnings)
 
@@ -157,7 +158,7 @@ def test_path_not_a_directory_warns(home, tmp_path):
     (home / "manifest.toml").write_text(
         f'[[source]]\nname="filey"\ntype="dir"\npath="{f}"\next_blocklist=[]\n'
     )
-    sources, warnings = rtfm.load_manifest()
+    sources, warnings = manifest.load_manifest()
     assert any("filey" in w for w in warnings)
 
 
@@ -168,11 +169,11 @@ def test_search_tolerates_invalid_source(home, tmp_path):
     good.mkdir()
     (good / "g.md").write_text("the widget protocol defines flits\n")
     (home / "manifest.toml").write_text(
-        f'[[source]]\nname="default"\ntype="dir"\npath="{rtfm.default_source_dir()}"\nmutable=true\next_blocklist=[]\n'
+        f'[[source]]\nname="default"\ntype="dir"\npath="{config.default_source_dir()}"\nmutable=true\next_blocklist=[]\n'
         f'[[source]]\nname="good"\ntype="dir"\npath="{good}"\next_blocklist=[]\n'
         '[[source]]\nname="broken"\ntype="dir"\npath="/no/such/place"\next_blocklist=[]\n'
     )
-    out = rtfm.search(query="widget protocol")
+    out = query.search(query="widget protocol")
     assert any("widget protocol" in h["snippet"] for h in out["results"])
     assert "WARNING" in out and any("broken" in w for w in out["WARNING"])
 
@@ -184,7 +185,7 @@ def test_git_repo_source_parses_url_and_ref(home):
         '[[source]]\nname="specs"\ntype="git_repo"\n'
         'url="https://example.com/org/specs.git"\nref="dev"\next_blocklist=[]\n'
     )
-    sources, warnings = rtfm.load_manifest()
+    sources, warnings = manifest.load_manifest()
     assert [s.name for s in sources] == ["specs"]
     s = sources[0]
     assert s.type == "git_repo"
@@ -201,7 +202,7 @@ def test_git_repo_source_with_path_is_linked(home, tmp_path):
         f'[[source]]\nname="specs"\ntype="git_repo"\n'
         f'url="https://example.com/repo.git"\nref="main"\npath="{repo}"\next_blocklist=[]\n'
     )
-    sources, warnings = rtfm.load_manifest()
+    sources, warnings = manifest.load_manifest()
     s = sources[0]
     assert s.path == repo
 
@@ -210,7 +211,7 @@ def test_git_repo_without_url_warns(home):
     (home / "manifest.toml").write_text(
         '[[source]]\nname="specs"\ntype="git_repo"\nref="main"\next_blocklist=[]\n'
     )
-    sources, warnings = rtfm.load_manifest()
+    sources, warnings = manifest.load_manifest()
     assert any("url" in w.lower() and "specs" in w for w in warnings)
 
 
@@ -220,7 +221,7 @@ def test_git_repo_ref_defaults(home):
         '[[source]]\nname="specs"\ntype="git_repo"\n'
         'url="https://example.com/repo.git"\next_blocklist=[]\n'
     )
-    sources, warnings = rtfm.load_manifest()
+    sources, warnings = manifest.load_manifest()
     assert sources[0].ref is None
 
 
@@ -230,7 +231,7 @@ def test_git_repo_mutable_is_ignored(home):
         '[[source]]\nname="specs"\ntype="git_repo"\n'
         'url="https://example.com/repo.git"\nref="main"\nmutable=true\next_blocklist=[]\n'
     )
-    sources, warnings = rtfm.load_manifest()
+    sources, warnings = manifest.load_manifest()
     assert sources[0].mutable is True  # parsed but ignored at runtime
 
 
@@ -242,7 +243,7 @@ def test_git_repo_linked_mode_not_a_repo_warns(home, tmp_path):
         f'[[source]]\nname="specs"\ntype="git_repo"\n'
         f'url="https://example.com/repo.git"\npath="{repo}"\next_blocklist=[]\n'
     )
-    sources, warnings = rtfm.load_manifest()
+    sources, warnings = manifest.load_manifest()
     assert any("NOT A GIT REPO" in w and "specs" in w for w in warnings)
     assert sources[0].name == "specs"
 
@@ -254,7 +255,7 @@ def test_git_repo_linked_mode_no_remote_warns(home, tmp_path):
         f'[[source]]\nname="specs"\ntype="git_repo"\n'
         f'url="https://example.com/repo.git"\npath="{repo}"\next_blocklist=[]\n'
     )
-    sources, warnings = rtfm.load_manifest()
+    sources, warnings = manifest.load_manifest()
     assert any("NO REMOTE" in w and "specs" in w for w in warnings)
 
 
@@ -268,12 +269,12 @@ def test_git_repo_linked_mode_remote_mismatch_warns(home, tmp_path):
         f'[[source]]\nname="specs"\ntype="git_repo"\n'
         f'url="https://example.com/repo.git"\npath="{repo}"\next_blocklist=[]\n'
     )
-    sources, warnings = rtfm.load_manifest()
+    sources, warnings = manifest.load_manifest()
     assert any("MISMATCH" in w and "specs" in w for w in warnings)
     assert any("https://example.com/org/real.git" in w for w in warnings)
 
 
-def test_git_repo_linked_mode_matching_remote_is_clean(home, tmp_path):
+def test_git_repo_linked_mode_matching_remote_has_no_warnings(home, tmp_path):
     repo = tmp_path / "myrepo"
     subprocess.run(["git", "init", str(repo)], capture_output=True)
     subprocess.run(["git", "-C", str(repo), "remote", "add", "origin",
@@ -282,7 +283,7 @@ def test_git_repo_linked_mode_matching_remote_is_clean(home, tmp_path):
         f'[[source]]\nname="specs"\ntype="git_repo"\n'
         f'url="https://example.com/repo.git"\npath="{repo}"\next_blocklist=[]\n'
     )
-    sources, warnings = rtfm.load_manifest()
+    sources, warnings = manifest.load_manifest()
     assert warnings == []
 
 
@@ -292,19 +293,19 @@ def test_unknown_source_type_warns(home):
     (home / "manifest.toml").write_text(
         '[[source]]\nname="typoed"\ntype="Git_Repo"\nurl="https://example.com/r.git"\next_blocklist=[]\n'
     )
-    sources, warnings = rtfm.load_manifest()
+    sources, warnings = manifest.load_manifest()
     assert any("unknown type" in w and "typoed" in w for w in warnings)
     assert any(s.name == "typoed" for s in sources)  # kept but loud
 
 
 def test_git_repo_without_url_is_dropped(home):
     """A url-less git_repo is warned about AND dropped — keeping it would make
-    every search run `git clone None ...` (the whole-reindex crash of review
-    round 1). Dir sources set the precedent: unusable sources are dropped loudly."""
+    every search run `git clone None ...` (the whole-reindex crash this drop
+    prevents). Dir sources set the precedent: unusable sources are dropped loudly."""
     (home / "manifest.toml").write_text(
         '[[source]]\nname="no-url"\ntype="git_repo"\nref="main"\next_blocklist=[]\n'
     )
-    sources, warnings = rtfm.load_manifest()
+    sources, warnings = manifest.load_manifest()
     assert any("no 'url'" in w and "no-url" in w for w in warnings)
     assert all(s.name != "no-url" for s in sources)
 
@@ -321,6 +322,6 @@ def test_git_repo_linked_missing_git_warns(home, tmp_path, monkeypatch):
         f'[[source]]\nname="specs"\ntype="git_repo"\n'
         f'url="https://example.com/repo.git"\npath="{repo}"\next_blocklist=[]\n'
     )
-    sources, warnings = rtfm.load_manifest()
+    sources, warnings = manifest.load_manifest()
     assert any("GIT MISSING" in w and "specs" in w for w in warnings)
     assert not any("NOT A GIT REPO" in w for w in warnings)

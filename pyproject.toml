@@ -35,11 +35,12 @@ Issues = "https://github.com/canlin-zhang/rtfm/issues"
 rtfm-server = "rtfm_server:main"
 
 [tool.hatch.build.targets.wheel]
-# The server is deliberately one importable module, not a package (AGENTS.md).
-only-include = ["rtfm_server.py"]
+# The core is the `rtfm` package; `rtfm_server.py` stays as the console facade (ADR 0017).
+only-include = ["rtfm", "rtfm_server.py"]
 
 [tool.hatch.build.targets.sdist]
 include = [
+    "rtfm",
     "rtfm_server.py",
     "manifest.example.toml",
     "README.md",

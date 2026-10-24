@@ -593,7 +593,7 @@ def test_bump_refuses_ambiguous_version_lines(tmp_path, monkeypatch):
         run_bump(tmp_path, monkeypatch)
 
 
-def test_bump_second_plan_refusal_leaves_first_file_untouched(tmp_path, monkeypatch):
+def test_bump_second_write_refusal_leaves_the_first_file_untouched(tmp_path, monkeypatch):
     """If the plugin.json pattern can't match (say the file format shifted), the
     refusal must fire BEFORE pyproject.toml is written — otherwise a retry
     dead-ends on the drift refusal against the half-edited tree."""
