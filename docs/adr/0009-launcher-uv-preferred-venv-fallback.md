@@ -23,9 +23,10 @@ not resolve the package at launch. The launcher described here remains for sourc
 and development runs.
 
 The only hard prerequisite is therefore **`python3` on PATH** with a working
-`venv`/`pip` module (Debian/Ubuntu: `python3-venv`). `uv` is a speed bonus;
-`poppler` is a PDF-quality bonus (the pymupdf/pypdf fallback chain covers
-extraction without it).
+`venv`/`pip` module (Debian/Ubuntu: `python3-venv`). `uv` is the preferred
+installer and removes the `python3-venv` requirement; without it, python3 with
+venv/pip is required. `poppler` is a PDF-quality bonus (the pymupdf/pypdf
+fallback chain covers extraction without it).
 
 ## Considered Options
 
@@ -38,6 +39,8 @@ extraction without it).
 ## Consequences
 
 - First run on the fallback path is slower (one-time venv + pip install), cached thereafter.
+- The launcher rebuilds a venv whose `bin/python` exists but pip does not, the same
+  half-built state the front installer handles.
 - The dev launcher's venv lives under the Corpus home (`~/.rtfm/venv`); a front's fallback
   venv lives under its own data dir (`~/.rtfm/fronts/<front>/venv`, or
   `$CLAUDE_PLUGIN_DATA/venv` for Claude), so deleting the Corpus home resets only the dev one.

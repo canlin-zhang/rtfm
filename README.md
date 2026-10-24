@@ -59,7 +59,7 @@ Point the client's MCP configuration at that command:
 **Prerequisites:** the plugin builds a private venv under
 `$CLAUDE_PLUGIN_DATA/venv` (Claude Code) or `~/.rtfm/fronts/<front>/venv`
 (otherwise), installs the pinned `rtfm-mcp` there once, and runs it from there.
-It uses `uv` when present (`uv venv` + `uv pip install`); without uv it falls
+It uses `uv` when present (`uv venv --seed` + `uv pip install`); without uv it falls
 back to `python3 -m venv` + pip, so `python3` with a working `venv`/`pip` module
 is the hard requirement (Python 3.11+; Debian/Ubuntu: `python3-venv`). Later
 launches do not touch the network. See [ADR 0019](docs/adr/0019-front-persistent-install.md).

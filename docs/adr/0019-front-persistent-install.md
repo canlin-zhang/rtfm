@@ -22,18 +22,20 @@ The front installs the pinned core once into a private, version-stamped venv and
 execs its interpreter:
 
 - `data_dir(front)/venv`, stamped by `.core-version`.
-- `uv venv --python >=3.11` + `uv pip install` when uv is present; `python3 -m
-  venv` + pip otherwise.
+- `uv venv --seed --python >=3.11` + `uv pip install` when uv is present;
+  `python3 -m venv` + pip otherwise.
 - The first install attempt uses the cached index. Only a failure retries with
   `--refresh-package rtfm-mcp`, so a just-published version is found without a
   refresh on every update.
+- A venv that has `bin/python` but no pip is rebuilt when uv is absent, and a
+  failed install never writes the stamp.
 - An `fcntl` lock serializes concurrent installs.
 - The launch command is `venv/bin/python -m rtfm_server`: no resolver, no
   network.
 
 This ADR amends the front-launch text in ADR 0009 and ADR 0016. uv-created venvs
-are seeded with pip (`uv venv --seed`), so the pip fallback remains usable if uv
-is later removed.
+are created with `--seed`, so the pip fallback remains usable if uv is later
+removed.
 
 ## Considered options
 
