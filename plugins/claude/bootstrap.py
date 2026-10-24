@@ -9,6 +9,7 @@ Diagnostics go to stderr; stdout belongs to the MCP protocol.
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import io
 import json
 import os
@@ -92,6 +93,18 @@ def parse_front(args: list[str], root_name: str) -> str:
     )
 
 
+@contextlib.contextmanager
+def _install_lock(vdir: Path):
+    """One installer at a time: two sessions can start on a fresh venv together."""
+    vdir.parent.mkdir(parents=True, exist_ok=True)
+    with open(vdir.parent / ".install.lock", "w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 def _create_venv(vdir: Path, uv: str | None) -> None:
     """Create the front's private venv. uv needs no system venv module."""
     if uv:
@@ -153,13 +166,14 @@ def venv_server(version: str, front: str) -> list[str]:
     py = _venv_python(vdir)
     stamp = vdir / ".core-version"
     uv = find_tool("uv")
-    if not py.exists():
-        if vdir.exists():               # an interrupted create: start clean
-            shutil.rmtree(vdir, ignore_errors=True)
-        _create_venv(vdir, uv)
-    if not stamp.is_file() or stamp.read_text(encoding="utf-8") != version:
-        _install_core(py, version, uv)
-        stamp.write_text(version, encoding="utf-8")
+    with _install_lock(vdir):
+        if not py.exists():
+            if vdir.exists():           # an interrupted create: start clean
+                shutil.rmtree(vdir, ignore_errors=True)
+            _create_venv(vdir, uv)
+        if not stamp.is_file() or stamp.read_text(encoding="utf-8") != version:
+            _install_core(py, version, uv)
+            stamp.write_text(version, encoding="utf-8")
     return [str(py), "-m", "rtfm_server"]
 
 

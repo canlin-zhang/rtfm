@@ -261,6 +261,22 @@ def test_venv_stamp_reinstalls_on_mismatch(monkeypatch, tmp_path):
     assert (tmp_path / "venv" / ".core-version").read_text() == "0.8.0"
 
 
+def test_the_install_lock_wraps_the_stamp_check_and_install(monkeypatch, tmp_path):
+    monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
+    monkeypatch.setattr(bootstrap, "find_tool", lambda name: "/bin/uv")
+    (tmp_path / "venv" / "bin").mkdir(parents=True)
+    (tmp_path / "venv" / "bin" / "python").write_text("")
+    order = []
+    monkeypatch.setattr(bootstrap, "_install_core",
+                        lambda *a: order.append("install"))
+    monkeypatch.setattr(bootstrap.fcntl, "flock",
+                        lambda handle, op: order.append(("flock", op)))
+    bootstrap.venv_server("0.9.2", "claude")
+    assert order[0] == ("flock", bootstrap.fcntl.LOCK_EX)
+    assert order[1] == "install"
+    assert order[2] == ("flock", bootstrap.fcntl.LOCK_UN)
+
+
 def test_parse_front_accepts_both_forms():
     assert bootstrap.parse_front(["--front", "claude"], "claude") == "claude"
     assert bootstrap.parse_front(["--front=opencode"], "opencode") == "opencode"
