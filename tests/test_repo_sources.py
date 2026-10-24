@@ -8,7 +8,7 @@ import os
 import subprocess
 
 import pytest
-from conftest import make_git_repo
+from helpers.git_repo import make_git_repo
 
 from rtfm import config, git_ops, index, manifest, query
 
@@ -321,7 +321,7 @@ def test_search_warns_when_git_repo_fetch_fails(home, tmp_path, monkeypatch):
                for w in out["WARNING"])
 
 
-# --- round-1 review batch: classified errors and boundary states ---
+# --- classified errors and boundary states ---
 
 def _no_git(monkeypatch, tmp_path):
     """Make git unreachable for the duration of a test."""
@@ -685,7 +685,7 @@ def test_remote_mismatch_normalized(home, tmp_path):
     assert "error" not in summary
 
 
-# --- round-2 review batch: crash paths, pin changes, fetch counts, docs ---
+# --- crash paths, pin changes, and fetch counts ---
 
 def test_managed_ref_less_missing_git_is_git_missing(home, tmp_path, monkeypatch):
     """A git-less machine with a ref-less managed source: the classification chain
@@ -798,7 +798,7 @@ def test_remote_mismatch_port_and_trailing_slash(home, tmp_path):
 
 def test_fetch_counts(monkeypatch, home, tmp_path):
     """The fetch-count contract: one fetch for a managed refresh, zero for linked —
-    the double-fetch regression of round 1 must never come back."""
+    the double-fetch regression must never come back."""
     remote = tmp_path / "remote.git"
     subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
     seed = tmp_path / "seed"
@@ -964,8 +964,8 @@ def test_linked_no_origin_proceeds(home, tmp_path):
 
 def test_managed_pin_change_detected(home, tmp_path):
     """Changing the manifest pin from one SHA to another is detected — this test
-    pins the explicit reindex path; the search-triggered AUTO path (the round-2
-    fix) is pinned by test_managed_pin_change_detected_on_search."""
+    pins the explicit reindex path; the search-triggered AUTO path is pinned by
+    test_managed_pin_change_detected_on_search."""
     remote = tmp_path / "remote.git"
     subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
     seed = tmp_path / "seed"
@@ -1008,10 +1008,10 @@ def test_reindex_purges_manifest_absent_sources(home, tmp_path):
         "SELECT COUNT(*) FROM locations WHERE source='gone'").fetchone()[0] == 0
 
 
-# --- round-3 review batch: memo semantics, purge guard, final gaps ---
+# --- memo semantics, purge guard, and edge cases ---
 
 def test_staleness_memo_bounds_checks_and_invalidates(home, tmp_path, monkeypatch):
-    """The verdict memo: two _freshness calls within the TTL run one check (one
+    """The verdict memo: two freshness calls within the TTL run one check (one
     fetch for managed); an explicit reindex invalidates the entry."""
     remote = tmp_path / "remote.git"
     subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
@@ -1178,7 +1178,8 @@ def test_git_clone_hex_ref_bad_url_single_attempt(home, tmp_path, monkeypatch):
 
 def test_reindex_malformed_manifest_does_not_purge(home, tmp_path):
     """A malformed manifest must not wipe the index — the purge only runs on a
-    parsed manifest (SQLite's `NOT IN ()` is true for every row; round 3's wipe)."""
+    parsed manifest (SQLite's `NOT IN ()` is true for every row — the wipe this
+    guard prevents)."""
     d = tmp_path / "docs"
     d.mkdir()
     (d / "a.md").write_text("survivor keyword\n")
@@ -1252,7 +1253,7 @@ def test_editing_a_git_repo_scope_makes_it_stale(home, tmp_path, git_branch):
 def test_editing_a_git_repo_scope_by_exclude_paths_alone_makes_it_stale(
         home, tmp_path, git_branch):
     # Same regression as above, but for exclude_paths specifically: only ext_allowlist edits
-    # were covered, so a refactor that dropped exclude_paths from _config_scope would go
+    # were covered, so a refactor that dropped exclude_paths from config_scope would go
     # unnoticed. Two sources differing only in exclude_paths must scope differently and the
     # second must read stale against the first's indexed state.
     remote, seed, branch = make_git_repo(tmp_path, git_branch)
@@ -1286,7 +1287,7 @@ def test_a_scope_edit_beats_a_sha_pin(home, tmp_path, git_branch):
 
 
 def test_git_repo_scope_selects_only_the_matching_subset(home, tmp_path):
-    # Task 2 wired paths/ext_allowlist into select() for every source type, but no test
+    # paths/ext_allowlist flow into select() for every source type, but no test
     # anywhere had exercised them for git_repo specifically — this seeds a real clone with
     # files in and out of scope and checks the index only holds the matches.
     remote, seed, branch = make_git_repo(tmp_path, "main")

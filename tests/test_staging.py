@@ -172,9 +172,9 @@ def test_a_root_level_file_is_not_selected_under_a_restrictive_paths(home, tmp_p
 
 
 def test_a_dotdot_paths_entry_selects_nothing(home, tmp_path):
-    # Task 1 rejects glob characters in `paths` but not a `..` segment. What's actually
+    # Manifest validation rejects glob characters in `paths` but not a `..` segment. What's actually
     # guaranteed: selection can never leave the source root, because the prefix match is
-    # against a relpath _rel produces relative to `base`, and access() only ever enumerates
+    # against a relpath rel produces relative to `base`, and access() only ever enumerates
     # beneath that root — a relpath can neither render as absolute nor climb above it, so a
     # ".." entry can't match anything.
     (tmp_path / "a.md").write_text("x")
@@ -360,7 +360,7 @@ def test_nothing_selected_names_the_paths_policy_too(home, tmp_path):
 def test_nothing_selected_in_blocklist_mode_summarizes_defaults_by_count(home, tmp_path):
     # The effective blocklist is the user's list unioned with rtfm's ~70 defaults. Dumping
     # the whole union produced a 700-character wall the user could not act on and that
-    # buried the `paths` clause (fix round 1: a real defect, not a style choice). Name what
+    # buried the `paths` clause (a real defect, not a style choice). Name what
     # the user wrote; summarize the rest by count, and never show a default extension the
     # user never declared.
     d = tmp_path / "c"

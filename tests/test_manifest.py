@@ -300,8 +300,8 @@ def test_unknown_source_type_warns(home):
 
 def test_git_repo_without_url_is_dropped(home):
     """A url-less git_repo is warned about AND dropped — keeping it would make
-    every search run `git clone None ...` (the whole-reindex crash of review
-    round 1). Dir sources set the precedent: unusable sources are dropped loudly."""
+    every search run `git clone None ...` (the whole-reindex crash this drop
+    prevents). Dir sources set the precedent: unusable sources are dropped loudly."""
     (home / "manifest.toml").write_text(
         '[[source]]\nname="no-url"\ntype="git_repo"\nref="main"\next_blocklist=[]\n'
     )

@@ -337,7 +337,8 @@ def read_bytes_for(positions: list[Reached], base: Path,
     we store the older mtime against the new content, so the next run re-reads it once —
     never the reverse.
 
-    PR2 widens the cache key from mtime to mtime+size."""
+    The cache key is mtime alone; adding size would let it survive an mtime-preserving
+    rewrite."""
     kept: list[Hashed] = []
     problems: list[Problem] = []
     for r in positions:

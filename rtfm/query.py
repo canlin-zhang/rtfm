@@ -9,9 +9,9 @@ import re
 import sqlite3
 import subprocess
 
-from . import extract, git_ops, index, staging
+from . import extract, git_ops, index, manifest, staging
 from .config import MAX_LOCATIONS, corpus_home, managed_repo_path, manifest_path
-from .manifest import Source, load_manifest
+from .manifest import Source
 
 _SNIPPET_CAP = 600
 
@@ -196,7 +196,7 @@ def search(query: str, source: str | None = None, max_files: int = 20,
         max_files: cap on returned hits.
         max_locations: cap on paths listed per hit (use find_duplicates for the full list).
     """
-    sources, warnings = load_manifest()
+    sources, warnings = manifest.load_manifest()
     warnings = list(warnings)
     conn = index.get_index_db()
     budget = index.auto_reindex_max()
@@ -285,7 +285,7 @@ def reindex(source: str | None = None) -> dict:
     """Build/refresh the index. The ONLY tool that extracts. Pass a source name to rebuild
     just that source, or omit to rebuild all dir and git_repo sources. Returns a per-source
     summary."""
-    sources, warnings = load_manifest()
+    sources, warnings = manifest.load_manifest()
     conn = index.get_index_db()
     targets = [s for s in sources if s.type in ("dir", "git_repo")
                and (source is None or s.name == source)]
@@ -356,7 +356,7 @@ def read(source: str, relpath: str, start: int = 1, end: int | None = None) -> s
 
     Use after `search` to read around a hit's locator.
     """
-    sources, _ = load_manifest()
+    sources, _ = manifest.load_manifest()
     match = next((s for s in sources if s.name == source), None)
     if match is None:
         return (f"!!! ERROR !!! source '{source}' not found. "
@@ -381,7 +381,7 @@ def list_sources() -> dict:
     own local refs, never a fetch. One bad source never breaks the rest: git failures
     degrade to a status string, never an exception.
     """
-    sources, warnings = load_manifest()
+    sources, warnings = manifest.load_manifest()
     conn = index.get_index_db()
     out = []
     for s in sources:
@@ -453,7 +453,7 @@ def health_check() -> dict:
     try:
         conn = index.get_index_db()
         status["schema_version"] = conn.execute("PRAGMA user_version").fetchone()[0]
-        sources, warnings = load_manifest()
+        sources, warnings = manifest.load_manifest()
         status["sources"] = [{"name": s.name, "type": s.type,
                               **( {"url": s.url, "ref": s.ref} if s.type == "git_repo" else {})}
                              for s in sources]

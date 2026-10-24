@@ -3,7 +3,7 @@ import os
 import sqlite3
 import subprocess
 
-from conftest import make_git_repo
+from helpers.git_repo import make_git_repo
 
 from rtfm import config, git_ops, index, manifest, query, staging
 
@@ -301,12 +301,12 @@ def test_reindex_indexes_mdx_files(home, tmp_path):
     assert query.search_index(conn, "widget protocol flits")
 
 
-# --- _freshness for git_repo ---
+# --- freshness for git_repo ---
 
 def test_freshness_git_repo_current_is_not_stale(home, tmp_path, git_branch):
     """Exercises the linked not-stale path at a fresh clone (HEAD == origin/<ref>,
     clean tree); the HEAD-vs-origin distinction is pinned by
-    test_freshness_git_repo_linked_head_moved_is_stale."""
+    testfreshness_git_repo_linked_head_moved_is_stale."""
     remote, seed, branch = make_git_repo(tmp_path, git_branch,
                                          filename="a.md", content="hello\n")
     dest = tmp_path / "dest"
@@ -372,7 +372,7 @@ def test_freshness_git_repo_behind_is_stale(home, tmp_path, git_branch):
     """A managed git_repo whose indexed commit is behind origin/<ref> is stale —
     rtfm owns the clone, so the fetch-and-compare applies. (Linked clones are
     read-only: only the tree's HEAD or a dirty tree matters there — see
-    test_freshness_git_repo_linked_head_moved_is_stale.)"""
+    testfreshness_git_repo_linked_head_moved_is_stale.)"""
     remote, seed, branch = make_git_repo(tmp_path, git_branch,
                                          filename="a.md", content="v1\n")
     dest = config.managed_repo_path("specs")
@@ -441,7 +441,7 @@ def test_freshness_git_repo_no_source_meta_is_stale(home, tmp_path, git_branch):
 
 
 def test_default_branch_parses_remote_head(home, tmp_path, git_branch):
-    """_default_branch reads the remote's HEAD branch, not a hardcoded guess."""
+    """default_branch reads the remote's HEAD branch, not a hardcoded guess."""
     remote, seed, branch = make_git_repo(tmp_path, git_branch,
                                          filename="a.md", content="hello\n")
     dest = tmp_path / "dest"
@@ -473,7 +473,7 @@ def test_a_file_under_an_unreadable_directory_is_not_treated_as_vanished(
 
 
 def test_freshness_converges_after_an_unreadable_file(home, tmp_path):
-    # Regression: _freshness used to build on_disk from iter_source_files, which routes
+    # Regression: freshness used to build on_disk from iter_source_files, which routes
     # through access() and drops every position access() denies. The indexed row survives
     # the reconcile (see test above) — deliberately — so set(indexed) != set(on_disk) was
     # permanently true and the source read as stale on every single query, forever.
@@ -511,7 +511,7 @@ def test_freshness_converges_after_an_unreadable_directory(home, tmp_path, unope
 
 
 def test_a_denied_source_root_does_not_purge_the_whole_source(home, tmp_path, unopenable):
-    # The root is the one position _rel renders as "." — no relpath equals it or starts with
+    # The root is the one position rel renders as "." — no relpath equals it or starts with
     # "./", so a prefix test alone never shadows anything and every row of the source reads as
     # vanished at once, content GC'd, while every file is still sitting on disk untouched.
     t = tmp_path / "c"
@@ -672,7 +672,8 @@ def test_errors_replace_is_gone_from_the_source():
     # Both ADRs state it is removed. A grep over every shipped module is the only
     # assertion that stays true when someone adds a fourth decode site.
     import pathlib
-    sources = list(pathlib.Path("rtfm").glob("*.py")) + [pathlib.Path("rtfm_server.py")]
+    root = pathlib.Path(__file__).resolve().parent.parent
+    sources = list((root / "rtfm").glob("*.py")) + [root / "rtfm_server.py"]
     assert all('errors="replace"' not in p.read_text() for p in sources)
 
 

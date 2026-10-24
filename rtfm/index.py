@@ -15,13 +15,10 @@ import time
 from pathlib import Path
 from typing import NamedTuple
 
-from . import extract, git_ops, staging
+from . import git_ops, staging
 from .config import SCHEMA_VERSION, index_db_path, managed_repo_path
 from .manifest import Source
 from .staging import CacheStats, Indexed, StepResult
-
-# The extraction pool's setting; re-exported so index callers need not import extract.
-workers = extract.workers
 
 
 def linked_git_status(repo_path: Path, src: Source, indexed: str) -> str:
@@ -269,7 +266,7 @@ def ensure_git_repo_ready(src: Source) -> tuple[Path, str | None]:
 
 
 def ingest(conn: sqlite3.Connection, src: Source, root: Path, scan: staging.Scan) -> Indexed:
-    """Steps 3A and 3B over an already-scanned source, and sync the index. Takes the `_Scan`
+    """Steps 3A and 3B over an already-scanned source, and sync the index. Takes the `Scan`
     rather than making one, so a caller that already walked to decide freshness does not walk
     again (ADR 0015).
 

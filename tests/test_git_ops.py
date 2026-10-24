@@ -18,7 +18,7 @@ def test_git_run_raises_on_non_zero_exit(tmp_path):
 
 
 def test_git_missing_binary_raises_classified_error(tmp_path, monkeypatch):
-    """A missing git binary yields a classified RuntimeError from _git, not a raw
+    """A missing git binary yields a classified RuntimeError from git_ops.run, not a raw
     FileNotFoundError. The boundaries where that class must surface (reindex linked,
     reindex managed, load_manifest) are pinned by the *_missing_git tests below."""
     monkeypatch.setenv("PATH", str(tmp_path))  # an empty dir: git is unreachable

@@ -192,7 +192,7 @@ def test_authoring_tool_titles_are_rejected(home, tmp_path):
 
 
 def test_serial_extraction_indexes_the_doc_signal(home, tmp_path, monkeypatch):
-    """RTFM_WORKERS=1 serial extraction yields the same _Extracted shape as the pool path."""
+    """RTFM_WORKERS=1 serial extraction yields the same Extracted shape as the pool path."""
     monkeypatch.setenv("RTFM_WORKERS", "1")
     d = tmp_path / "docs"
     d.mkdir()

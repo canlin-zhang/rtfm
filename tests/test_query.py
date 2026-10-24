@@ -1,7 +1,7 @@
 # tests/test_tools.py
 import subprocess
 
-from conftest import make_git_repo
+from helpers.git_repo import make_git_repo
 
 from rtfm import config, git_ops, index, manifest, query, staging
 
@@ -645,7 +645,7 @@ def test_empty_reindex_summary_has_the_same_keys_as_a_real_one(home, tmp_path):
             == set(index.reindex_source(conn, real)) - {"warnings"})
 
 
-# --- rtfm#29: step reports reach every query, and a query walks once ---------
+# --- step reports reach every query, and a query walks once ------------------
 
 def _warnings(out):
     return out.get("WARNING", [])
@@ -719,7 +719,7 @@ def test_search_reports_a_broken_file_on_every_run(home, tmp_path):
 
 
 def test_search_walks_the_tree_once_per_query(home, tmp_path, monkeypatch):
-    """The whole point of folding freshness into step 1 (rtfm#29). `_freshness` used to
+    """The whole point of folding freshness into step 1. `freshness` used to
     walk to decide and the ingest walked again to act — two full traversals per query on
     a stale source, scaling with total tree size. `access` is the only thing that walks
     (one `os.walk` call site), so counting it counts traversals."""
