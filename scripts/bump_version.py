@@ -3,8 +3,8 @@
 
 The version lives in four places, and the 0.5.1 release showed what happens
 when they're bumped by hand: pyproject.toml and uv.lock silently lagged (the
-PEP-723 block and the Claude manifest moved first). This script is the one path
-that's allowed to change the version:
+Claude manifest moved first). This script is the one path that's allowed to
+change the version:
 
 1. plan the edits to pyproject.toml, plugins/claude/.claude-plugin/plugin.json,
    and plugins/opencode/package.json (the three hand-maintained declarations;
@@ -301,7 +301,7 @@ def main() -> int:
             "edits to that file); then verify with: "
             "python3 scripts/check_version_consistency.py"
         )
-    if "OK: version and dependency declarations are consistent" not in check.stdout:
+    if "OK: version declarations are consistent" not in check.stdout:
         # Exited 0 without the OK verdict — the check never really ran (an
         # empty or replaced script exits 0 silently). Requiring the verdict
         # (the check script's exact success line — keep the two in sync)

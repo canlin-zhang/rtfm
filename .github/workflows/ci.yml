@@ -26,11 +26,11 @@ jobs:
         run: uv run --python ${{ matrix.python-version }} pytest -q
 
   # The contract suite is ASCII-hermetic (explicit UTF-8 reads/writes, the
-  # require_ascii pins) — prove it under a POSIX locale, where the launch and
-  # check reads' explicit encoding is load-bearing. The require_ascii tests
-  # skip here (on an ASCII host the env-propagation assert would be vacuous)
-  # and run on the UTF-8 legs (where their children still get LC_ALL=C via
-  # env_extra, so the assert is meaningful there).
+  # require_ascii pins) — prove it under a POSIX locale, where the check/bump
+  # reads' explicit encoding is load-bearing. The require_ascii tests skip here
+  # (on an ASCII host the env-propagation assert would be vacuous) and run on
+  # the UTF-8 legs (where their children still get LC_ALL=C via env_extra, so
+  # the assert is meaningful there).
   test-ascii:
     runs-on: ubuntu-latest
     env:
@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.3.2
       - name: Contract suite under the ASCII locale
-        run: uv run pytest tests/test_version_consistency.py -q
+        run: uv run pytest tests/test_check_version_consistency.py tests/test_bump_version.py -q
 
   lint:
     runs-on: ubuntu-latest
@@ -53,11 +53,10 @@ jobs:
 
   consistency:
     # The release version lives in pyproject.toml, uv.lock, and both front
-    # manifests; the dependency list is mirrored in pyproject.toml and the
-    # PEP-723 block. Nothing mechanical linked them, and drift broke the 0.5.1
-    # launch fix (versions lagged; the lock resolved mcp below its pin). This
-    # job guards both: the script compares declared strings, uv lock --check
-    # compares resolved ones.
+    # manifests; dependencies have one source, pyproject.toml. Nothing mechanical
+    # linked the version values, and drift broke the 0.5.1 launch fix (versions
+    # lagged). This job guards both: the script compares declared strings,
+    # uv lock --check compares resolved ones.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

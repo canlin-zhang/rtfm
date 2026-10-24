@@ -1,8 +1,6 @@
-# Package manifest for the published core (`rtfm-mcp` on PyPI). The runtime
-# dependency source of truth remains the PEP-723 `# /// script` block in
-# rtfm_server.py (ADR 0009); [project].dependencies mirrors it, and
-# scripts/check_version_consistency.py fails on drift. The dev group and tool
-# config below exist only for working on the repo.
+# Package manifest for the published core (`rtfm-mcp` on PyPI). This is the
+# single dependency declaration; there is no PEP-723 mirror (ADR 0017). The dev
+# group and tool config below exist only for working on the repo.
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
