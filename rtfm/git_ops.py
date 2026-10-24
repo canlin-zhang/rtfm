@@ -239,3 +239,23 @@ def is_ancestor(path: Path, ancestor: str, descendant: str) -> bool:
     cp = run(["merge-base", "--is-ancestor", ancestor, descendant],
              cwd=path, timeout=10, allow_exit_codes=(1,))
     return cp.returncode == 0
+
+
+def normalize_remote(url: str) -> str:
+    """Canonical form for remote comparison: scheme/credentials stripped, explicit
+    ports dropped (ssh://host:22/..., https://host:443/...), scp-style 'host:path'
+    made slash-form, trailing '.git' and '/' dropped, lowercased. Two URLs for the
+    same repo (https vs ssh, ported vs not, trailing slash or not) compare equal.
+    The theoretical collision — a real repo at 'host:port/repo' vs one at
+    'host/port/repo' — is not expected for real repo URLs."""
+    u = url.strip()
+    if "://" in u:
+        u = u.split("://", 1)[1]
+    if "@" in u:
+        u = u.split("@", 1)[1]
+    u = re.sub(r":\d+(?=/|$)", "", u)        # explicit port, not the scp path colon
+    u = u.replace(":", "/", 1)                # scp form git@host:org/repo.git
+    if u.endswith(".git"):
+        u = u[:-4]
+    u = u.rstrip("/")
+    return u.lower()
