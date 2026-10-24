@@ -1,8 +1,16 @@
+import os
 import subprocess
 
 import pytest
 
 import rtfm_server as rtfm
+
+# Fresh `git init` repos must get a `main` branch — the tests assume main, but the
+# machine default may be `master`. Pass init.defaultBranch=main to every git
+# subprocess spawned with git's GIT_CONFIG_* environment mechanism.
+os.environ.setdefault("GIT_CONFIG_COUNT", "1")
+os.environ.setdefault("GIT_CONFIG_KEY_0", "init.defaultBranch")
+os.environ.setdefault("GIT_CONFIG_VALUE_0", "main")
 
 
 @pytest.fixture(autouse=True)
