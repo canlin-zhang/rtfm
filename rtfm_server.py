@@ -2215,5 +2215,9 @@ def health_check() -> dict:
     return status
 
 
-if __name__ == "__main__":
+def main() -> None:
     mcp.run()
+
+
+if __name__ == "__main__":
+    main()

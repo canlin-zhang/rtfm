@@ -5,6 +5,7 @@
 A local MCP server and Claude Code plugin that makes large, can't-read-by-hand technical
 documentation searchable — PDF spec sets, documentation repositories (and, later, public
 doc sites) — and answers questions strictly from that material, with grounded citations.
+The server is also published as the `rtfm-mcp` Python package.
 
 The eternal advice "read the manual" falls apart when the manual is a 400-page protocol
 spec or a vendor doc-set no human can hold in their head. `rtfm` ingests the **full** manual
@@ -14,9 +15,11 @@ so the answer is one cited query away.
 
 `rtfm` indexes the **extractable text** a document already carries. It does not OCR images
 and does not execute JavaScript, so image-only/scanned PDFs and image-only or JS-rendered
-web pages are out of scope — they index as empty. (See [ADR 0005](docs/adr/0005-text-extraction-only-no-ocr.md).)
+web pages are out of scope — they index as empty. (See [ADR 0005](https://github.com/canlin-zhang/rtfm/blob/main/docs/adr/0005-text-extraction-only-no-ocr.md).)
 
 ## Install
+
+### Claude Code
 
 ```bash
 # in Claude Code:
@@ -24,9 +27,30 @@ web pages are out of scope — they index as empty. (See [ADR 0005](docs/adr/000
 /plugin install rtfm
 ```
 
-**Prerequisites:** `python3` on PATH is the only hard requirement. If `uv` is
-installed it's used automatically (fast path); otherwise rtfm builds a private venv
-under `~/.rtfm/venv` on first run — no manual dependency install either way.
+### Any MCP client (PyPI)
+
+The server is also published as `rtfm-mcp`:
+
+```bash
+uvx --from rtfm-mcp rtfm-server      # or: pipx install rtfm-mcp && rtfm-server
+```
+
+Point the client's MCP configuration at that command:
+
+```json
+{
+  "mcpServers": {
+    "rtfm": {
+      "command": "uvx",
+      "args": ["--from", "rtfm-mcp", "rtfm-server"]
+    }
+  }
+}
+```
+
+**Prerequisites:** `python3` on PATH is the only hard requirement for the plugin. It
+uses `uv` when available and otherwise builds a private venv under `~/.rtfm/venv` on
+first run. The PyPI path needs `uv` (for `uvx`) or `pipx`.
 *Optional:* install `poppler-utils` (`pdftotext`) for best-quality PDF extraction.
 
 ## Two ways to use it
@@ -68,10 +92,10 @@ index with page/line citations, exposed through the `search` / `read` / `reindex
 `find_duplicates` / `list_sources` / `health_check` tools and the `read-the-manual` skill, with
 a uv-or-venv launcher and Claude Code plugin packaging. HTML with anchor citations, git-backed
 repo sources with auto-refresh, file-curation tools, and OCR are planned — see the
-[roadmap](docs/ROADMAP.md).
+[roadmap](https://github.com/canlin-zhang/rtfm/blob/main/docs/ROADMAP.md).
 
-Architecture decisions live in [docs/adr/](docs/adr/); domain language in
-[CONTEXT.md](CONTEXT.md).
+Architecture decisions live in [docs/adr/](https://github.com/canlin-zhang/rtfm/tree/main/docs/adr/); domain language in
+[CONTEXT.md](https://github.com/canlin-zhang/rtfm/blob/main/CONTEXT.md).
 
 ## License
 

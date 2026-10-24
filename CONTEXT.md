@@ -2,7 +2,8 @@
 
 A local MCP server that makes large, can't-read-by-hand technical documentation — PDF spec
 sets and documentation repositories — searchable, with grounded, cited answers. Published
-as the `rtfm` plugin (skill `read-the-manual`; `audit` planned with Plan 4). The "F" is for *Full*: it ingests the
+as one thin Front per agent harness — a Claude Code plugin and an OpenCode plugin (skill
+`read-the-manual`; `audit` planned with Plan 4). The "F" is for *Full*: it ingests the
 whole manual so you can search all of it, not just skim.
 
 ## Language
@@ -58,6 +59,16 @@ as opposed to Refresh, which is the Source-vs-upstream one. Decided per source t
 comparison for Dir, commit comparison for Repo.
 _Avoid_: bare "stale"/"staleness" for the comparison itself — it reads as either one;
 ADR 0003's "staleness window" is Refresh's cadence and keeps that name.
+
+### Distribution
+
+**Core**:
+The harness-independent product — the MCP server and its runtime launcher — implemented once and consumed by every Front. Published once as `rtfm-mcp` and never copied into a Front.
+_Avoid_: server (the running process), engine, backend
+
+**Front**:
+The harness-specific installable layer that exposes the Core to one agent harness: its MCP registration, its bootstrap, and its skill delivery. One per harness, in its own artifact directory; a Front never contains a second copy of the Core.
+_Avoid_: adapter, wrapper (neither names the installable artifact); plugin (the harness's packaging format, not the layer)
 
 ### Other
 

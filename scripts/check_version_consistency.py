@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Verify version and dependency declarations stay in sync across the repo.
 
-The release version is declared in three files — pyproject.toml, uv.lock's rtfm
-entry, and .claude-plugin/plugin.json — and the dependency list is mirrored
+The release version is declared in three files — pyproject.toml, uv.lock's
+rtfm-mcp entry, and .claude-plugin/plugin.json — and the dependency list is mirrored
 between pyproject.toml and the PEP-723 `# /// script` block in rtfm_server.py,
 which is the source of truth for deps (ADR 0009; see the header comment in
 pyproject.toml). Nothing mechanical linked them, so a one-file edit silently
@@ -103,18 +103,18 @@ def main() -> int:
     # guard turns a would-be AttributeError/TypeError into a clean drift error.
     if not isinstance(lock_packages, list) or not all(isinstance(p, dict) for p in lock_packages):
         return _fail("uv.lock: [[package]] must be an array of tables")
-    rtfm_entries = [p for p in lock_packages if p.get("name") == "rtfm"]
+    rtfm_entries = [p for p in lock_packages if p.get("name") == "rtfm-mcp"]
     if not rtfm_entries:
-        return _fail("uv.lock has no [[package]] entry named 'rtfm'")
+        return _fail("uv.lock has no [[package]] entry named 'rtfm-mcp'")
     if len(rtfm_entries) > 1:
-        return _fail(f"uv.lock has {len(rtfm_entries)} [[package]] entries named 'rtfm'")
+        return _fail(f"uv.lock has {len(rtfm_entries)} [[package]] entries named 'rtfm-mcp'")
     lock_version = rtfm_entries[0].get("version")
     if lock_version is None:
-        return _fail("uv.lock: [[package]] entry named 'rtfm' has no version key")
+        return _fail("uv.lock: [[package]] entry named 'rtfm-mcp' has no version key")
 
     versions = {
         "pyproject.toml": pkg_version,
-        "uv.lock (rtfm entry)": lock_version,
+        "uv.lock (rtfm-mcp entry)": lock_version,
         ".claude-plugin/plugin.json": plugin_version,
     }
     bad_versions = [

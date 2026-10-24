@@ -1,15 +1,52 @@
-# Dev/test environment only. The runtime/launcher source of truth for dependencies
-# remains the PEP-723 `# /// script` block in rtfm_server.py (ADR 0009); these are
-# mirrored here so `uv run pytest` works and `import rtfm_server` resolves from the root.
+# Package manifest for the published core (`rtfm-mcp` on PyPI). The runtime
+# dependency source of truth remains the PEP-723 `# /// script` block in
+# rtfm_server.py (ADR 0009); [project].dependencies mirrors it, and
+# scripts/check_version_consistency.py fails on drift. The dev group and tool
+# config below exist only for working on the repo.
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
-name = "rtfm"
-version = "0.7.1"
+name = "rtfm-mcp"
+version = "0.8.0"
 description = "Read The Full Manual — local document-corpus search MCP server."
+readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Canlin Zhang" }]
+keywords = ["mcp", "documentation", "search", "pdf"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+]
 dependencies = [
     "mcp[cli]>=1.28.1,<2",
     "pymupdf",
     "pypdf",
+]
+
+[project.urls]
+Homepage = "https://github.com/canlin-zhang/rtfm"
+Repository = "https://github.com/canlin-zhang/rtfm"
+Issues = "https://github.com/canlin-zhang/rtfm/issues"
+
+[project.scripts]
+rtfm-server = "rtfm_server:main"
+
+[tool.hatch.build.targets.wheel]
+# The server is deliberately one importable module, not a package (AGENTS.md).
+only-include = ["rtfm_server.py"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "rtfm_server.py",
+    "manifest.example.toml",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
 ]
 
 [dependency-groups]

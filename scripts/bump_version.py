@@ -96,7 +96,7 @@ def _plan_edit(path: Path, text: str, pattern: re.Pattern[str], new_version: str
 
 
 def _lock_version() -> str | None:
-    """uv.lock's rtfm version, or None if the lock can't confirm it.
+    """uv.lock's rtfm-mcp version, or None if the lock can't confirm it.
 
     The no-op refusal fires only when the lock agrees too: pyproject/plugin.json
     can sit at the target with a lagging lock (a failed earlier `uv lock`), and
@@ -109,7 +109,7 @@ def _lock_version() -> str | None:
         packages = lock["package"]
         if not isinstance(packages, list) or not all(isinstance(p, dict) for p in packages):
             return None
-        rtfm_entries = [p for p in packages if p.get("name") == "rtfm"]
+        rtfm_entries = [p for p in packages if p.get("name") == "rtfm-mcp"]
         # Mirror the check's count guard: a duplicate first-wins would refuse
         # on a lock the check calls drift.
         if len(rtfm_entries) != 1:

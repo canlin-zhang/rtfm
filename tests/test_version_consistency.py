@@ -54,21 +54,24 @@ def make_tree(
     plugin_version=None,
     lock_version=None,
     script_deps=PEP723,
-    lock_names=("rtfm",),
+    lock_names=("rtfm-mcp",),
 ):
     """A minimal repo skeleton: the four files the guard reads, all consistent."""
     plugin_version = version if plugin_version is None else plugin_version
     lock_version = version if lock_version is None else lock_version
     (tmp_path / "pyproject.toml").write_text(
-        f'[project]\nname = "rtfm"\nversion = "{version}"\ndependencies = [\n'
+        f'[project]\nname = "rtfm-mcp"\nversion = "{version}"\ndependencies = [\n'
         '    "mcp[cli]>=1.28.1,<2",\n    "pymupdf",\n    "pypdf",\n]\n',
         encoding="utf-8",
     )
-    lock = "".join(
-        f'[[package]]\nname = "{name}"\nversion = "{lock_version if name == "rtfm" else "0.1.0"}"\n'
-        'source = { virtual = "." }\n'
-        for name in lock_names
-    )
+    def lock_entry(name: str) -> str:
+        entry_version = lock_version if name == "rtfm-mcp" else "0.1.0"
+        return (
+            f'[[package]]\nname = "{name}"\nversion = "{entry_version}"\n'
+            'source = { virtual = "." }\n'
+        )
+
+    lock = "".join(lock_entry(name) for name in lock_names)
     (tmp_path / "uv.lock").write_text(lock, encoding="utf-8")
     (tmp_path / ".claude-plugin").mkdir(parents=True)
     # Deliberately NOT the real-file shape: here "version" is the last key with no
@@ -141,7 +144,7 @@ def test_check_dep_specifier_drift_names_both_sides(tmp_path, monkeypatch, capsy
 def test_check_missing_rtfm_lock_entry_exits_1(tmp_path, monkeypatch, capsys):
     make_tree(tmp_path, lock_names=("other",))
     assert run_check(tmp_path, monkeypatch) == 1
-    assert "no [[package]] entry named 'rtfm'" in capsys.readouterr().err
+    assert "no [[package]] entry named 'rtfm-mcp'" in capsys.readouterr().err
 
 
 def test_check_duplicate_rtfm_lock_entries_exit_1(tmp_path, monkeypatch, capsys):
@@ -149,11 +152,11 @@ def test_check_duplicate_rtfm_lock_entries_exit_1(tmp_path, monkeypatch, capsys)
     count guard must refuse."""
     make_tree(tmp_path)
     (tmp_path / "uv.lock").write_text(
-        '[[package]]\nname = "rtfm"\nversion = "0.5.1"\nsource = { virtual = "." }\n'
-        '[[package]]\nname = "rtfm"\nversion = "9.9.9"\nsource = { virtual = "." }\n'
+        '[[package]]\nname = "rtfm-mcp"\nversion = "0.5.1"\nsource = { virtual = "." }\n'
+        '[[package]]\nname = "rtfm-mcp"\nversion = "9.9.9"\nsource = { virtual = "." }\n'
     )
     assert run_check(tmp_path, monkeypatch) == 1
-    assert "2 [[package]] entries named 'rtfm'" in capsys.readouterr().err
+    assert "2 [[package]] entries named 'rtfm-mcp'" in capsys.readouterr().err
 
 
 def test_check_lock_missing_package_array_is_clean_error(tmp_path, monkeypatch):
@@ -178,7 +181,9 @@ def test_check_rtfm_entry_without_version_key_is_clean_error(tmp_path, monkeypat
     """An rtfm entry that exists but carries no version is a different failure
     than a missing entry — the message must distinguish the two."""
     make_tree(tmp_path)
-    (tmp_path / "uv.lock").write_text('[[package]]\nname = "rtfm"\nsource = { virtual = "." }\n')
+    (tmp_path / "uv.lock").write_text(
+        '[[package]]\nname = "rtfm-mcp"\nsource = { virtual = "." }\n'
+    )
     assert run_check(tmp_path, monkeypatch) == 1
     assert "has no version key" in capsys.readouterr().err
 
@@ -190,11 +195,11 @@ def test_check_versions_must_be_strings(tmp_path, monkeypatch):
     drift instead, never reaching a verdict on the versions.)"""
     make_tree(tmp_path)
     (tmp_path / "pyproject.toml").write_text(
-        '[project]\nname = "rtfm"\nversion = 5\ndependencies = [\n'
+        '[project]\nname = "rtfm-mcp"\nversion = 5\ndependencies = [\n'
         '    "mcp[cli]>=1.28.1,<2",\n    "pymupdf",\n    "pypdf",\n]\n'
     )
     (tmp_path / "uv.lock").write_text(
-        '[[package]]\nname = "rtfm"\nversion = 5\nsource = { virtual = "." }\n'
+        '[[package]]\nname = "rtfm-mcp"\nversion = 5\nsource = { virtual = "." }\n'
     )
     (tmp_path / ".claude-plugin" / "plugin.json").write_text(
         '{\n  "name": "rtfm",\n  "version": 5\n}\n'
@@ -204,7 +209,7 @@ def test_check_versions_must_be_strings(tmp_path, monkeypatch):
 
 def test_check_pyproject_missing_version_key_is_clean_error(tmp_path, monkeypatch):
     make_tree(tmp_path)
-    (tmp_path / "pyproject.toml").write_text('[project]\nname = "rtfm"\n')
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "rtfm-mcp"\n')
     with pytest.raises(SystemExit, match="missing key 'project.version'"):
         run_check(tmp_path, monkeypatch)
 
@@ -216,7 +221,7 @@ def test_check_deps_must_be_lists(tmp_path, monkeypatch):
     it drifts anyway and exits 1 regardless of the guard.)"""
     make_tree(tmp_path, script_deps='# /// script\n# dependencies = "mcp[cli]>=1.28.1,<2"\n# ///\n')
     (tmp_path / "pyproject.toml").write_text(
-        '[project]\nname = "rtfm"\nversion = "0.5.1"\ndependencies = "mcp[cli]>=1.28.1,<2"\n'
+        '[project]\nname = "rtfm-mcp"\nversion = "0.5.1"\ndependencies = "mcp[cli]>=1.28.1,<2"\n'
     )
     assert run_check(tmp_path, monkeypatch) == 1
 
@@ -228,7 +233,7 @@ def test_check_script_side_deps_guard_is_discriminating(tmp_path, monkeypatch):
     of the two-list guard individually."""
     make_tree(tmp_path, script_deps='# /// script\n# dependencies = "a"\n# ///\n')
     (tmp_path / "pyproject.toml").write_text(
-        '[project]\nname = "rtfm"\nversion = "0.5.1"\ndependencies = ["a"]\n'
+        '[project]\nname = "rtfm-mcp"\nversion = "0.5.1"\ndependencies = ["a"]\n'
     )
     assert run_check(tmp_path, monkeypatch) == 1
 
@@ -240,7 +245,7 @@ def test_check_pyproject_side_deps_guard_is_discriminating(tmp_path, monkeypatch
     individually."""
     make_tree(tmp_path, script_deps='# /// script\n# dependencies = ["a"]\n# ///\n')
     (tmp_path / "pyproject.toml").write_text(
-        '[project]\nname = "rtfm"\nversion = "0.5.1"\ndependencies = "a"\n'
+        '[project]\nname = "rtfm-mcp"\nversion = "0.5.1"\ndependencies = "a"\n'
     )
     assert run_check(tmp_path, monkeypatch) == 1
 
@@ -373,12 +378,12 @@ def test_check_blank_versions_are_clean_error(tmp_path, monkeypatch, capsys, bla
     refuse the shape and name the offending files."""
     make_tree(tmp_path)
     (tmp_path / "pyproject.toml").write_text(
-        f'[project]\nname = "rtfm"\nversion = "{blank_version}"\ndependencies = [\n'
+        f'[project]\nname = "rtfm-mcp"\nversion = "{blank_version}"\ndependencies = [\n'
         '    "mcp[cli]>=1.28.1,<2",\n    "pymupdf",\n    "pypdf",\n]\n',
         encoding="utf-8",
     )
     (tmp_path / "uv.lock").write_text(
-        f'[[package]]\nname = "rtfm"\nversion = "{blank_version}"\n'
+        f'[[package]]\nname = "rtfm-mcp"\nversion = "{blank_version}"\n'
         'source = { virtual = "." }\n',
         encoding="utf-8",
     )
@@ -422,7 +427,7 @@ def test_check_prints_drift_under_ascii_locale(tmp_path):
     # DISTINCT prefix per file (0.5.1 / 0.5.2 / 0.5.3) so any mis-associated
     # value or swapped entry fails the pins. The non-ASCII tails render as
     # '??' on the reconfigured stdout — unpinned.
-    assert "uv.lock (rtfm entry): 0.5.2" in proc.stdout
+    assert "uv.lock (rtfm-mcp entry): 0.5.2" in proc.stdout
     assert ".claude-plugin/plugin.json: 0.5.3" in proc.stdout
     # The verdict is stderr and the data lines stdout — placement is part of
     # the pin, matching the suite's documented convention.
@@ -670,8 +675,8 @@ def test_bump_same_version_with_stale_lock_proceeds(tmp_path, monkeypatch, capsy
         pytest.param('package = "rtfm"\n', id="bare-string-package"),
         pytest.param('package = ["rtfm"]\n', id="list-of-strings-package"),
         pytest.param(
-            '[[package]]\nname = "rtfm"\nversion = "0.5.2"\nsource = { virtual = "." }\n'
-            '[[package]]\nname = "rtfm"\nversion = "0.5.1"\nsource = { virtual = "." }\n',
+            '[[package]]\nname = "rtfm-mcp"\nversion = "0.5.2"\nsource = { virtual = "." }\n'
+            '[[package]]\nname = "rtfm-mcp"\nversion = "0.5.1"\nsource = { virtual = "." }\n',
             id="duplicate-rtfm-entries",
         ),
         pytest.param(
@@ -1078,7 +1083,7 @@ def test_bump_missing_version_key_is_clean_error(tmp_path, monkeypatch):
     """A pyproject.toml that parses but lacks [project].version must exit
     cleanly, not KeyError-traceback."""
     make_tree(tmp_path)
-    (tmp_path / "pyproject.toml").write_text('[project]\nname = "rtfm"\n')
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "rtfm-mcp"\n')
     with pytest.raises(SystemExit, match=r"cannot read \[project\]\.version"):
         run_bump(tmp_path, monkeypatch)
 
@@ -1088,7 +1093,7 @@ def test_bump_version_must_be_string(tmp_path, monkeypatch):
     message; the reader must refuse the shape instead."""
     make_tree(tmp_path)
     (tmp_path / "pyproject.toml").write_text(
-        '[project]\nname = "rtfm"\nversion = 5\ndependencies = []\n'
+        '[project]\nname = "rtfm-mcp"\nversion = 5\ndependencies = []\n'
     )
     with pytest.raises(SystemExit, match="must be a string"):
         run_bump(tmp_path, monkeypatch)
@@ -1148,7 +1153,7 @@ def test_bump_writes_utf8_under_ascii_locale(tmp_path):
     the OSError handler."""
     make_tree(tmp_path)
     (tmp_path / "pyproject.toml").write_text(
-        '[project]\nname = "rtfm"\nversion = "0.5.1"\ndescription = "test — em dash"\n'
+        '[project]\nname = "rtfm-mcp"\nversion = "0.5.1"\ndescription = "test — em dash"\n'
         'dependencies = [\n    "mcp[cli]>=1.28.1,<2",\n    "pymupdf",\n    "pypdf",\n]\n',
         encoding="utf-8",
     )
