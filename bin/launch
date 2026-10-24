@@ -31,13 +31,26 @@ def _corpus_home() -> Path:
     return Path(os.environ.get("RTFM_HOME", Path.home() / ".rtfm")).expanduser()
 
 
+def _has_pip(py: Path) -> bool:
+    """A killed venv create leaves python without pip; rebuild that state."""
+    try:
+        return subprocess.run(
+            [str(py), "-m", "pip", "--version"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        ).returncode == 0
+    except OSError:
+        return False
+
+
 def run_with_venv() -> None:
     deps = project_deps(ROOT)
     vdir = _corpus_home() / "venv"
     py = vdir / "bin" / "python"
     stamp = vdir / ".deps"
     key = deps_stamp(deps)
-    if not py.exists():
+    if not py.exists() or not _has_pip(py):
+        if vdir.exists():
+            shutil.rmtree(vdir, ignore_errors=True)
         vdir.parent.mkdir(parents=True, exist_ok=True)
         venv.create(vdir, with_pip=True)
     if not stamp.exists() or stamp.read_text(encoding="utf-8") != key:
