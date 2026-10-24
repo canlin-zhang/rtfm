@@ -156,3 +156,19 @@ def test_opencode_skill_uses_opencode_tool_names():
     assert "@read-the-manual" in text
     assert "rtfm_search" in text and "rtfm_read" in text
     assert "mcp__plugin_rtfm" not in text
+
+
+def test_agents_md_describes_both_fronts_and_stays_neutral():
+    text = (ROOT / "AGENTS.md").read_text()
+    assert "plugins/claude/" in text and "plugins/opencode/" in text
+    for needle in ("~/.config/opencode", ".opencode/", "mcp__plugin_", "CLAUDE_PLUGIN_ROOT"):
+        assert needle not in text
+
+
+def test_instruction_files_are_split_by_discovery_surface():
+    claude = (ROOT / "CLAUDE.md").read_text()
+    assert "@AGENTS.md" in claude
+    cfg = json.loads((ROOT / "opencode.json").read_text())
+    assert cfg["instructions"]
+    for rel in cfg["instructions"]:
+        assert (ROOT / rel).exists()

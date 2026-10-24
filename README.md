@@ -2,10 +2,10 @@
 
 > **rtfm** — Read the ~~F-~~ **Full** Manual.
 
-A local MCP server and Claude Code plugin that makes large, can't-read-by-hand technical
-documentation searchable — PDF spec sets, documentation repositories (and, later, public
-doc sites) — and answers questions strictly from that material, with grounded citations.
-The server is also published as the `rtfm-mcp` Python package.
+A local MCP server with thin Claude Code and OpenCode fronts that makes large, can't-read-by-hand
+technical documentation searchable — PDF spec sets, documentation repositories (and, later,
+public doc sites) — and answers questions strictly from that material, with grounded citations.
+The server is published as the `rtfm-mcp` Python package.
 
 The eternal advice "read the manual" falls apart when the manual is a 400-page protocol
 spec or a vendor doc-set no human can hold in their head. `rtfm` ingests the **full** manual
@@ -24,8 +24,16 @@ web pages are out of scope — they index as empty. (See [ADR 0005](https://gith
 ```bash
 # in Claude Code:
 /plugin marketplace add canlin-zhang/rtfm
-/plugin install rtfm
+/plugin install rtfm@rtfm
 ```
+
+### OpenCode
+
+```bash
+opencode plugin add 'github:canlin-zhang/rtfm#main::path:plugins/opencode'
+```
+
+The plugin registers the `rtfm` MCP server and the `read-the-manual` skill.
 
 ### Any MCP client (PyPI)
 
@@ -49,8 +57,8 @@ Point the client's MCP configuration at that command:
 ```
 
 **Prerequisites:** `python3` on PATH is the only hard requirement for the plugin. It
-uses `uv` when available and otherwise builds a private venv under `~/.rtfm/venv` on
-first run. The PyPI path needs `uv` (for `uvx`) or `pipx`.
+uses `uvx`/`uv` when available and otherwise builds a private venv under
+`~/.rtfm/fronts/<front>/venv` on first run. The PyPI path needs `uv` (for `uvx`) or `pipx`.
 *Optional:* install `poppler-utils` (`pdftotext`) for best-quality PDF extraction.
 
 ## Two ways to use it
@@ -77,21 +85,21 @@ take a while. Byte-identical files that repeat across version subfolders are ext
 
 ## Use
 
-Drop PDFs / `.md` / `.mdx` / `.rst` / `.txt` into `~/.rtfm/default/`, then ask Claude to search them, or
+Drop PDFs / `.md` / `.mdx` / `.rst` / `.txt` into `~/.rtfm/default/`, then ask your agent to search them, or
 add more sources by editing `~/.rtfm/manifest.toml` (see `manifest.example.toml`).
 
-Or invoke the bundled **`read-the-manual`** skill (`/read-the-manual`) to have a question
-answered strictly from the corpus — verbatim quotes with page/line citations, no
-model-knowledge fallback.
+Or invoke the bundled **`read-the-manual`** skill — `/rtfm:read-the-manual` in Claude Code,
+`@read-the-manual` in OpenCode — to have a question answered strictly from the corpus:
+verbatim quotes with page/line citations, no model-knowledge fallback.
 
 ## Status
 
 Early but working. Today rtfm gives you zero-config search over a default drop-folder: PDF,
 Markdown, reStructuredText, and text files are indexed into one content-addressed full-text
 index with page/line citations, exposed through the `search` / `read` / `reindex` /
-`find_duplicates` / `list_sources` / `health_check` tools and the `read-the-manual` skill, with
-a uv-or-venv launcher and Claude Code plugin packaging. HTML with anchor citations, git-backed
-repo sources with auto-refresh, file-curation tools, and OCR are planned — see the
+`find_duplicates` / `list_sources` / `health_check` tools and the `read-the-manual` skill.
+The core is published as `rtfm-mcp`; the Claude Code and OpenCode fronts are thin. HTML with
+anchor citations, web sources, file-curation tools, and OCR are planned — see the
 [roadmap](https://github.com/canlin-zhang/rtfm/blob/main/docs/ROADMAP.md).
 
 Architecture decisions live in [docs/adr/](https://github.com/canlin-zhang/rtfm/tree/main/docs/adr/); domain language in

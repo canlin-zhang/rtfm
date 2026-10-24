@@ -1,16 +1,16 @@
 # AGENTS.md
 
 Guidance for AI agents (and humans) working on **rtfm**. Read this before making changes.
-rtfm is itself a Claude Code plugin and is maintained with AI agents, so this file is the
-operational entry point; the *why* behind every rule lives in [`docs/adr/`](docs/adr/) and
-the domain vocabulary in [`CONTEXT.md`](CONTEXT.md).
+rtfm is one core plus a thin Claude Code and OpenCode front, and is maintained with AI
+agents, so this file is the operational entry point; the *why* behind every rule lives in
+[`docs/adr/`](docs/adr/) and the domain vocabulary in [`CONTEXT.md`](CONTEXT.md).
 
 ## Quickstart
 
 ```bash
 uv run pytest -q          # run the test suite (uv bootstraps deps from pyproject.toml)
 uvx ruff check .          # lint (config in pyproject.toml [tool.ruff]); add --fix to autofix
-uv run rtfm_server.py     # run the MCP server directly (normally launched via bin/launch)
+uv run rtfm_server.py     # run the MCP server directly (dev; installed fronts use bootstrap.py)
 ```
 
 `python3` is the only hard prerequisite; `uv` is the fast path; `poppler` (`pdftotext`) is an
@@ -19,9 +19,14 @@ optional PDF-quality bonus (the `pymupdf`/`pypdf` fallback covers extraction wit
 ## Layout
 
 - `rtfm_server.py` — the entire server (FastMCP). **One file on purpose** (see below).
-- `bin/launch` — launcher: prefers `uv run`, else a self-managed venv.
+- `bin/launch` — source/development launcher: prefers `uv run`, else a self-managed venv.
 - `manifest.example.toml` — documented source-manifest template.
-- `.claude-plugin/`, `.mcp.json` — plugin + marketplace manifests.
+- `plugins/claude/` — Claude Code front: manifest, `.mcp.json`, bootstrap, skill copy.
+- `plugins/opencode/` — OpenCode front: `package.json`, `index.ts`, bootstrap, skill copy.
+- `skills/read-the-manual/` — shared skill prefix; the front copies append only their client block.
+- `CLAUDE.md` — imports `AGENTS.md` and adds Claude-only development notes.
+- `opencode.json` — points at `docs/opencode-dev.md`, the OpenCode-only notes.
+- `.claude-plugin/marketplace.json` — the Claude marketplace catalog (the only root plugin file).
 - `docs/adr/` — architecture decisions (numbered). `docs/ROADMAP.md` — deferred scope.
 - `tests/` — pytest, one file per concern.
 
@@ -33,7 +38,10 @@ optional PDF-quality bonus (the `pymupdf`/`pypdf` fallback covers extraction wit
    `tools`); keep logic in importable module-level functions.
 2. **MCP tools are thin `@mcp.tool()` wrappers** over those plain functions, so tests call
    the helpers directly. The `mcp = FastMCP("rtfm")` line must precede the tool defs; the
-   `if __name__ == "__main__": mcp.run()` block stays last.
+   `def main(): mcp.run()` plus the `if __name__ == "__main__": main()` guard stays last.
+3. **A front never contains `rtfm_server.py`.** `plugins/claude/` and `plugins/opencode/`
+   are thin: each installs `rtfm-mcp` at the version declared by its own manifest. The core
+   is published once; the fronts only register it and deliver the skill.
 
 ## Design invariants — do not break (rationale in the ADRs)
 

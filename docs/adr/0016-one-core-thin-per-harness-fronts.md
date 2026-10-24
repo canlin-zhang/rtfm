@@ -77,9 +77,9 @@ auto-discovers.
 
 **Every version pin is declared once per artifact and checked mechanically.**
 The release version appears in `pyproject.toml`, `uv.lock`, the Claude
-`plugin.json` and bootstrap pin, and the OpenCode `package.json` and bootstrap
-pin. `scripts/bump_version.py` updates them together; the consistency check fails
-on drift.
+`plugin.json`, and the OpenCode `package.json`; each bootstrap reads the
+version from its own front manifest. `scripts/bump_version.py` updates them
+together; the consistency check fails on drift.
 
 ## Considered Options
 
