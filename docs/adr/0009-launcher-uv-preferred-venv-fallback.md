@@ -16,10 +16,11 @@ because a static command can't branch on what's installed. The launcher:
   (ADR 0017);
 - fails loudly and actionably if neither uv nor python3+pip is usable — never a silent hang.
 
-_Distribution note (ADR 0016):_ fronts no longer carry the server file. A thin
-bootstrap prefers `uvx` / `uv tool run`; otherwise it installs the pinned
-`rtfm-mcp` package into a harness-private venv and runs `python -m rtfm_server`.
-The launcher described here remains for source and development runs.
+_Distribution note (ADR 0016, amended by ADR 0019):_ fronts no longer carry the
+server file. A thin bootstrap installs the pinned `rtfm-mcp` package into a
+harness-private, version-stamped venv and runs `python -m rtfm_server`. It does
+not resolve the package at launch. The launcher described here remains for source
+and development runs.
 
 The only hard prerequisite is therefore **`python3` on PATH** with a working
 `venv`/`pip` module (Debian/Ubuntu: `python3-venv`). `uv` is a speed bonus;
@@ -31,8 +32,8 @@ extraction without it).
 - **uv-only** — simplest, no launcher to maintain, but a non-uv user must `pip install uv`
   first. Rejected as the *default* for a public audience; uv remains the preferred fast path.
 - **Publish to PyPI, install via pipx** — the standard Python distribution path. Adopted
-  for the core (`rtfm-mcp`): the fronts install it through `uvx`/`uv` or a private venv;
-  the launcher remains for source runs.
+  for the core (`rtfm-mcp`): the fronts install it into a private venv (ADR 0019); the
+  launcher remains for source runs.
 
 ## Consequences
 

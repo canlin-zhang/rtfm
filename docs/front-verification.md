@@ -24,16 +24,16 @@ speaks MCP over stdio, and asserts the six public tools are registered. When the
 Expected output (version follows the front manifests):
 
 ```
-OK   claude 0.9.1: ['find_duplicates', 'health_check', 'list_sources', 'read', 'reindex', 'search']
-OK   opencode 0.9.1: [...]
+OK   claude 0.9.3: ['find_duplicates', 'health_check', 'list_sources', 'read', 'reindex', 'search']
+OK   opencode 0.9.3: [...]
 OK   claude plugin validate --strict
 ```
 
 It needs network access, so it is deliberately outside the test suite (ADR
 0018). A failure here means the pin, the bootstrap, or the published wheel is
-broken, not that the code changed. The script uses a temporary `RTFM_HOME`, so
-each run performs the one-time install there; that run is slower than a normal
-launch.
+broken, not that the code changed. The script uses a temporary `RTFM_HOME` and
+unsets `CLAUDE_PLUGIN_DATA`, so each run performs the one-time install there;
+that run is slower than a normal launch.
 
 ## OpenCode session
 

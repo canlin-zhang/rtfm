@@ -31,6 +31,10 @@ execs its interpreter:
 - The launch command is `venv/bin/python -m rtfm_server`: no resolver, no
   network.
 
+This ADR amends the front-launch text in ADR 0009 and ADR 0016. uv-created venvs
+are seeded with pip (`uv venv --seed`), so the pip fallback remains usable if uv
+is later removed.
+
 ## Considered options
 
 - **Keep `uvx`.** Rejected: per-launch resolution and the negative cache are the

@@ -47,6 +47,15 @@ only where the interaction *is* the contract: at most one fetch per staleness
 window, one extraction per content, and no ingest after a read failure. Failure
 injection uses a fake at a public seam, not a spy on a private call sequence.
 
+**Fixtures must be states the real dependency produces.** A fixture that models
+an impossible or idealized state only confirms the code's assumption. A killed
+`venv.create` leaves `bin/python` without pip, not a directory without
+`bin/python`; the test must build the former. A test double must preserve the
+real dependency's contract in the states that matter, and every test must name
+the production change that would make it fail — if none exists, it tests
+nothing. Where the contract is isolation (a lock, a queue), assert it with real
+processes; a call-order mock of `flock` passes with a no-op lock.
+
 **Size.** Sizes are documented, not mechanized. *Small* is pure Python with no
 filesystem, network, or clock. *Medium* uses a temporary filesystem, SQLite, or
 a local bare git remote. *Large* runs the MCP server over stdio. Most module
