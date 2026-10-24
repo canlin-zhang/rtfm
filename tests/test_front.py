@@ -9,6 +9,9 @@ one test enforces that so the two install paths cannot drift.
 import importlib.machinery
 import importlib.util
 import json
+import subprocess
+import sys
+import textwrap
 import tomllib
 from pathlib import Path
 
@@ -175,6 +178,53 @@ def test_find_tool_falls_back_to_a_user_local_install(monkeypatch, tmp_path):
     tool.write_text("#!/bin/sh\n")
     tool.chmod(0o755)
     assert bootstrap.find_tool("uv") == str(tool)
+
+
+_LOCK_CHILD = textwrap.dedent(
+    """
+    import importlib.machinery, importlib.util, os, pathlib, sys, time
+    path, vdir, log, version = sys.argv[1:5]
+    loader = importlib.machinery.SourceFileLoader("front_bootstrap_child", path)
+    spec = importlib.util.spec_from_loader("front_bootstrap_child", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    module.data_dir = lambda front: pathlib.Path(vdir).parent
+    module.find_tool = lambda name: "/bin/uv"
+
+    def slow_install(py, version, uv):
+        with open(log, "a") as fh:
+            fh.write(f"start {os.getpid()} {time.monotonic()}\\n")
+        time.sleep(0.4)
+        with open(log, "a") as fh:
+            fh.write(f"end {os.getpid()} {time.monotonic()}\\n")
+
+    module._install_core = slow_install
+    module.venv_server(version, "claude")
+    """
+).strip()
+
+
+def test_two_installs_do_not_overlap(tmp_path):
+    """A real process-level check: a no-op lock lets the installs overlap."""
+    vdir = tmp_path / "venv"
+    (vdir / "bin").mkdir(parents=True)
+    (vdir / "bin" / "python").write_text("")
+    log = tmp_path / "installs.log"
+    script = str(ROOT / "plugins" / "claude" / "bootstrap.py")
+    procs = [
+        subprocess.Popen(
+            [sys.executable, "-c", _LOCK_CHILD, script, str(vdir), str(log), version])
+        for version in ("0.9.3", "0.9.4")
+    ]
+    for proc in procs:
+        assert proc.wait(timeout=15) == 0
+
+    by_pid = {}
+    for kind, pid, stamp in (line.split() for line in log.read_text().splitlines()):
+        by_pid.setdefault(pid, {})[kind] = float(stamp)
+    intervals = sorted((slot["start"], slot["end"]) for slot in by_pid.values())
+    assert len(intervals) == 2
+    assert intervals[0][1] <= intervals[1][0], intervals
 
 
 def test_parse_front_accepts_both_forms():
