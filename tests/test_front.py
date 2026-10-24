@@ -149,7 +149,8 @@ def test_a_pip_less_venv_is_reused_when_uv_is_present(monkeypatch, tmp_path):
     order = []
     monkeypatch.setattr(
         bootstrap.shutil, "rmtree", lambda path, **kw: order.append(("rmtree", path)))
-    monkeypatch.setattr(bootstrap, "_create_venv", lambda *a: pytest.fail("recreated"))
+    monkeypatch.setattr(
+        bootstrap, "_create_venv", lambda *a: pytest.fail("recreated"))
     monkeypatch.setattr(bootstrap, "_install_core", lambda *a: None)
     bootstrap.venv_server("0.9.3", "claude")
     assert order == []
@@ -180,6 +181,149 @@ def test_find_tool_falls_back_to_a_user_local_install(monkeypatch, tmp_path):
     assert bootstrap.find_tool("uv") == str(tool)
 
 
+def test_main_reports_fatal_to_stderr(monkeypatch, capsys):
+    def boom(root):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(bootstrap, "read_version", boom)
+    with pytest.raises(SystemExit) as exc:
+        bootstrap.main(["--front", "claude"])
+    assert exc.value.code == 1
+    assert "FATAL" in capsys.readouterr().err
+
+
+def test_venv_install_keeps_stdout_clean(monkeypatch, tmp_path):
+    monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
+    monkeypatch.setattr(bootstrap, "find_tool", lambda name: None)
+
+    def fake_create(path, with_pip):
+        (path / "bin").mkdir(parents=True, exist_ok=True)
+        (path / "bin" / "python").write_text("")
+
+    monkeypatch.setattr(bootstrap.venv, "create", fake_create)
+    calls = []
+    monkeypatch.setattr(
+        bootstrap.subprocess, "check_call", lambda cmd, **kwargs: calls.append(kwargs)
+    )
+
+    command = bootstrap.venv_server("0.8.0", "claude")
+
+    assert command == [str(tmp_path / "venv" / "bin" / "python"), "-m", "rtfm_server"]
+    assert calls and calls[0]["stdout"] is sys.stderr
+
+
+def test_venv_creation_failure_keeps_stdout_clean(monkeypatch, tmp_path, capsys):
+    """ensurepip's guidance must not reach the MCP stdout stream."""
+    monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
+    monkeypatch.setattr(bootstrap, "find_tool", lambda name: None)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def broken_create(path, with_pip):
+        print("ensurepip is not available", file=sys.stdout)
+        raise SystemExit(1)
+
+    monkeypatch.setattr(bootstrap.venv, "create", broken_create)
+
+    with pytest.raises(SystemExit) as exc:
+        bootstrap.main(["--front", "claude"])
+
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "ensurepip is not available" in captured.err
+    assert "FATAL" in captured.err
+    assert not (tmp_path / "venv" / "bin" / "python").exists()
+
+
+def test_venv_creation_failure_removes_partial_venv_and_retries(monkeypatch, tmp_path):
+    monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
+    monkeypatch.setattr(bootstrap, "find_tool", lambda name: None)
+    calls = []
+
+    def broken_create(path, with_pip):
+        calls.append(path)
+        (path / "bin").mkdir(parents=True, exist_ok=True)
+        (path / "bin" / "python").write_text("")
+        raise SystemExit(1)
+
+    monkeypatch.setattr(bootstrap.venv, "create", broken_create)
+
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="python3-venv"):
+            bootstrap.venv_server("0.8.0", "claude")
+
+    assert len(calls) == 2
+    assert not (tmp_path / "venv" / "bin" / "python").exists()
+
+
+def test_venv_creation_failure_prints_child_output(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
+    monkeypatch.setattr(bootstrap, "find_tool", lambda name: None)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    def broken_create(path, with_pip):
+        raise subprocess.CalledProcessError(1, ["python"], output=b"ensurepip exploded\n")
+
+    monkeypatch.setattr(bootstrap.venv, "create", broken_create)
+
+    with pytest.raises(SystemExit):
+        bootstrap.main(["--front", "claude"])
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "ensurepip exploded" in captured.err
+
+
+def _make_venv(tmp_path, version):
+    (tmp_path / "venv" / "bin").mkdir(parents=True)
+    (tmp_path / "venv" / "bin" / "python").write_text("")
+    (tmp_path / "venv" / ".core-version").write_text(version)
+
+
+def test_venv_stamp_skips_matching_install(monkeypatch, tmp_path):
+    monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
+    monkeypatch.setattr(bootstrap, "find_tool", lambda name: "/bin/uv")
+    _make_venv(tmp_path, "0.8.0")
+    calls = []
+    monkeypatch.setattr(
+        bootstrap.subprocess, "check_call", lambda cmd, **kwargs: calls.append(cmd)
+    )
+
+    command = bootstrap.venv_server("0.8.0", "claude")
+
+    assert command == [str(tmp_path / "venv" / "bin" / "python"), "-m", "rtfm_server"]
+    assert calls == []
+
+
+def test_venv_stamp_reinstalls_on_mismatch(monkeypatch, tmp_path):
+    monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
+    monkeypatch.setattr(bootstrap, "find_tool", lambda name: "/bin/uv")
+    _make_venv(tmp_path, "0.7.0")
+    calls = []
+    monkeypatch.setattr(
+        bootstrap.subprocess, "check_call", lambda cmd, **kwargs: calls.append(cmd)
+    )
+
+    bootstrap.venv_server("0.8.0", "claude")
+
+    assert calls and "rtfm-mcp==0.8.0" in calls[0]
+    assert (tmp_path / "venv" / ".core-version").read_text() == "0.8.0"
+
+
+def test_a_pip_venv_is_reused_when_uv_is_gone(monkeypatch, tmp_path):
+    monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
+    monkeypatch.setattr(bootstrap, "find_tool", lambda name: None)
+    vdir = tmp_path / "venv"
+    _fake_python(vdir / "bin" / "python", 0)
+    (vdir / ".core-version").write_text("0.9.3")
+    monkeypatch.setattr(
+        bootstrap, "_create_venv", lambda *a: pytest.fail("recreated"))
+    monkeypatch.setattr(
+        bootstrap.subprocess, "check_call", lambda *a, **k: pytest.fail("installed"))
+    assert bootstrap.venv_server("0.9.3", "claude") == [
+        str(vdir / "bin" / "python"), "-m", "rtfm_server"]
+
+
 _LOCK_CHILD = textwrap.dedent(
     """
     import importlib.machinery, importlib.util, os, pathlib, sys, time
@@ -194,7 +338,7 @@ _LOCK_CHILD = textwrap.dedent(
     def slow_install(py, version, uv):
         with open(log, "a") as fh:
             fh.write(f"start {os.getpid()} {time.monotonic()}\\n")
-        time.sleep(0.4)
+        time.sleep(0.6)
         with open(log, "a") as fh:
             fh.write(f"end {os.getpid()} {time.monotonic()}\\n")
 
@@ -216,8 +360,13 @@ def test_two_installs_do_not_overlap(tmp_path):
             [sys.executable, "-c", _LOCK_CHILD, script, str(vdir), str(log), version])
         for version in ("0.9.3", "0.9.4")
     ]
-    for proc in procs:
-        assert proc.wait(timeout=15) == 0
+    try:
+        for proc in procs:
+            assert proc.wait(timeout=15) == 0
+    finally:
+        for proc in procs:
+            if proc.poll() is None:
+                proc.kill()
 
     by_pid = {}
     for kind, pid, stamp in (line.split() for line in log.read_text().splitlines()):
