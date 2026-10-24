@@ -18,8 +18,8 @@ speaks MCP over stdio, and asserts the six public tools are registered. When the
 Expected output (version follows the front manifests):
 
 ```
-OK   claude 0.9.0: ['find_duplicates', 'health_check', 'list_sources', 'read', 'reindex', 'search']
-OK   opencode 0.9.0: [...]
+OK   claude 0.9.1: ['find_duplicates', 'health_check', 'list_sources', 'read', 'reindex', 'search']
+OK   opencode 0.9.1: [...]
 OK   claude plugin validate --strict
 ```
 
