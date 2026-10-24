@@ -21,7 +21,7 @@ jobs:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.2
       - name: Run tests (Python ${{ matrix.python-version }})
         run: uv run --python ${{ matrix.python-version }} pytest -q
 
@@ -39,7 +39,7 @@ jobs:
       PYTHONCOERCECLOCALE: "0"
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.2
       - name: Contract suite under the ASCII locale
         run: uv run pytest tests/test_version_consistency.py -q
 
@@ -47,7 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.2
       - name: Lint
         run: uvx ruff check .
 
@@ -60,7 +60,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.3.2
       - name: Version and pin consistency
         run: python3 scripts/check_version_consistency.py
       - name: Lockfile freshness
