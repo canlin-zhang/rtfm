@@ -32,6 +32,7 @@ officially supported.
 - `opencode.json` — points at `docs/opencode-dev.md`, the OpenCode-only notes.
 - `.claude-plugin/marketplace.json` — the Claude marketplace catalog (the only root plugin file).
 - `docs/adr/` — architecture decisions (numbered). `docs/ROADMAP.md` — deferred scope.
+- `docs/front-verification.md` — post-release checks for both fronts (`scripts/verify_fronts.py`).
 - `tests/` — pytest, mirroring the modules (`test_<module>.py`) plus named behavior
   exceptions (`test_repo_sources.py`, `test_search_quality.py`, `test_e2e.py`) and
   `test_facade.py` (ADR 0018).

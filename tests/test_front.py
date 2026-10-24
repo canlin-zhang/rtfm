@@ -61,21 +61,33 @@ def test_resolve_command_prefers_uvx(monkeypatch):
         bootstrap.shutil, "which", lambda name: "/bin/uvx" if name == "uvx" else None
     )
     assert bootstrap.resolve_command("0.8.0", "claude") == [
-        "uvx", "--from", "rtfm-mcp==0.8.0", "rtfm-server"
+        "/bin/uvx", "--from", "rtfm-mcp==0.8.0", "rtfm-server"
     ]
 
 
-def test_resolve_command_falls_back_to_uv(monkeypatch):
+def test_resolve_command_falls_back_to_uv(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(
         bootstrap.shutil, "which", lambda name: "/bin/uv" if name == "uv" else None
     )
     assert bootstrap.resolve_command("0.8.0", "claude") == [
-        "uv", "tool", "run", "--from", "rtfm-mcp==0.8.0", "rtfm-server"
+        "/bin/uv", "tool", "run", "--from", "rtfm-mcp==0.8.0", "rtfm-server"
     ]
 
 
-def test_resolve_command_uses_venv_when_no_uv(monkeypatch):
+def test_resolve_command_finds_uvx_in_a_user_local_install(monkeypatch, tmp_path):
     monkeypatch.setattr(bootstrap.shutil, "which", lambda name: None)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    uvx = tmp_path / ".local" / "bin" / "uvx"
+    uvx.parent.mkdir(parents=True)
+    uvx.write_text("#!/bin/sh\n")
+    uvx.chmod(0o755)
+    assert bootstrap.resolve_command("0.8.0", "claude")[0] == str(uvx)
+
+
+def test_resolve_command_uses_venv_when_no_uv(monkeypatch, tmp_path):
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda name: None)
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(
         bootstrap,
         "venv_server",
@@ -120,6 +132,7 @@ def test_venv_creation_failure_keeps_stdout_clean(monkeypatch, tmp_path, capsys)
     """ensurepip's guidance must not reach the MCP stdout stream."""
     monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
     monkeypatch.setattr(bootstrap.shutil, "which", lambda name: None)
+    monkeypatch.setenv("HOME", str(tmp_path))
 
     def broken_create(path, with_pip):
         print("ensurepip is not available", file=sys.stdout)
@@ -161,6 +174,7 @@ def test_venv_creation_failure_removes_partial_venv_and_retries(monkeypatch, tmp
 def test_venv_creation_failure_prints_child_output(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
     monkeypatch.setattr(bootstrap.shutil, "which", lambda name: None)
+    monkeypatch.setenv("HOME", str(tmp_path))
 
     def broken_create(path, with_pip):
         raise subprocess.CalledProcessError(1, ["python"], output=b"ensurepip exploded\n")
@@ -215,13 +229,45 @@ def test_parse_front_accepts_both_forms():
     assert bootstrap.parse_front([], "claude") == "claude"
 
 
-def test_parse_front_rejects_mismatch_and_unknown():
-    with pytest.raises(SystemExit, match="does not match"):
-        bootstrap.parse_front(["--front", "opencode"], "claude")
+def test_parse_front_accepts_the_flag_from_a_versioned_install_dir():
+    # A marketplace install lives in <plugin>/<version>/, so the directory name
+    # cannot be the front's identity. The flag is.
+    assert bootstrap.parse_front(["--front", "claude"], "0.9.0") == "claude"
+    assert bootstrap.parse_front(["--front=opencode"], "0.9.0") == "opencode"
+
+
+def test_parse_front_without_a_flag_uses_the_repo_directory_name():
+    assert bootstrap.parse_front([], "claude") == "claude"
+
+
+def test_parse_front_without_a_flag_rejects_an_installed_dir_name():
+    with pytest.raises(SystemExit, match="pass --front"):
+        bootstrap.parse_front([], "0.9.0")
+
+
+def test_parse_front_rejects_unknown_values():
     with pytest.raises(SystemExit, match="unknown front"):
         bootstrap.parse_front(["--front", "claud"], "claude")
     with pytest.raises(SystemExit, match="needs a value"):
         bootstrap.parse_front(["--front"], "claude")
+
+
+def test_main_starts_from_a_versioned_install_directory(monkeypatch, tmp_path):
+    """The exact marketplace-cache layout: the bootstrap's folder is the version."""
+    import shutil
+
+    install = tmp_path / "0.9.0"
+    install.mkdir()
+    shutil.copy(ROOT / "plugins" / "claude" / "bootstrap.py", install / "bootstrap.py")
+    module = _load("front_bootstrap_installed", install / "bootstrap.py")
+    monkeypatch.setattr(module, "read_version", lambda root: "0.9.0")
+    monkeypatch.setattr(module, "resolve_command", lambda version, front: ["/bin/rtfm-server"])
+    calls = []
+    monkeypatch.setattr(module.os, "execvp", lambda file, args: calls.append(file))
+
+    module.main(["--front", "claude"])
+
+    assert calls == ["/bin/rtfm-server"]
 
 
 def test_main_execs_the_resolved_command(monkeypatch):

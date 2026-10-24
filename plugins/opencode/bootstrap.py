@@ -56,13 +56,14 @@ def _venv_python(vdir: Path) -> Path:
 
 
 def parse_front(args: list[str], root_name: str) -> str:
-    """Validate --front against the directory the bootstrap lives in."""
-    if root_name not in {"claude", "opencode"}:
-        raise SystemExit(
-            f"[rtfm] FATAL: unrecognized front directory {root_name!r}; "
-            "expected claude or opencode"
-        )
-    front = root_name
+    """Resolve the front: --front is authoritative, the directory is a fallback.
+
+    An installed plugin lives in a versioned or renamed directory (a marketplace
+    cache uses <plugin>/<version>/), so the directory name cannot be the front's
+    identity. The MCP config passes --front explicitly; the fallback keeps a
+    direct `python3 plugins/claude/bootstrap.py` invocation working in the repo.
+    """
+    front = None
     i = 0
     while i < len(args):
         arg = args[i]
@@ -80,13 +81,15 @@ def parse_front(args: list[str], root_name: str) -> str:
             raise SystemExit(
                 f"[rtfm] FATAL: unknown front {value!r}; expected claude or opencode"
             )
-        if value != root_name:
-            raise SystemExit(
-                f"[rtfm] FATAL: --front {value!r} does not match the front "
-                f"directory {root_name!r}"
-            )
         front = value
-    return front
+    if front is not None:
+        return front
+    if root_name in {"claude", "opencode"}:
+        return root_name
+    raise SystemExit(
+        f"[rtfm] FATAL: cannot tell which front this is from directory {root_name!r}; "
+        "pass --front claude or --front opencode"
+    )
 
 
 def venv_server(version: str, front: str) -> list[str]:
@@ -138,11 +141,31 @@ def venv_server(version: str, front: str) -> list[str]:
     return [str(py), "-m", "rtfm_server"]
 
 
+def find_tool(name: str) -> str | None:
+    """Locate a tool on PATH, then in the usual user-local install dirs.
+
+    An MCP client does not necessarily launch the server with the shell's PATH:
+    a `uv` installed by the standalone installer lives in ~/.local/bin, which a
+    GUI client may omit. Falling through to the venv path there fails on hosts
+    without python3-venv, so the common install locations are checked too."""
+    found = shutil.which(name)
+    if found:
+        return found
+    for directory in (Path.home() / ".local" / "bin", Path.home() / ".cargo" / "bin",
+                      Path("/opt/homebrew/bin"), Path("/usr/local/bin")):
+        candidate = directory / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
 def resolve_command(version: str, front: str) -> list[str]:
-    if shutil.which("uvx"):
-        return ["uvx", "--from", f"{CORE_PACKAGE}=={version}", "rtfm-server"]
-    if shutil.which("uv"):
-        return ["uv", "tool", "run", "--from", f"{CORE_PACKAGE}=={version}", "rtfm-server"]
+    uvx = find_tool("uvx")
+    if uvx:
+        return [uvx, "--from", f"{CORE_PACKAGE}=={version}", "rtfm-server"]
+    uv = find_tool("uv")
+    if uv:
+        return [uv, "tool", "run", "--from", f"{CORE_PACKAGE}=={version}", "rtfm-server"]
     return venv_server(version, front)
 
 
