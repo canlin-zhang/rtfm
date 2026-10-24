@@ -20,8 +20,8 @@ jobs:
         # here — it is out of scope for this change.
         python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
       - name: Run tests (Python ${{ matrix.python-version }})
         run: uv run --python ${{ matrix.python-version }} pytest -q
 
@@ -38,16 +38,16 @@ jobs:
       PYTHONUTF8: "0"
       PYTHONCOERCECLOCALE: "0"
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
       - name: Contract suite under the ASCII locale
         run: uv run pytest tests/test_version_consistency.py -q
 
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
       - name: Lint
         run: uvx ruff check .
 
@@ -59,8 +59,8 @@ jobs:
     # script compares declared strings, uv lock --check compares resolved ones.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
       - name: Version and pin consistency
         run: python3 scripts/check_version_consistency.py
       - name: Lockfile freshness
