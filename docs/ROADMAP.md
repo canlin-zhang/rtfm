@@ -11,10 +11,6 @@ Deferred scope, each with the decision that parked it. Not yet implemented.
   the real demand), HTML/web image content only after. See
   [ADR 0005](adr/0005-text-extraction-only-no-ocr.md).
 
-- **Publish to PyPI** — an additional install channel (`pipx install rtfm`) alongside the
-  plugin + `uv`/venv launcher, for users who prefer a standard Python package. See
-  [ADR 0009](adr/0009-launcher-uv-preferred-venv-fallback.md).
-
 - **Prune orphaned managed clones** — a `prune` tool / health-check report for managed-repo
   clones left under the Corpus home after their Source is removed from the Manifest. See
   [ADR 0007](adr/0007-repo-linked-vs-managed.md).
@@ -48,7 +44,7 @@ Deferred scope, each with the decision that parked it. Not yet implemented.
       surfaces noise. Evaluate against the real corpus as its own change, not bundled into the
       Tier 1 doc-signal work.
 
-- **Mutation tools + the `audit` skill (Plan 4)** — `rename`/`delete` gated to `mutable`
+- **Mutation tools + the `audit` skill** — `rename`/`delete` gated to `mutable`
   Sources (ADR 0001), plus the de-vendored `audit` skill (sha256 dedup via `find_duplicates`
   + title-page version extraction + collision-checked, approval-gated rename proposals; ADR
   0008). `audit` is designed but deferred until the mutation tools land — without them it can

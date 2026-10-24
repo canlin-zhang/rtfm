@@ -52,12 +52,14 @@ def make_tree(
     tmp_path,
     version="0.5.1",
     plugin_version=None,
+    opencode_version=None,
     lock_version=None,
     script_deps=PEP723,
     lock_names=("rtfm-mcp",),
 ):
-    """A minimal repo skeleton: the four files the guard reads, all consistent."""
+    """A minimal repo skeleton: the files the guard reads, all consistent."""
     plugin_version = version if plugin_version is None else plugin_version
+    opencode_version = version if opencode_version is None else opencode_version
     lock_version = version if lock_version is None else lock_version
     (tmp_path / "pyproject.toml").write_text(
         f'[project]\nname = "rtfm-mcp"\nversion = "{version}"\ndependencies = [\n'
@@ -73,15 +75,28 @@ def make_tree(
 
     lock = "".join(lock_entry(name) for name in lock_names)
     (tmp_path / "uv.lock").write_text(lock, encoding="utf-8")
-    (tmp_path / ".claude-plugin").mkdir(parents=True)
+    (tmp_path / "plugins/claude/.claude-plugin").mkdir(parents=True)
     # Deliberately NOT the real-file shape: here "version" is the last key with no
     # trailing comma, so the `,?` pattern's empty branch is the default exercise.
     # test_bump_preserves_comma_when_version_is_mid_object covers the real shape.
     # Explicit UTF-8 on every write: fixtures may carry em-dashes, and the
     # suite must be hermetic under an ASCII locale (the environment the
     # ASCII-locale tests simulate for their children).
-    (tmp_path / ".claude-plugin" / "plugin.json").write_text(
+    (tmp_path / "plugins/claude/.claude-plugin" / "plugin.json").write_text(
         json.dumps({"name": "rtfm", "version": plugin_version}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "plugins" / "opencode").mkdir(parents=True)
+    (tmp_path / "plugins" / "opencode" / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "rtfm-opencode-plugin",
+                "version": opencode_version,
+                "type": "module",
+            },
+            indent=2,
+        )
+        + "\n",
         encoding="utf-8",
     )
     (tmp_path / "rtfm_server.py").write_text(script_deps, encoding="utf-8")
@@ -103,8 +118,11 @@ def run_check(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     "mutate",
     [
-        lambda t: (t / ".claude-plugin" / "plugin.json").write_text(
+        lambda t: (t / "plugins/claude/.claude-plugin" / "plugin.json").write_text(
             json.dumps({"name": "rtfm", "version": "0.5.0"})
+        ),
+        lambda t: (t / "plugins/opencode/package.json").write_text(
+            json.dumps({"name": "rtfm-opencode-plugin", "version": "0.5.0"})
         ),
         lambda t: (t / "uv.lock").write_text(
             (t / "uv.lock").read_text().replace('version = "0.5.1"', 'version = "0.5.0"')
@@ -201,7 +219,7 @@ def test_check_versions_must_be_strings(tmp_path, monkeypatch):
     (tmp_path / "uv.lock").write_text(
         '[[package]]\nname = "rtfm-mcp"\nversion = 5\nsource = { virtual = "." }\n'
     )
-    (tmp_path / ".claude-plugin" / "plugin.json").write_text(
+    (tmp_path / "plugins/claude/.claude-plugin" / "plugin.json").write_text(
         '{\n  "name": "rtfm",\n  "version": 5\n}\n'
     )
     assert run_check(tmp_path, monkeypatch) == 1
@@ -278,8 +296,10 @@ def test_check_non_table_project_is_clean_error(tmp_path, monkeypatch):
             id="pyproject",
         ),
         pytest.param(
-            ".claude-plugin/plugin.json",
-            lambda t: (t / ".claude-plugin" / "plugin.json").write_text('{"name": "rtfm",'),
+            "plugins/claude/.claude-plugin/plugin.json",
+            lambda t: (
+                t / "plugins/claude/.claude-plugin" / "plugin.json"
+            ).write_text('{"name": "rtfm",'),
             id="plugin-json",
         ),
     ],
@@ -309,7 +329,7 @@ def test_check_missing_file_is_clean_error_not_traceback(tmp_path, monkeypatch):
     """A missing file is a clean SystemExit with a message, never a FileNotFoundError
     traceback — pytest.raises(SystemExit) would fail the test on the latter."""
     make_tree(tmp_path)
-    (tmp_path / ".claude-plugin" / "plugin.json").unlink()
+    (tmp_path / "plugins/claude/.claude-plugin" / "plugin.json").unlink()
     with pytest.raises(SystemExit, match="plugin.json not found"):
         run_check(tmp_path, monkeypatch)
 
@@ -318,7 +338,7 @@ def test_check_non_utf8_file_is_clean_error(tmp_path, monkeypatch):
     """A non-UTF-8 file raises UnicodeDecodeError — a ValueError subclass, not
     OSError — and must exit cleanly with its own message, never traceback."""
     make_tree(tmp_path)
-    (tmp_path / ".claude-plugin" / "plugin.json").write_bytes(b"\xff\xfe\x00")
+    (tmp_path / "plugins/claude/.claude-plugin" / "plugin.json").write_bytes(b"\xff\xfe\x00")
     with pytest.raises(SystemExit, match="not UTF-8"):
         run_check(tmp_path, monkeypatch)
 
@@ -387,7 +407,7 @@ def test_check_blank_versions_are_clean_error(tmp_path, monkeypatch, capsys, bla
         'source = { virtual = "." }\n',
         encoding="utf-8",
     )
-    (tmp_path / ".claude-plugin" / "plugin.json").write_text(
+    (tmp_path / "plugins/claude/.claude-plugin" / "plugin.json").write_text(
         f'{{"name": "rtfm", "version": "{blank_version}"}}\n',
         encoding="utf-8",
     )
@@ -399,16 +419,16 @@ def test_check_prints_drift_under_ascii_locale(tmp_path):
     """Non-ASCII version values must not crash the check's drift listing
     under an ASCII locale — the check's stdout reconfigure (the bump has the
     same guard) must keep the report printing."""
-    # The three fixture values (0.5.1 / 0.5.2 / 0.5.3) must stay mutually
+    # The four fixture values (0.5.1 / 0.5.2 / 0.5.3 / 0.5.4) must stay mutually
     # non-prefix: a value like 0.5.10 would make '0.5.1' match its rendering
     # and silently weaken the pins below.
-    make_tree(tmp_path, lock_version="0.5.2—β")
-    # A third distinct value for plugin.json: with only two distinct prefixes,
-    # a lock<->plugin swap of the shared value rendered identically and passed
-    # every pin; three distinct prefixes make all six permutations
+    make_tree(tmp_path, lock_version="0.5.2—β", opencode_version="0.5.4—β")
+    # A distinct value for each front manifest: with only three distinct
+    # prefixes, a swap between the two fronts' lines rendered identically and
+    # passed every pin; four distinct prefixes make all permutations
     # distinguishable. (lock_version= feeds only uv.lock; pyproject keeps the
     # skeleton's 0.5.1, plugin.json is overwritten right here.)
-    (tmp_path / ".claude-plugin" / "plugin.json").write_text(
+    (tmp_path / "plugins/claude/.claude-plugin" / "plugin.json").write_text(
         '{\n  "name": "rtfm",\n  "version": "0.5.3—β"\n}\n',
         encoding="utf-8",
     )
@@ -423,12 +443,13 @@ def test_check_prints_drift_under_ascii_locale(tmp_path):
     # documents 'no traceback' as an independent contract.
     assert "Traceback" not in combined
     assert "pyproject.toml: 0.5.1" in proc.stdout  # the drift listing itself printed
-    # All three listing lines are pinned by their ASCII-safe prefixes, with a
-    # DISTINCT prefix per file (0.5.1 / 0.5.2 / 0.5.3) so any mis-associated
-    # value or swapped entry fails the pins. The non-ASCII tails render as
-    # '??' on the reconfigured stdout — unpinned.
+    # All four listing lines are pinned by their ASCII-safe prefixes, with a
+    # DISTINCT prefix per file (0.5.1 / 0.5.2 / 0.5.3 / 0.5.4) so any
+    # mis-associated value or swapped entry fails the pins. The non-ASCII tails
+    # render as '??' on the reconfigured stdout — unpinned.
     assert "uv.lock (rtfm-mcp entry): 0.5.2" in proc.stdout
-    assert ".claude-plugin/plugin.json: 0.5.3" in proc.stdout
+    assert "plugins/claude/.claude-plugin/plugin.json: 0.5.3" in proc.stdout
+    assert "plugins/opencode/package.json: 0.5.4" in proc.stdout
     # The verdict is stderr and the data lines stdout — placement is part of
     # the pin, matching the suite's documented convention.
     assert "differs across files" in proc.stderr
@@ -455,7 +476,9 @@ def test_check_reads_utf8_under_ascii_locale(tmp_path):
     plugin_json = (
         '{\n  "name": "rtfm",\n  "description": "test — em dash",\n  "version": "0.5.1"\n}\n'
     )
-    (tmp_path / ".claude-plugin" / "plugin.json").write_text(plugin_json, encoding="utf-8")
+    (tmp_path / "plugins/claude/.claude-plugin" / "plugin.json").write_text(
+        plugin_json, encoding="utf-8"
+    )
     proc = run_check_in_subprocess(
         tmp_path,
         env_extra={"LC_ALL": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0"},
@@ -592,8 +615,10 @@ def test_bump_updates_all_declarations_and_self_checks(tmp_path, monkeypatch):
     assert 'version = "0.5.2"' in (tmp_path / "pyproject.toml").read_text()
     # plugin.json's "version" is the LAST key in the fixture (no trailing comma);
     # the result must still be valid JSON — the comma-injection regression test.
-    plugin = json.loads((tmp_path / ".claude-plugin" / "plugin.json").read_text())
+    plugin = json.loads((tmp_path / "plugins/claude/.claude-plugin" / "plugin.json").read_text())
     assert plugin["version"] == "0.5.2"
+    opencode = json.loads((tmp_path / "plugins/opencode" / "package.json").read_text())
+    assert opencode["version"] == "0.5.2"
 
     assert ["uv", "lock"] in [a for a, _ in calls]
     assert all(cwd == tmp_path for _, cwd in calls)
@@ -618,7 +643,15 @@ def test_bump_refuses_on_pre_existing_drift(tmp_path, monkeypatch):
     # No-mutation guarantee: the refusal fires before any write, so a retry
     # after fixing the drift still sees the original versions.
     assert 'version = "0.5.1"' in (tmp_path / "pyproject.toml").read_text()
-    assert '"version": "0.5.0"' in (tmp_path / ".claude-plugin" / "plugin.json").read_text()
+    assert '"version": "0.5.0"' in (
+        tmp_path / "plugins/claude/.claude-plugin" / "plugin.json"
+    ).read_text()
+
+
+def test_bump_refuses_on_opencode_drift(tmp_path, monkeypatch):
+    make_tree(tmp_path, opencode_version="0.5.0")
+    with pytest.raises(SystemExit, match="disagree"):
+        run_bump(tmp_path, monkeypatch)
 
 
 def test_bump_rejects_non_pep440_version(tmp_path, monkeypatch):
@@ -803,7 +836,7 @@ def test_bump_write_failure_is_clean_error_with_revert_instructions(tmp_path, mo
     written must exit with a message that owns the half-edited tree — the
     plan-before-write guarantee covers refusals, not OS write errors."""
     make_tree(tmp_path)
-    plugin_json = tmp_path / ".claude-plugin" / "plugin.json"
+    plugin_json = tmp_path / "plugins/claude/.claude-plugin" / "plugin.json"
     plugin_json.chmod(0o444)
     try:
         with pytest.raises(SystemExit) as exc:
@@ -1037,14 +1070,14 @@ def test_bump_malformed_plugin_json_is_clean_error(tmp_path, monkeypatch):
     """Invalid JSON in plugin.json (e.g. a hand-edit trailing comma) must exit
     cleanly from _json_version, never traceback."""
     make_tree(tmp_path)
-    (tmp_path / ".claude-plugin" / "plugin.json").write_text('{"name": "rtfm",')
+    (tmp_path / "plugins/claude/.claude-plugin" / "plugin.json").write_text('{"name": "rtfm",')
     with pytest.raises(SystemExit, match=r'cannot read "version"'):
         run_bump(tmp_path, monkeypatch)
 
 
 def test_bump_plugin_json_missing_version_key_is_clean_error(tmp_path, monkeypatch):
     make_tree(tmp_path)
-    (tmp_path / ".claude-plugin" / "plugin.json").write_text('{"name": "rtfm"}')
+    (tmp_path / "plugins/claude/.claude-plugin" / "plugin.json").write_text('{"name": "rtfm"}')
     with pytest.raises(SystemExit, match=r'cannot read "version"'):
         run_bump(tmp_path, monkeypatch)
 
@@ -1054,7 +1087,7 @@ def test_bump_plugin_json_version_must_be_string(tmp_path, monkeypatch):
     refused by the JSON-side str guard (if pyproject also had 5, the TOML
     guard would fire first — this fixture isolates the JSON side)."""
     make_tree(tmp_path)
-    (tmp_path / ".claude-plugin" / "plugin.json").write_text(
+    (tmp_path / "plugins/claude/.claude-plugin" / "plugin.json").write_text(
         '{\n  "name": "rtfm",\n  "version": 5\n}\n'
     )
     with pytest.raises(SystemExit, match="must be a string"):
@@ -1124,7 +1157,7 @@ def test_bump_second_plan_refusal_leaves_first_file_untouched(tmp_path, monkeypa
     make_tree(tmp_path)
     # "version" : "0.5.1" (space before colon) — the line-anchored pattern
     # `^(\s*"version": ")` cannot match this.
-    (tmp_path / ".claude-plugin" / "plugin.json").write_text(
+    (tmp_path / "plugins/claude/.claude-plugin" / "plugin.json").write_text(
         '{\n  "name" : "rtfm",\n  "version" : "0.5.1"\n}\n'
     )
     with pytest.raises(SystemExit, match="expected exactly one"):
@@ -1136,12 +1169,12 @@ def test_bump_preserves_comma_when_version_is_mid_object(tmp_path, monkeypatch):
     """The real plugin.json has "version" as a middle key followed by a comma;
     the `,?` pattern must echo the comma back or the file becomes invalid JSON."""
     make_tree(tmp_path)
-    (tmp_path / ".claude-plugin" / "plugin.json").write_text(
+    (tmp_path / "plugins/claude/.claude-plugin" / "plugin.json").write_text(
         '{\n  "name": "rtfm",\n  "version": "0.5.1",\n  "mcpServers": {}\n}\n'
     )
     fake, _ = make_runner()
     assert run_bump(tmp_path, monkeypatch, runner=fake) == 0
-    text = (tmp_path / ".claude-plugin" / "plugin.json").read_text()
+    text = (tmp_path / "plugins/claude/.claude-plugin" / "plugin.json").read_text()
     assert '"version": "0.5.2",' in text
     assert json.loads(text)["version"] == "0.5.2"
 
@@ -1157,7 +1190,7 @@ def test_bump_writes_utf8_under_ascii_locale(tmp_path):
         'dependencies = [\n    "mcp[cli]>=1.28.1,<2",\n    "pymupdf",\n    "pypdf",\n]\n',
         encoding="utf-8",
     )
-    (tmp_path / ".claude-plugin" / "plugin.json").write_text(
+    (tmp_path / "plugins/claude/.claude-plugin" / "plugin.json").write_text(
         '{\n  "name": "rtfm",\n  "description": "test — em dash",\n  "version": "0.5.1"\n}\n',
         encoding="utf-8",
     )
@@ -1176,7 +1209,9 @@ def test_bump_writes_utf8_under_ascii_locale(tmp_path):
     pyproject = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
     assert 'version = "0.5.2"' in pyproject
     assert "test — em dash" in pyproject  # the U+2014 glyph survived the write
-    plugin_text = (tmp_path / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8")
+    plugin_text = (
+        tmp_path / "plugins/claude/.claude-plugin" / "plugin.json"
+    ).read_text(encoding="utf-8")
     assert '"version": "0.5.2"' in plugin_text
     assert "test — em dash" in plugin_text  # the U+2014 glyph survived, not mangled
     plugin = json.loads(plugin_text)

@@ -1,0 +1,10 @@
+{
+  "name": "rtfm-opencode-plugin",
+  "version": "0.8.0",
+  "type": "module",
+  "main": "index.ts",
+  "files": ["index.ts", "bootstrap.py", "skills/"],
+  "dependencies": {
+    "@opencode/plugin": "^2.1.4"
+  }
+}

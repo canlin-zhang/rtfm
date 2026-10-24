@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Verify version and dependency declarations stay in sync across the repo.
 
-The release version is declared in three files — pyproject.toml, uv.lock's
-rtfm-mcp entry, and .claude-plugin/plugin.json — and the dependency list is mirrored
+The release version is declared in four files — pyproject.toml, uv.lock's
+rtfm-mcp entry, plugins/claude/.claude-plugin/plugin.json, and
+plugins/opencode/package.json — and the dependency list is mirrored
 between pyproject.toml and the PEP-723 `# /// script` block in rtfm_server.py,
 which is the source of truth for deps (ADR 0009; see the header comment in
 pyproject.toml). Nothing mechanical linked them, so a one-file edit silently
@@ -91,12 +92,14 @@ def main() -> int:
         sys.stdout.reconfigure(errors="replace")
     pyproject = _read("pyproject.toml", tomllib.loads)
     lock = _read("uv.lock", tomllib.loads)
-    plugin = _read(".claude-plugin/plugin.json", json.loads)
+    plugin = _read("plugins/claude/.claude-plugin/plugin.json", json.loads)
+    opencode = _read("plugins/opencode/package.json", json.loads)
 
     pkg_version = _key("pyproject.toml", pyproject, "project", "version")
     project_deps = _key("pyproject.toml", pyproject, "project", "dependencies")
     lock_packages = _key("uv.lock", lock, "package")
-    plugin_version = _key(".claude-plugin/plugin.json", plugin, "version")
+    plugin_version = _key("plugins/claude/.claude-plugin/plugin.json", plugin, "version")
+    opencode_version = _key("plugins/opencode/package.json", opencode, "version")
 
     # The descent above guarantees the keys exist, not that the values have the
     # right shape (a valid-TOML file with `package = "rtfm"` parses fine). Each
@@ -115,7 +118,8 @@ def main() -> int:
     versions = {
         "pyproject.toml": pkg_version,
         "uv.lock (rtfm-mcp entry)": lock_version,
-        ".claude-plugin/plugin.json": plugin_version,
+        "plugins/claude/.claude-plugin/plugin.json": plugin_version,
+        "plugins/opencode/package.json": opencode_version,
     }
     bad_versions = [
         name for name, v in versions.items() if not (isinstance(v, str) and v.strip())
@@ -133,7 +137,7 @@ def main() -> int:
             print(f"  {name}: {v}")
         return _fail(
             "release version differs across files; run scripts/bump_version.py once "
-            "pyproject.toml and plugin.json agree (it refuses while they disagree), "
+            "pyproject.toml and the front manifests agree (it refuses while they disagree), "
             "or align the versions by hand"
         )
 

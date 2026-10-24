@@ -90,7 +90,7 @@ def test_read_reports_a_non_utf8_file_instead_of_raising(home, tmp_path):
 
 def test_search_auto_reindexes_small_unindexed_source(home, tmp_path):
     """A newly-added small source (within the auto-reindex budget) is indexed inline on search;
-    the user no longer has to call reindex first. Phase 2 amends the old query-only behavior."""
+    the user no longer has to call reindex first. It replaces the old query-only behavior."""
     d = tmp_path / "manual"
     d.mkdir()
     (d / "m.md").write_text("the widget protocol defines flits\n")

@@ -9,7 +9,7 @@ The plugin's two skills, both generalized from their original domain-specific fo
 - **read-the-manual** (from `check-specs`; *shipped*) — answer strictly from the Corpus (PDF +
   repo + HTML), citing format-native locators (ADR 0004); no model-knowledge fallback. Not PDF-
   or "spec"-specific.
-- **audit** (from `audit-specs`; *deferred to Plan 4 with the `rename`/`delete` mutation tools
+- **audit** (from `audit-specs`; *deferred with the `rename`/`delete` mutation tools
   it depends on*) — sha256 dedup + title-page version extraction + collision-checked,
   approval-gated rename proposals, operating only on a `mutable` Source (ADR 0001).
 

@@ -3,7 +3,7 @@
 A local MCP server that makes large, can't-read-by-hand technical documentation — PDF spec
 sets and documentation repositories — searchable, with grounded, cited answers. Published
 as one thin Front per agent harness — a Claude Code plugin and an OpenCode plugin (skill
-`read-the-manual`; `audit` planned with Plan 4). The "F" is for *Full*: it ingests the
+`read-the-manual`; `audit` planned alongside the mutation tools). The "F" is for *Full*: it ingests the
 whole manual so you can search all of it, not just skim.
 
 ## Language
@@ -74,8 +74,9 @@ _Avoid_: adapter, wrapper (neither names the installable artifact); plugin (the 
 
 **Corpus home**:
 The single directory holding all of the tool's state — the Manifest (`manifest.toml`), the
-Default source's drop-dir (`default/`), and the FTS cache (`cache/`). Defaults to
-`~/.rtfm/`, overridable via `RTFM_HOME`.
+Default source's drop-dir (`default/`), the FTS cache (`cache/`), managed Repo clones
+(`repos/`), and the fronts' private data dirs (`fronts/`). Defaults to `~/.rtfm/`,
+overridable via `RTFM_HOME`.
 _Avoid_: config dir, data dir, root
 
 **Default source**:

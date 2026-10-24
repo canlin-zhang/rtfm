@@ -10,7 +10,7 @@ status: accepted
 (`RTFM_AUTO_REINDEX_MAX`, default 10 new/changed files) is reindexed inline, while a larger delta
 is left to an explicit `reindex` and reported in `WARNING` rather than blocking the query on
 extraction. `list_sources` and `health_check` stay query-only. Auto-reindex refreshes the search
-cache only — it never mutates source files (the `mutable` flag gates file mutation, Plan 4, not
+cache only — it never mutates source files (the `mutable` flag gates file mutation, not
 freshness).
 
 ## Considered Options
