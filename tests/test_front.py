@@ -56,46 +56,82 @@ def test_data_dir_prefers_claude_plugin_data(monkeypatch, tmp_path):
     assert bootstrap.data_dir("claude") == tmp_path / "home" / "fronts" / "claude"
 
 
-def test_resolve_command_prefers_uvx(monkeypatch):
-    monkeypatch.setattr(
-        bootstrap.shutil, "which", lambda name: "/bin/uvx" if name == "uvx" else None
-    )
-    assert bootstrap.resolve_command("0.8.0", "claude") == [
-        "/bin/uvx", "--from", "rtfm-mcp==0.8.0", "rtfm-server"
+def test_uv_creates_the_venv_and_installs_the_core(monkeypatch, tmp_path):
+    monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
+    monkeypatch.setattr(bootstrap, "find_tool", lambda name: "/bin/uv" if name == "uv" else None)
+    calls = []
+
+    def check_call(command, **kwargs):
+        calls.append(command)
+        if command[1] == "venv":
+            (tmp_path / "venv" / "bin").mkdir(parents=True, exist_ok=True)
+            (tmp_path / "venv" / "bin" / "python").write_text("")
+
+    monkeypatch.setattr(bootstrap.subprocess, "check_call", check_call)
+    py = str(tmp_path / "venv" / "bin" / "python")
+    assert bootstrap.venv_server("0.9.2", "claude") == [py, "-m", "rtfm_server"]
+    assert calls[0] == ["/bin/uv", "venv", "--python", ">=3.11", str(tmp_path / "venv")]
+    assert calls[1] == [
+        "/bin/uv", "pip", "install", "--python", py, "rtfm-mcp==0.9.2",
     ]
+    assert (tmp_path / "venv" / ".core-version").read_text() == "0.9.2"
 
 
-def test_resolve_command_falls_back_to_uv(monkeypatch, tmp_path):
-    monkeypatch.setenv("HOME", str(tmp_path))
+def test_a_stale_index_retries_with_one_targeted_refresh(monkeypatch, tmp_path):
+    monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
+    monkeypatch.setattr(bootstrap, "find_tool", lambda name: "/bin/uv")
+    (tmp_path / "venv" / "bin").mkdir(parents=True)
+    (tmp_path / "venv" / "bin" / "python").write_text("")
+    calls = []
+
+    def check_call(command, **kwargs):
+        calls.append(command)
+        if "--refresh-package" not in command and command[1:3] == ["pip", "install"]:
+            raise bootstrap.subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr(bootstrap.subprocess, "check_call", check_call)
+    bootstrap.venv_server("0.9.2", "claude")
+    assert calls[0][-1] == "rtfm-mcp==0.9.2"
+    assert "--refresh-package" not in calls[0]
+    assert calls[1][3:5] == ["--refresh-package", "rtfm-mcp"]
+    assert calls[1][-1] == "rtfm-mcp==0.9.2"
+
+
+def test_no_uv_creates_a_venv_with_the_stdlib(monkeypatch, tmp_path):
+    monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
+    monkeypatch.setattr(bootstrap, "find_tool", lambda name: None)
+
+    def create(vdir, with_pip):
+        (vdir / "bin").mkdir(parents=True, exist_ok=True)
+        (vdir / "bin" / "python").write_text("")
+
+    monkeypatch.setattr(bootstrap.venv, "create", create)
+    calls = []
     monkeypatch.setattr(
-        bootstrap.shutil, "which", lambda name: "/bin/uv" if name == "uv" else None
-    )
-    assert bootstrap.resolve_command("0.8.0", "claude") == [
-        "/bin/uv", "tool", "run", "--from", "rtfm-mcp==0.8.0", "rtfm-server"
-    ]
+        bootstrap.subprocess, "check_call", lambda command, **kwargs: calls.append(command))
+    bootstrap.venv_server("0.9.2", "claude")
+    assert calls[0][1:3] == ["-m", "pip"]
+    assert "--refresh-package" not in calls[0]
 
 
-def test_resolve_command_finds_uvx_in_a_user_local_install(monkeypatch, tmp_path):
-    monkeypatch.setattr(bootstrap.shutil, "which", lambda name: None)
-    monkeypatch.setenv("HOME", str(tmp_path))
-    uvx = tmp_path / ".local" / "bin" / "uvx"
-    uvx.parent.mkdir(parents=True)
-    uvx.write_text("#!/bin/sh\n")
-    uvx.chmod(0o755)
-    assert bootstrap.resolve_command("0.8.0", "claude")[0] == str(uvx)
-
-
-def test_resolve_command_uses_venv_when_no_uv(monkeypatch, tmp_path):
-    monkeypatch.setattr(bootstrap.shutil, "which", lambda name: None)
-    monkeypatch.setenv("HOME", str(tmp_path))
+def test_a_partial_venv_is_removed_before_recreating(monkeypatch, tmp_path):
+    monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
+    monkeypatch.setattr(bootstrap, "find_tool", lambda name: "/bin/uv")
+    vdir = tmp_path / "venv"
+    vdir.mkdir()
+    order = []
     monkeypatch.setattr(
-        bootstrap,
-        "venv_server",
-        lambda version, front: ["/v/bin/python", "-m", "rtfm_server"],
-    )
-    assert bootstrap.resolve_command("0.8.0", "claude") == [
-        "/v/bin/python", "-m", "rtfm_server"
-    ]
+        bootstrap.shutil, "rmtree", lambda path, **kw: order.append(("rmtree", path)))
+
+    def create(path, uv):
+        order.append(("create", path))
+        (path / "bin").mkdir(parents=True)
+        (path / "bin" / "python").write_text("")
+
+    monkeypatch.setattr(bootstrap, "_create_venv", create)
+    monkeypatch.setattr(bootstrap, "_install_core", lambda *a: None)
+    bootstrap.venv_server("0.9.2", "claude")
+    assert order == [("rmtree", vdir), ("create", vdir)]
 
 
 def test_main_reports_fatal_to_stderr(monkeypatch, capsys):
@@ -111,6 +147,7 @@ def test_main_reports_fatal_to_stderr(monkeypatch, capsys):
 
 def test_venv_install_keeps_stdout_clean(monkeypatch, tmp_path):
     monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
+    monkeypatch.setattr(bootstrap, "find_tool", lambda name: None)
 
     def fake_create(path, with_pip):
         (path / "bin").mkdir(parents=True, exist_ok=True)
@@ -131,7 +168,7 @@ def test_venv_install_keeps_stdout_clean(monkeypatch, tmp_path):
 def test_venv_creation_failure_keeps_stdout_clean(monkeypatch, tmp_path, capsys):
     """ensurepip's guidance must not reach the MCP stdout stream."""
     monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
-    monkeypatch.setattr(bootstrap.shutil, "which", lambda name: None)
+    monkeypatch.setattr(bootstrap, "find_tool", lambda name: None)
     monkeypatch.setenv("HOME", str(tmp_path))
 
     def broken_create(path, with_pip):
@@ -153,6 +190,7 @@ def test_venv_creation_failure_keeps_stdout_clean(monkeypatch, tmp_path, capsys)
 
 def test_venv_creation_failure_removes_partial_venv_and_retries(monkeypatch, tmp_path):
     monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
+    monkeypatch.setattr(bootstrap, "find_tool", lambda name: None)
     calls = []
 
     def broken_create(path, with_pip):
@@ -173,7 +211,7 @@ def test_venv_creation_failure_removes_partial_venv_and_retries(monkeypatch, tmp
 
 def test_venv_creation_failure_prints_child_output(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
-    monkeypatch.setattr(bootstrap.shutil, "which", lambda name: None)
+    monkeypatch.setattr(bootstrap, "find_tool", lambda name: None)
     monkeypatch.setenv("HOME", str(tmp_path))
 
     def broken_create(path, with_pip):
@@ -261,7 +299,7 @@ def test_main_starts_from_a_versioned_install_directory(monkeypatch, tmp_path):
     shutil.copy(ROOT / "plugins" / "claude" / "bootstrap.py", install / "bootstrap.py")
     module = _load("front_bootstrap_installed", install / "bootstrap.py")
     monkeypatch.setattr(module, "read_version", lambda root: "0.9.0")
-    monkeypatch.setattr(module, "resolve_command", lambda version, front: ["/bin/rtfm-server"])
+    monkeypatch.setattr(module, "venv_server", lambda version, front: ["/bin/rtfm-server"])
     calls = []
     monkeypatch.setattr(module.os, "execvp", lambda file, args: calls.append(file))
 
@@ -273,7 +311,7 @@ def test_main_starts_from_a_versioned_install_directory(monkeypatch, tmp_path):
 def test_main_execs_the_resolved_command(monkeypatch):
     monkeypatch.setattr(bootstrap, "read_version", lambda root: "0.8.0")
     monkeypatch.setattr(
-        bootstrap, "resolve_command", lambda version, front: ["/bin/rtfm-server"]
+        bootstrap, "venv_server", lambda version, front: ["/bin/rtfm-server"]
     )
     calls = []
     monkeypatch.setattr(
