@@ -31,7 +31,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+([-+][0-9A-Za-z.-]+)?$")
-RESTORE = "git checkout pyproject.toml uv.lock plugins/claude/.claude-plugin/plugin.json"
+RESTORE = (
+    "git checkout pyproject.toml uv.lock "
+    "plugins/claude/.claude-plugin/plugin.json plugins/opencode/package.json"
+)
 UV_LOCK_TIMEOUT = 600  # a legit resolution can take minutes; a hung one must not stall
 SELF_CHECK_TIMEOUT = 60  # the real check runs in ms; this bounds a stuck one
 CHECK_RESTORE = (
@@ -130,15 +133,19 @@ def main() -> int:
     new_version = sys.argv[1]
     pyproject = ROOT / "pyproject.toml"
     plugin_json = ROOT / "plugins/claude/.claude-plugin/plugin.json"
+    opencode_json = ROOT / "plugins/opencode/package.json"
 
     pyproject_text = _read_text(pyproject)
     plugin_text = _read_text(plugin_json)
+    opencode_text = _read_text(opencode_json)
     old_version = _toml_version(pyproject, pyproject_text)
     plugin_version = _json_version(plugin_json, plugin_text)
-    if old_version != plugin_version:
+    opencode_version = _json_version(opencode_json, opencode_text)
+    if not (old_version == plugin_version == opencode_version):
         sys.exit(
-            f"ERROR: pyproject.toml ({old_version}) and the Claude manifest ({plugin_version}) "
-            "disagree; run scripts/check_version_consistency.py and fix the drift first"
+            f"ERROR: version declarations disagree: pyproject.toml={old_version}, "
+            f"Claude manifest={plugin_version}, OpenCode manifest={opencode_version}; "
+            "run scripts/check_version_consistency.py and fix the drift first"
         )
     lock_only = new_version == old_version
     if lock_only and _lock_version() == new_version:
@@ -149,9 +156,9 @@ def main() -> int:
     # would destroy uncommitted edits), so it names only uv.lock.
     restore = "git checkout uv.lock" if lock_only else RESTORE
     state_clause = (
-        "uv.lock is stale; pyproject.toml and the Claude manifest were NOT modified"
+        "uv.lock is stale; pyproject.toml and the front manifests were NOT modified"
         if lock_only
-        else "pyproject.toml and the Claude manifest are already edited"
+        else "pyproject.toml and the front manifests are already edited"
     )
     retry = f"python3 scripts/bump_version.py {new_version}"
 
@@ -163,6 +170,12 @@ def main() -> int:
     new_plugin = _plan_edit(
         plugin_json, plugin_text, re.compile(r'^(\s*"version": ")[^"]+(",?)$', re.M), new_version
     )
+    new_opencode = _plan_edit(
+        opencode_json,
+        opencode_text,
+        re.compile(r'^(\s*"version": ")[^"]+(",?)$', re.M),
+        new_version,
+    )
     writes_completed = False
     try:
         try:
@@ -172,6 +185,7 @@ def main() -> int:
             # handler.
             pyproject.write_text(new_pyproject, encoding="utf-8")
             plugin_json.write_text(new_plugin, encoding="utf-8")
+            opencode_json.write_text(new_opencode, encoding="utf-8")
             writes_completed = True
         except OSError as e:
             # A failed write can leave a file truncated — the restore must
@@ -179,7 +193,7 @@ def main() -> int:
             # where the shared `restore` names only uv.lock (both writes
             # succeeded before the uv-phase branches fire).
             sys.exit(
-                f"ERROR: write failed: {e}; pyproject.toml and the Claude manifest may be "
+                f"ERROR: write failed: {e}; pyproject.toml and the front manifests may be "
                 f"half-edited. Restore and retry: {RESTORE} && {retry}"
             )
 
@@ -217,11 +231,11 @@ def main() -> int:
         if lock_only and writes_completed:
             sys.exit(
                 "ERROR: interrupted; uv.lock may be stale and "
-                "pyproject.toml/the Claude manifest were NOT modified. Restore and "
+                "pyproject.toml/the front manifests were NOT modified. Restore and "
                 f"retry: {restore} && {retry}"
             )
         sys.exit(
-            "ERROR: interrupted; pyproject.toml and the Claude manifest may be edited "
+            "ERROR: interrupted; pyproject.toml and the front manifests may be edited "
             f"and uv.lock stale. Restore and retry: {RESTORE} && {retry}"
         )
 
@@ -297,14 +311,14 @@ def main() -> int:
 
     if lock_only:
         print(
-            f"uv.lock regenerated at {new_version}; pyproject.toml and the Claude manifest "
+            f"uv.lock regenerated at {new_version}; pyproject.toml and the front manifests "
             f"already at {new_version}."
         )
         print('Commit suggestion:  git add uv.lock && git commit -m "chore: refresh lockfile"')
     else:
         print(
             f"Bumped {old_version} -> {new_version}: "
-            "pyproject.toml, the Claude manifest, uv.lock."
+            "pyproject.toml, the front manifests, uv.lock."
         )
         print(f'Commit suggestion:  git add -u && git commit -m "release: bump to {new_version}"')
     return 0

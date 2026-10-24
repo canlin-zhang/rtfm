@@ -8,6 +8,7 @@ one test enforces that so the two install paths cannot drift.
 
 import importlib.machinery
 import importlib.util
+import json
 import sys
 import tomllib
 from pathlib import Path
@@ -112,3 +113,46 @@ def test_venv_install_keeps_stdout_clean(monkeypatch, tmp_path):
 
     assert command == [str(tmp_path / "venv" / "bin" / "python"), "-m", "rtfm_server"]
     assert calls and calls[0]["stdout"] is sys.stderr
+
+
+def test_front_bootstraps_are_byte_identical():
+    assert (ROOT / "plugins/claude/bootstrap.py").read_bytes() == (
+        ROOT / "plugins/opencode/bootstrap.py"
+    ).read_bytes()
+
+
+def test_opencode_package_version_matches_pyproject():
+    pkg = json.loads((ROOT / "plugins/opencode/package.json").read_text())
+    assert pkg["version"] == _pyproject_version()
+
+
+def test_opencode_package_depends_on_the_plugin_api():
+    pkg = json.loads((ROOT / "plugins/opencode/package.json").read_text())
+    assert "@opencode/plugin" in pkg["dependencies"]
+
+
+def test_opencode_index_registers_mcp_and_skill():
+    text = (ROOT / "plugins/opencode/index.ts").read_text()
+    assert "ctx.mcp.transform" in text and "ctx.skill.transform" in text
+    assert '"--front", "opencode"' in text
+
+
+def test_opencode_package_lists_runtime_files():
+    pkg = json.loads((ROOT / "plugins/opencode/package.json").read_text())
+    assert set(pkg["files"]) == {"index.ts", "bootstrap.py", "skills/"}
+
+
+def test_skills_share_the_same_prefix():
+    marker = "<!-- front-specific:start -->"
+    shared = (ROOT / "skills/read-the-manual/SKILL.md").read_text().rstrip()
+    claude = (ROOT / "plugins/claude/skills/read-the-manual/SKILL.md").read_text()
+    opencode = (ROOT / "plugins/opencode/skills/read-the-manual/SKILL.md").read_text()
+    assert claude.split(marker)[0].rstrip() == shared
+    assert opencode.split(marker)[0].rstrip() == shared
+
+
+def test_opencode_skill_uses_opencode_tool_names():
+    text = (ROOT / "plugins/opencode/skills/read-the-manual/SKILL.md").read_text()
+    assert "@read-the-manual" in text
+    assert "rtfm_search" in text and "rtfm_read" in text
+    assert "mcp__plugin_rtfm" not in text

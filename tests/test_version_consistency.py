@@ -52,12 +52,14 @@ def make_tree(
     tmp_path,
     version="0.5.1",
     plugin_version=None,
+    opencode_version=None,
     lock_version=None,
     script_deps=PEP723,
     lock_names=("rtfm-mcp",),
 ):
-    """A minimal repo skeleton: the four files the guard reads, all consistent."""
+    """A minimal repo skeleton: the files the guard reads, all consistent."""
     plugin_version = version if plugin_version is None else plugin_version
+    opencode_version = version if opencode_version is None else opencode_version
     lock_version = version if lock_version is None else lock_version
     (tmp_path / "pyproject.toml").write_text(
         f'[project]\nname = "rtfm-mcp"\nversion = "{version}"\ndependencies = [\n'
@@ -84,6 +86,14 @@ def make_tree(
         json.dumps({"name": "rtfm", "version": plugin_version}, indent=2) + "\n",
         encoding="utf-8",
     )
+    (tmp_path / "plugins" / "opencode").mkdir(parents=True)
+    (tmp_path / "plugins" / "opencode" / "package.json").write_text(
+        json.dumps(
+            {"name": "rtfm-opencode-plugin", "version": opencode_version}, indent=2
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     (tmp_path / "rtfm_server.py").write_text(script_deps, encoding="utf-8")
     # The real repo carries the check script next to the bump script; the
     # bump's self-check runs it, so the skeleton must mirror that.
@@ -105,6 +115,9 @@ def run_check(tmp_path, monkeypatch):
     [
         lambda t: (t / "plugins/claude/.claude-plugin" / "plugin.json").write_text(
             json.dumps({"name": "rtfm", "version": "0.5.0"})
+        ),
+        lambda t: (t / "plugins/opencode/package.json").write_text(
+            json.dumps({"name": "rtfm-opencode-plugin", "version": "0.5.0"})
         ),
         lambda t: (t / "uv.lock").write_text(
             (t / "uv.lock").read_text().replace('version = "0.5.1"', 'version = "0.5.0"')
@@ -598,6 +611,8 @@ def test_bump_updates_all_declarations_and_self_checks(tmp_path, monkeypatch):
     # the result must still be valid JSON — the comma-injection regression test.
     plugin = json.loads((tmp_path / "plugins/claude/.claude-plugin" / "plugin.json").read_text())
     assert plugin["version"] == "0.5.2"
+    opencode = json.loads((tmp_path / "plugins/opencode" / "package.json").read_text())
+    assert opencode["version"] == "0.5.2"
 
     assert ["uv", "lock"] in [a for a, _ in calls]
     assert all(cwd == tmp_path for _, cwd in calls)

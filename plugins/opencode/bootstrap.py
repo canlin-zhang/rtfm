@@ -1,0 +1,116 @@
+#!/usr/bin/env python3
+"""Front bootstrap: install the pinned rtfm-mcp core and exec the server.
+
+Each front ships this file byte-for-byte. The version comes from the front's
+own manifest, so the front has one pin and cannot claim a core it will not run.
+Diagnostics go to stderr; stdout belongs to the MCP protocol.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import venv
+from pathlib import Path
+
+CORE_PACKAGE = "rtfm-mcp"
+
+
+def read_version(root: Path) -> str:
+    """The front's version: package.json (OpenCode) or the Claude manifest."""
+    for path in (root / "package.json", root / ".claude-plugin" / "plugin.json"):
+        if not path.is_file():
+            continue
+        try:
+            version = json.loads(path.read_text(encoding="utf-8"))["version"]
+        except (OSError, json.JSONDecodeError, KeyError, TypeError) as e:
+            raise SystemExit(f"[rtfm] FATAL: cannot read {path}: {e}") from e
+        if not isinstance(version, str) or not version.strip():
+            raise SystemExit(f"[rtfm] FATAL: {path} has no version")
+        return version
+    raise SystemExit(
+        f"[rtfm] FATAL: no package.json or .claude-plugin/plugin.json under {root}"
+    )
+
+
+def corpus_home() -> Path:
+    return Path(os.environ.get("RTFM_HOME", Path.home() / ".rtfm")).expanduser()
+
+
+def data_dir(front: str) -> Path:
+    """Claude gets its plugin data dir; both otherwise use the corpus home."""
+    if front == "claude":
+        plugin_data = os.environ.get("CLAUDE_PLUGIN_DATA")
+        if plugin_data:
+            return Path(plugin_data).expanduser()
+    return corpus_home() / "fronts" / front
+
+
+def _venv_python(vdir: Path) -> Path:
+    if os.name == "nt":
+        return vdir / "Scripts" / "python.exe"
+    return vdir / "bin" / "python"
+
+
+def venv_server(version: str, front: str) -> list[str]:
+    """Create/reuse a private venv with the pinned core, return its command."""
+    vdir = data_dir(front) / "venv"
+    py = _venv_python(vdir)
+    stamp = vdir / ".core-version"
+    if not py.exists():
+        venv.create(vdir, with_pip=True)
+    if not stamp.is_file() or stamp.read_text(encoding="utf-8") != version:
+        subprocess.check_call(
+            [
+                str(py),
+                "-m",
+                "pip",
+                "install",
+                "--quiet",
+                "--disable-pip-version-check",
+                f"{CORE_PACKAGE}=={version}",
+            ],
+            stdout=sys.stderr,
+        )
+        stamp.write_text(version, encoding="utf-8")
+    return [str(py), "-m", "rtfm_server"]
+
+
+def resolve_command(version: str, front: str) -> list[str]:
+    if shutil.which("uvx"):
+        return ["uvx", "--from", f"{CORE_PACKAGE}=={version}", "rtfm-server"]
+    if shutil.which("uv"):
+        return ["uv", "tool", "run", "--from", f"{CORE_PACKAGE}=={version}", "rtfm-server"]
+    return venv_server(version, front)
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = list(sys.argv[1:] if argv is None else argv)
+    front = "claude"
+    if "--front" in args:
+        i = args.index("--front")
+        if i + 1 >= len(args):
+            raise SystemExit("[rtfm] FATAL: --front needs a value")
+        front = args[i + 1]
+
+    try:
+        version = read_version(Path(__file__).resolve().parent)
+        command = resolve_command(version, front)
+        # execvp, not execv: uvx/uv are PATH names in the fast path.
+        os.execvp(command[0], command)
+    except SystemExit:
+        raise
+    except Exception as e:  # loud, actionable; never a silent MCP hang
+        sys.stderr.write(
+            f"[rtfm] FATAL: could not start the server: {e}\n"
+            "[rtfm] Recover: install uv (https://docs.astral.sh/uv/) or ensure "
+            "python3 + pip work, then retry.\n"
+        )
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
