@@ -2,13 +2,11 @@
 """rtfm — Read The Full Manual. Local document-corpus search MCP server."""
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
 import re
 import sqlite3
-import stat as stat_mod
 import subprocess
 import time
 from pathlib import Path
@@ -16,9 +14,8 @@ from typing import NamedTuple
 
 from mcp.server.fastmcp import FastMCP
 
-from rtfm import config, extract, git_ops
+from rtfm import config, extract, git_ops, staging
 from rtfm.config import (
-    DEFAULT_EXT_BLOCKLIST,
     MAX_LOCATIONS,
     SCHEMA_VERSION,
     corpus_home,
@@ -34,6 +31,11 @@ from rtfm.manifest import (
     normalize_paths,
     source_from_table,
     validate_source,
+)
+from rtfm.staging import (
+    CacheStats,
+    Indexed,
+    StepResult,
 )
 
 # --- config -----------------------------------------------------------------
@@ -170,171 +172,6 @@ def _auto_reindex_max() -> int:
     if env and env.isdigit():
         return int(env)
     return AUTO_REINDEX_MAX_FILES
-
-
-class Problem(NamedTuple):
-    """One thing that went wrong, attributed to the position it happened to.
-
-    `position` is a relpath and always a relpath — never a content hash. A sha is an
-    internal identity a user cannot act on, and reporting one forces every consumer to
-    convert content counts into file counts. One unit everywhere means nothing converts
-    (ADR 0015)."""
-    position: str
-    reason: str
-
-
-class StepResult(NamedTuple):
-    """What a step let through, and what it could not.
-
-    The happy/partial/empty classification is derivable from these two, so it is a
-    function of a result rather than a field on it. `kept` means what this step passes
-    to the next stage — what survived for most steps, but for extraction (step 3B), both
-    successful and failed results that must persist (2026-09-16 four-step indexing
-    design doc)."""
-    kept: list
-    problems: list[Problem]
-
-
-def _is_clean(r: StepResult) -> bool:
-    return bool(r.kept) and not r.problems
-
-
-def _is_partial(r: StepResult) -> bool:
-    return bool(r.kept) and bool(r.problems)
-
-
-def _is_empty(r: StepResult) -> bool:
-    return not r.kept
-
-
-class _Reached(NamedTuple):
-    """Step 1's product. The mtime is step 1's own stat — the freshness fact, recorded where
-    it is already paid for rather than re-fetched by a second walk (ADR 0015)."""
-    path: Path
-    mtime: float
-
-
-class _Hashed(NamedTuple):
-    """Step 3A's product: a position that gave up its bytes, and their hash."""
-    path: Path
-    sha: str
-    mtime: float
-
-
-class _Scan(NamedTuple):
-    """Steps 1 and 2 together. One value because its two consumers — the freshness handler
-    that decides and the ingest that acts — must see the same walk (ADR 0015)."""
-    reachable: StepResult
-    wanted: list[_Reached]
-
-
-class CacheStats(NamedTuple):
-    """Telemetry about the content-addressed store (ADR 0010), not about failures.
-    Kept apart from step results so a cache detail can never reach a user-facing
-    report."""
-    unique_contents: int
-    newly_extracted: int
-    extraction_skips: int
-    purged: int
-
-
-class Indexed(NamedTuple):
-    """One indexing run. `wanted` is a bare list, not a StepResult: step 2 asks about
-    intent, where rtfm has no standing to call 90% filtered a partial success, so there
-    is nowhere to record a step-2 partial outcome (ADR 0015)."""
-    reachable: StepResult      # step 1  — can rtfm get at these bytes
-    wanted: list               # step 2  — which of them does the manifest want
-    read: StepResult           # step 3A — which gave up their bytes
-    handled: StepResult        # step 3B — which became rows
-    cache: CacheStats
-
-
-_STEP_MESSAGES = {
-    "access": ("COULD NOT OPEN", "could not be reached",
-               "fix the permissions, or point the source elsewhere in {manifest}"),
-    "read":   ("COULD NOT READ", "could not give up their bytes",
-               "fix storage or permissions where the source lives"),
-    "handle": ("COULD NOT HANDLE", "could not be processed",
-               "convert them, or exclude their file types in {manifest}"),
-}
-
-
-def report(src_name: str, result: StepResult, step: str) -> list[str]:
-    """Turn one step's problems into messages. The only place a Problem becomes text.
-
-    Each step names itself and gives its own remedy, because merging them tells a user to
-    convert a file they simply lack permission to open (ADR 0015). The manifest is named
-    only where editing it is the actual fix — step 3A's failure is infrastructure (a failing
-    disk, a permission bit), and telling someone to fix that by editing TOML is the
-    merged-step defect ADR 0015 deletes, wearing a different hat."""
-    if not result.problems:
-        return []
-    tag, what, recover = _STEP_MESSAGES[step]
-    shown = ", ".join(p.position for p in result.problems[:3])
-    more = f" (+{len(result.problems) - 3} more)" if len(result.problems) > 3 else ""
-    distinct = sorted({p.reason for p in result.problems})
-    reasons = ", ".join(distinct[:2])
-    if len(distinct) > 2:
-        reasons += f" (+{len(distinct) - 2} more)"
-    return [f"!!! {tag} '{src_name}' !!! {len(result.problems)} path(s) {what}: "
-            f"{shown}{more} — {reasons}. "
-            f"Recover: {recover.format(manifest=manifest_path())}."]
-
-
-def _report_nothing_selected(src: Source, result: Indexed) -> list[str]:
-    """Step 2's sad path (ADR 0015): step 1 reached something and step 2 kept none of it.
-
-    Derived here from `Indexed`, not stored on a `StepResult` — step 2 returns a bare list on
-    purpose (see `select`): rtfm has no standing to call 90% filtered a partial success, so
-    there is nowhere for a step-2 outcome to live except this comparison of two already-stored
-    results. `reachable.kept` empty is step 1's sad path, not this one — the access report (or,
-    for a merely-empty directory, nothing at all) already says everything there is to say, so
-    the condition below requires step 1 to have reached something."""
-    if not (result.reachable.kept and not result.wanted):
-        return []
-    if src.ext_allowlist is not None:
-        ext_clause = f"ext_allowlist = {', '.join(sorted(src.ext_allowlist)) or '(empty)'}"
-    else:
-        # The effective set is the user's list unioned with rtfm's own defaults, but dumping
-        # all of it is a wall of extensions the user never wrote and cannot act on, burying
-        # the `paths` clause that is often the actual cause. Name what the user declared and
-        # summarize the defaults by count — never hardcoded, so it can't drift when
-        # DEFAULT_EXT_BLOCKLIST grows.
-        n_defaults = len(DEFAULT_EXT_BLOCKLIST)
-        user = sorted(src.ext_blocklist or frozenset())
-        if user:
-            ext_clause = (f"ext_blocklist = {', '.join(user)} "
-                          f"(plus rtfm's {n_defaults} default binary and asset types)")
-        else:
-            ext_clause = (f"ext_blocklist = [] "
-                          f"(rtfm's {n_defaults} default binary and asset types only)")
-    parts = list(src.paths) + [f"!{p}" for p in src.exclude_paths]
-    paths_clause = f" — and paths = {', '.join(parts)}" if parts else ""
-    return [f"!!! NOTHING SELECTED '{src.name}' !!! {len(result.reachable.kept):,} path(s) "
-            f"reachable, none selected. {ext_clause}{paths_clause}. "
-            f"Recover: widen the extension list or the paths in {manifest_path()}."]
-
-
-def report_unsearchable(conn: sqlite3.Connection, src_name: str) -> list[str]:
-    """What cannot be searched here because its content failed extraction. A question about
-    the store, so a caller that ran no pipeline can still ask it; the join fans a failed sha
-    out over every position it lives at (ADR 0015)."""
-    return report(src_name, StepResult([], [
-        Problem(relpath, error or "extraction failed in an earlier run")
-        for relpath, error in conn.execute(
-            "SELECT l.relpath, c.error FROM locations l JOIN contents c "
-            "ON c.sha256 = l.sha256 WHERE l.source = ? AND c.extracted_ok = 0 "
-            "ORDER BY l.relpath", (src_name,))]), "handle")
-
-
-def report_all(conn: sqlite3.Connection, src: Source, result: Indexed) -> list[str]:
-    """Every step's report, in pipeline order. Step 3B's line comes from the store, not from
-    `result.handled`, so a run that indexed nothing still names what is broken and the three
-    callers cannot drift."""
-    return (report(src.name, result.reachable, "access")
-            + _report_nothing_selected(src, result)
-            + report(src.name, result.read, "read")
-            + report_unsearchable(conn, src.name))
 
 
 def _git_missing_error() -> str:
@@ -476,7 +313,7 @@ def _ensure_git_repo_ready(src: Source) -> tuple[Path, str | None]:
     return repo_path, None
 
 
-def _ingest(conn: sqlite3.Connection, src: Source, root: Path, scan: _Scan) -> Indexed:
+def _ingest(conn: sqlite3.Connection, src: Source, root: Path, scan: staging.Scan) -> Indexed:
     """Steps 3A and 3B over an already-scanned source, and sync the index. Takes the `_Scan`
     rather than making one, so a caller that already walked to decide freshness does not walk
     again (ADR 0015).
@@ -490,12 +327,12 @@ def _ingest(conn: sqlite3.Connection, src: Source, root: Path, scan: _Scan) -> I
     existing = {r[0]: (r[1], r[2]) for r in conn.execute(
         "SELECT relpath, sha256, mtime FROM locations WHERE source=?", (source_name,))}
 
-    read = read_bytes_for(scan.wanted, root, existing)
+    read = staging.read_bytes_for(scan.wanted, root, existing)
 
     # A position that failed 3A is still in `wanted` (read_bytes_for reports it as a problem,
     # not by omission), so it keeps its row. A de-selected file is present on disk and must
     # still be purged: presence is step 2's answer, not the filesystem's.
-    vanished = set(existing) - set(_still_present(
+    vanished = set(existing) - set(staging.still_present(
         {rel: mtime for rel, (_sha, mtime) in existing.items()}, scan, root))
     for rel in vanished:
         conn.execute("DELETE FROM locations WHERE source=? AND relpath=?", (source_name, rel))
@@ -504,13 +341,13 @@ def _ingest(conn: sqlite3.Connection, src: Source, root: Path, scan: _Scan) -> I
             "INSERT INTO locations(source, relpath, sha256, mtime) VALUES(?,?,?,?) "
             "ON CONFLICT(source, relpath) DO UPDATE SET "
             "sha256=excluded.sha256, mtime=excluded.mtime",
-            (source_name, _rel(h.path, root), h.sha, h.mtime))
+            (source_name, staging.rel(h.path, root), h.sha, h.mtime))
     conn.commit()
 
     shas_here = {h.sha for h in read.kept}
     already = {r[0] for r in conn.execute("SELECT sha256 FROM contents")}
     need = shas_here - already
-    handled = handle(read.kept, need, root)
+    handled = staging.handle(read.kept, need, root)
 
     for ex in handled.kept:
         kind = ex.rows[0][0] if ex.rows else "line"
@@ -602,9 +439,9 @@ def _reindex_git_repo(conn: sqlite3.Connection, src: Source) -> dict:
                 f"spelling in the manifest, or the ref may not be fetched into the "
                 f"clone yet (run 'git fetch --tags' there); list_sources reports "
                 f"'unknown'.")
-    result = _ingest(conn, src, repo_path, _scan(src, repo_path))
+    result = _ingest(conn, src, repo_path, staging.scan(src, repo_path))
     summary.update(_as_summary(result))
-    summary["warnings"] = report_all(conn, src, result)
+    summary["warnings"] = staging.report_all(conn, src, result)
     return summary
 
 
@@ -623,9 +460,9 @@ def reindex_source(conn: sqlite3.Connection, src: Source) -> dict:
     summary = {"source": src.name, **_as_summary(_EMPTY_INDEXED)}
     if src.path is None or not src.path.exists():
         return summary
-    result = _ingest(conn, src, src.path, _scan(src, src.path))
+    result = _ingest(conn, src, src.path, staging.scan(src, src.path))
     summary.update(_as_summary(result))
-    summary["warnings"] = report_all(conn, src, result)
+    summary["warnings"] = staging.report_all(conn, src, result)
     return summary
 
 
@@ -639,7 +476,7 @@ class _Freshness(NamedTuple):
     changed: int
     stale: bool
     cached: bool
-    scan: _Scan | None
+    scan: staging.Scan | None
 
 
 def _freshness(conn: sqlite3.Connection, src: Source) -> _Freshness:
@@ -676,8 +513,8 @@ def _dir_freshness(conn: sqlite3.Connection, src: Source) -> _Freshness:
         return _Freshness(0, False, False, None)
     indexed = {r[0]: r[1] for r in conn.execute(
         "SELECT relpath, mtime FROM locations WHERE source=?", (src.name,))}
-    scan = _scan(src, src.path)
-    on_disk = _still_present(indexed, scan, src.path)
+    scan = staging.scan(src, src.path)
+    on_disk = staging.still_present(indexed, scan, src.path)
     changed = sum(1 for rel, mtime in on_disk.items() if indexed.get(rel) != mtime)
     # An empty selection reads as fresh, which is correct: nothing to index, nothing to
     # purge. The forced-stale clause that used to carry its report is gone (ADR 0014).
@@ -759,207 +596,6 @@ def _default_branch(path: Path) -> str:
         return cp.stdout.strip().removeprefix("refs/remotes/origin/")
     except RuntimeError:
         return "main"  # sensible fallback
-
-
-def select(positions: list[_Reached], base: Path, src: Source) -> list[_Reached]:
-    """Step 2 (ADR 0015): out of what we can reach, what does the user want?
-
-    Policy, not a handler table — the manifest's `paths` prefixes and its one extension
-    list (ADR 0014). No content is inspected, ever: a file outside the lists was never a
-    candidate, which is not an error and is reported nowhere.
-
-    Returns a bare list, deliberately, not a StepResult. Steps 1, 3A and 3B ask about the
-    world, where "partial" is an observed fact worth reporting. This step asks about
-    intent, and rtfm has no standing to call 90% filtered a partial success — either
-    something survived or nothing did. With no `problems` field there is nowhere to write
-    a step-2 partial-filtering warning, so nobody can.
-    """
-    if src.ext_allowlist is not None:
-        def wanted_ext(ext: str) -> bool:
-            return ext in src.ext_allowlist
-    else:
-        denied = DEFAULT_EXT_BLOCKLIST | (src.ext_blocklist or frozenset())
-
-        def wanted_ext(ext: str) -> bool:
-            return ext not in denied
-
-    def wanted_path(rel: str) -> bool:
-        if any(_under(rel, p) for p in src.exclude_paths):
-            return False
-        return not src.paths or any(_under(rel, p) for p in src.paths)
-
-    return [r for r in positions
-            if wanted_ext(r.path.suffix.lower()) and wanted_path(_rel(r.path, base))]
-
-
-def _under(rel: str, prefix: str) -> bool:
-    """Is `rel` at or beneath this directory prefix? "docs" must not match "docsets/x.md"."""
-    return rel == prefix or rel.startswith(prefix + "/")
-
-
-def access(src: Source, root: Path | None = None) -> StepResult:
-    """Step 1 (ADR 0015): can rtfm get at these bytes?
-
-    Enumerates the source and scans what it finds for readability. `root` overrides `src.path`
-    for a managed git_repo, whose tree lives at its clone.
-
-    `os.walk` with an `onerror` callback, not `rglob`: pathlib catches OSError inside scandir
-    and yields nothing, which is indistinguishable from an empty directory, so a subtree this
-    process cannot enter would vanish with nothing raised and nothing to report.
-
-    Reports unfiltered — we cannot filter what we could not read. An inaccessible directory
-    might hold exactly the files the user wants, and its contents are unknowable from outside,
-    so letting step 2's intent suppress step 1's facts would leave a user writing a manifest
-    against a corpus rtfm silently truncated.
-
-    This scans; it does not read. `os.access` is a stat, and it may assert the negative but
-    only ever suggest the positive — mode bits denying you is conclusive, mode bits allowing
-    you is a hint, and step 3A owns the truth. The stat it already pays for leaves on each
-    `_Reached`, so the freshness handler decides from this walk (ADR 0015)."""
-    base = root if root is not None else src.path
-    if base is None or not base.exists():
-        return StepResult([], [])
-    kept: list[_Reached] = []
-    problems: list[Problem] = []
-
-    def _denied(err: OSError) -> None:
-        if err.filename:
-            problems.append(Problem(
-                _rel(Path(err.filename), base), err.strerror or type(err).__name__))
-
-    for dirpath, dirnames, filenames in os.walk(base, onerror=_denied):
-        d = Path(dirpath)
-        dirnames[:] = [n for n in dirnames if not n.startswith(".")]
-        for name in filenames:
-            if name.startswith("."):
-                continue
-            f = d / name
-            try:
-                st = f.stat()
-            except OSError:
-                continue          # `is_file()` swallowed these too: same silent skip
-            if not stat_mod.S_ISREG(st.st_mode):
-                continue
-            if os.access(f, os.R_OK):
-                kept.append(_Reached(f, st.st_mtime))
-            else:
-                problems.append(Problem(_rel(f, base), "Permission denied"))
-    return StepResult(sorted(kept), problems)
-
-
-def _scan(src: Source, root: Path) -> _Scan:
-    """Steps 1 and 2 over one source, and the only place `access` is called on the indexing
-    path — so a query walks once, however many consumers the result has."""
-    reachable = access(src, root)
-    return _Scan(reachable, select(reachable.kept, root, src))
-
-
-def _rel(p: Path, base: Path) -> str:
-    """A position: the path as the user wrote it, relative to the source root."""
-    try:
-        return p.relative_to(base).as_posix()
-    except ValueError:
-        return str(p)
-
-
-def _still_present(indexed: dict[str, float], scan: _Scan, root: Path) -> dict[str, float]:
-    """Positions this source still has, and their mtimes: what step 2 wants, plus indexed
-    rows sitting behind something step 1 could not enter.
-
-    Unreadable is not absent. A position denied by step 1 never reaches step 2, so asking
-    step 2 alone would call it vanished, delete its row and GC its content because someone
-    ran chmod. Freshness and the ingest both need this exact set — freshness to stop going
-    stale forever, the ingest to stop purging — and one function is how they agree."""
-    present = {_rel(r.path, root): r.mtime for r in scan.wanted}
-    unreachable = {p.position for p in scan.reachable.problems}
-    for rel, mtime in indexed.items():
-        if rel in present or not _shadowed_by(rel, unreachable):
-            continue
-        try:
-            present[rel] = (root / rel).stat().st_mtime
-        except OSError:
-            present[rel] = mtime      # behind an unreachable ancestor: can't re-read
-    return present
-
-
-def _shadowed_by(rel: str, unreachable: set[str]) -> bool:
-    """Does a position step 1 could not reach sit on this relpath's way down?
-
-    `_rel` renders the source root as ".", which is the one position no relpath equals or
-    is prefixed by, so a denied root has to be matched on its own terms. Miss it and every
-    indexed row of that source reads as vanished while every file is still on disk.
-
-    Both reconcilers ask this, and they have to agree: index_source deletes rows on a False
-    and _stale_delta stops converging on one.
-    """
-    return any(u == "." or rel == u or rel.startswith(u + "/") for u in unreachable)
-
-
-def read_bytes_for(positions: list[_Reached], base: Path,
-                   existing: dict[str, tuple[str, float]]) -> StepResult:
-    """Step 3A (ADR 0015): are those bytes even readable?
-
-    Step 1 scanned; this one actually reads. Stale NFS/CIFS handles, EIO, ACLs
-    beyond the mode bits, a file moved underneath us between the scan and the
-    read. Failing here is infrastructure — the user fixes storage or permissions,
-    not files.
-
-    `existing` lets an unchanged position skip re-hashing. It is a cache on the hash, never
-    a gate on the read — and never a gate on the liveness check either: every position is
-    stat'd here even on a cache hit, because a file deleted between step 1's scan and this
-    step is precisely the race this step owns, and skipping the syscall would keep its row
-    and its old sha with nothing reported.
-
-    The mtime compared is step 1's, not this stat's: if a file changes between scan and read
-    we store the older mtime against the new content, so the next run re-reads it once —
-    never the reverse.
-
-    PR2 widens the cache key from mtime to mtime+size."""
-    kept: list[_Hashed] = []
-    problems: list[Problem] = []
-    for r in positions:
-        rel = _rel(r.path, base)
-        try:
-            r.path.stat()                       # liveness: gone since the scan is step 3A's
-            prev = existing.get(rel)
-            sha = prev[0] if prev and prev[1] == r.mtime else \
-                hashlib.sha256(r.path.read_bytes()).hexdigest()
-        except OSError as e:
-            problems.append(Problem(rel, e.strerror or type(e).__name__))
-            continue
-        kept.append(_Hashed(r.path, sha, r.mtime))
-    return StepResult(kept, problems)
-
-
-def handle(read_kept: list[_Hashed], need: set[str], base: Path) -> StepResult:
-    """Step 3B (ADR 0015): can we handle those bytes?
-
-    One handler per format, each reporting in its own terms — a corrupt PDF failed to parse
-    and is not "invalid UTF-8". Decoding belongs inside the markup and plain-text handlers;
-    the PDF handler reads bytes through a parser and never decodes. Failing here is the file:
-    the user converts it or excludes its type.
-
-    Extraction is per content (ADR 0010): N byte-identical positions are one job. But the
-    problems returned are per POSITION, fanned out here at this boundary, so that a position
-    is the only identity anywhere downstream and no consumer ever converts a content count
-    into a file count.
-
-    Reports what THIS run failed to handle, nothing else: what is currently unsearchable is a
-    question about the store, and `report_unsearchable` owns it (ADR 0015)."""
-    by_sha: dict[str, list[str]] = {}
-    jobs: dict[str, str] = {}
-    for h in read_kept:
-        by_sha.setdefault(h.sha, []).append(_rel(h.path, base))
-        if h.sha in need and h.sha not in jobs:
-            jobs[h.sha] = str(h.path)
-
-    kept: list[extract.Extracted] = []
-    problems: list[Problem] = []
-    for ex in extract.extract_many(list(jobs.items())):
-        if ex.error:
-            problems.extend(Problem(pos, ex.error) for pos in sorted(by_sha.get(ex.sha, [])))
-        kept.append(ex)
-    return StepResult(kept, sorted(problems))
 
 
 # --- manifest ---------------------------------------------------------------
@@ -1190,18 +826,18 @@ def search(query: str, source: str | None = None, max_files: int = 20,
                     result = _EMPTY_INDEXED._replace(reachable=verdict.scan.reachable,
                                                      wanted=verdict.scan.wanted)
                 if result is not None:
-                    warnings.extend(report_all(conn, s, result))
+                    warnings.extend(staging.report_all(conn, s, result))
                 continue
             # Not reindexing this query: no scan to report from, but the store answers free.
             if not verdict.stale:
-                warnings.extend(report_unsearchable(conn, s.name))
+                warnings.extend(staging.report_unsearchable(conn, s.name))
                 continue
             if verdict.cached:
                 # The verdict came from the memo (<= STALENESS_TTL old): the reindex
                 # attempt and its failure warning run once per window, not on every
                 # query — a persistently broken or dirty source must not block or
                 # spam every search (ADR 0013).
-                warnings.extend(report_unsearchable(conn, s.name))
+                warnings.extend(staging.report_unsearchable(conn, s.name))
                 continue
             # git_repo — always auto-reindex, budget doesn't apply
             summary = reindex_source(conn, s)
@@ -1433,15 +1069,15 @@ def health_check() -> dict:
             root = src.path if src.path is not None else managed_repo_path(src.name)
             if not root.exists():
                 continue
-            reachable = access(src, root)
-            issues = report(src.name, reachable, "access")
+            reachable = staging.access(src, root)
+            issues = staging.report(src.name, reachable, "access")
             if issues:
                 status["ok"] = False
                 status["issues"].extend(issues)
         # Asking per manifest source also skips rows left behind by a source since deleted
         # from the manifest, with no name filtering of its own.
         for src in sources:
-            issues = report_unsearchable(conn, src.name)
+            issues = staging.report_unsearchable(conn, src.name)
             if issues:
                 status["ok"] = False
                 status["issues"].extend(issues)

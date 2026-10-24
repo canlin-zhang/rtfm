@@ -1,5 +1,4 @@
 # tests/test_index.py
-import hashlib
 import os
 import sqlite3
 import subprocess
@@ -7,6 +6,12 @@ import subprocess
 from conftest import make_git_repo
 
 import rtfm_server as rtfm
+from rtfm import staging
+
+
+def _index(conn, src, root):
+    """Scan then ingest — what the production callers compose."""
+    return rtfm._ingest(conn, src, root, staging.scan(src, root))
 
 
 def test_schema_is_content_addressed(home):
@@ -212,7 +217,7 @@ def test_a_handling_failure_is_reported_on_every_run(home, tmp_path):
     second = _index(conn, src, tmp_path)
     assert [p.position for p in second.handled.problems] == [], (
         "step 3B reports what THIS run failed to handle; nothing was re-extracted")
-    assert any("broken.pdf" in m for m in rtfm.report_all(conn, src, second)), (
+    assert any("broken.pdf" in m for m in staging.report_all(conn, src, second)), (
         "a file that is still broken must still be reported")
     assert second.cache.newly_extracted == 0, "and must not be re-extracted to say so"
 
@@ -443,369 +448,6 @@ def test_default_branch_parses_remote_head(home, tmp_path, git_branch):
     dest = tmp_path / "dest"
     rtfm._git_clone(str(remote), branch, dest, timeout=30)
     assert rtfm._default_branch(dest) == branch
-
-
-def test_step_result_classifies_its_own_outcome():
-    clean = rtfm.StepResult(kept=[1, 2], problems=[])
-    partial = rtfm.StepResult(
-        kept=[1], problems=[rtfm.Problem("a.md", "nope")]
-    )
-    empty = rtfm.StepResult(
-        kept=[], problems=[rtfm.Problem("a.md", "nope")]
-    )
-    assert (
-        rtfm._is_clean(clean),
-        rtfm._is_partial(clean),
-        rtfm._is_empty(clean),
-    ) == (True, False, False)
-    assert (
-        rtfm._is_clean(partial),
-        rtfm._is_partial(partial),
-        rtfm._is_empty(partial),
-    ) == (False, True, False)
-    assert (
-        rtfm._is_clean(empty),
-        rtfm._is_partial(empty),
-        rtfm._is_empty(empty),
-    ) == (False, False, True)
-
-
-def test_a_problem_names_a_position_not_a_hash():
-    p = rtfm.Problem("docs/a.md", "Permission denied")
-    assert p.position == "docs/a.md"
-    assert p._fields == ("position", "reason")
-
-
-def _reached(*paths):
-    """Step 1's product for a test that starts at step 2 or 3A: access() records the mtime
-    it stats while scanning, so nothing downstream stats again (ADR 0015).
-
-    Falls back to 0.0 for a path that isn't on disk — step 2 is policy over names and never
-    looks at content or mtime, so its tests name files they never create."""
-    return [rtfm._Reached(p, p.stat().st_mtime if p.exists() else 0.0) for p in paths]
-
-
-def _index(conn, src, root):
-    """Scan then ingest — what the production callers compose. A wrapper in the server would
-    exist only for these call sites, so it lives here instead."""
-    return rtfm._ingest(conn, src, root, rtfm._scan(src, root))
-
-
-def _selected(src, root=None):
-    """The names step 2 kept, for a test that cares about selection policy only."""
-    return [r.path.name for r in rtfm._scan(src, root or src.path).wanted]
-
-
-def _src(tmp_path, **kw):
-    kw.setdefault("ext_blocklist", frozenset())
-    return rtfm.Source(name="s", type="dir", path=tmp_path, **kw)
-
-
-def test_select_returns_a_bare_list_not_a_step_result(tmp_path):
-    # Step 2 asks about intent, where rtfm has no standing to call 90% filtered a partial
-    # success. A bare list means there is nowhere to record a step-2 partial outcome.
-    t = tmp_path / "c"
-    t.mkdir()
-    (t / "a.md").write_text("a")
-    got = rtfm.select(_reached(t / "a.md"), t, _src(t))
-    assert isinstance(got, list)
-    assert not isinstance(got, rtfm.StepResult)
-
-
-def test_select_keeps_supported_and_drops_the_rest(tmp_path):
-    t = tmp_path / "c"
-    t.mkdir()
-    paths = _reached(t / "a.md", t / "b.png", t / "c.pdf", t / "d.rst")
-    got = rtfm.select(paths, t, _src(t))
-    assert sorted(r.path.name for r in got) == ["a.md", "c.pdf", "d.rst"]
-
-
-def test_allowlist_selects_only_those_types(home, tmp_path):
-    for n in ("a.md", "b.bzl", "c.png", "d.txt"):
-        (tmp_path / n).write_text("x")
-    src = rtfm.Source(name="s", type="dir", path=tmp_path,
-                      ext_allowlist=frozenset({".md", ".bzl"}))
-    got = set(_selected(src))
-    assert got == {"a.md", "b.bzl"}
-
-
-def test_blocklist_selects_everything_but_the_union_with_rtfms_defaults(home, tmp_path):
-    for n in ("a.md", "b.py", "c.png", "d.log"):
-        (tmp_path / n).write_text("x")
-    src = _src(tmp_path, ext_blocklist=frozenset({".log"}))
-    got = set(_selected(src))
-    assert got == {"a.md", "b.py"}          # .png from the default set, .log from the user's
-
-
-def test_an_allowlist_never_consults_the_default_blocklist(home, tmp_path):
-    (tmp_path / "a.png").write_text("x")
-    src = rtfm.Source(name="s", type="dir", path=tmp_path,
-                      ext_allowlist=frozenset({".png"}))
-    assert _selected(src) == ["a.png"]
-
-
-def test_paths_scopes_to_a_prefix(home, tmp_path):
-    (tmp_path / "docs").mkdir()
-    (tmp_path / "src").mkdir()
-    (tmp_path / "docs" / "a.md").write_text("x")
-    (tmp_path / "src" / "b.md").write_text("x")
-    src = _src(tmp_path, paths=("docs",))
-    assert _selected(src) == ["a.md"]
-
-
-def test_an_exclusion_beats_an_inclusion(home, tmp_path):
-    (tmp_path / "docs" / "versions").mkdir(parents=True)
-    (tmp_path / "docs" / "a.md").write_text("x")
-    (tmp_path / "docs" / "versions" / "old.md").write_text("x")
-    src = _src(tmp_path, paths=("docs",), exclude_paths=("docs/versions",))
-    assert _selected(src) == ["a.md"]
-
-
-def test_an_exclusion_alone_scopes_the_whole_tree_minus_that_prefix(home, tmp_path):
-    (tmp_path / "keep").mkdir()
-    (tmp_path / "drop").mkdir()
-    (tmp_path / "keep" / "a.md").write_text("x")
-    (tmp_path / "drop" / "b.md").write_text("x")
-    src = _src(tmp_path, exclude_paths=("drop",))
-    assert _selected(src) == ["a.md"]
-
-
-def test_a_prefix_does_not_match_a_partial_directory_name(home, tmp_path):
-    (tmp_path / "docs").mkdir()
-    (tmp_path / "docsets").mkdir()
-    (tmp_path / "docs" / "a.md").write_text("x")
-    (tmp_path / "docsets" / "b.md").write_text("x")
-    src = _src(tmp_path, paths=("docs",))
-    assert _selected(src) == ["a.md"]
-
-
-def test_an_exclusion_that_is_a_prefix_of_an_inclusion_selects_nothing(home, tmp_path):
-    # paths=("docs/api",) narrows to a subtree that exclude_paths=("docs",) then excludes
-    # wholesale — exclusion wins unconditionally (ADR 0014), so this is the "looks correct,
-    # indexes nothing" shape the ADR warns about, not a bug in either clause alone.
-    (tmp_path / "docs" / "api").mkdir(parents=True)
-    (tmp_path / "docs" / "api" / "a.md").write_text("x")
-    src = _src(tmp_path, paths=("docs/api",), exclude_paths=("docs",))
-    assert _selected(src) == []
-
-
-def test_a_root_level_file_is_not_selected_under_a_restrictive_paths(home, tmp_path):
-    # readme.md sits at the source root, outside the "docs" prefix — paths narrows to a
-    # subtree, it never implicitly keeps the root alongside it.
-    (tmp_path / "readme.md").write_text("x")
-    (tmp_path / "docs").mkdir()
-    (tmp_path / "docs" / "a.md").write_text("x")
-    src = _src(tmp_path, paths=("docs",))
-    assert _selected(src) == ["a.md"]
-
-
-def test_markup_exts_is_not_a_selection_set(home, tmp_path):
-    # The whole point of ADR 0014: a .bzl file is selected by the manifest and handled by
-    # the plain-text routine. TEXT_EXTS deciding both is the defect being deleted.
-    assert not hasattr(rtfm, "TEXT_EXTS")
-    (tmp_path / "r.bzl").write_text("def cc_shared_library(shared_lib_name): pass")
-    src = rtfm.Source(name="s", type="dir", path=tmp_path,
-                      ext_allowlist=frozenset({".bzl"}))
-    conn = rtfm.get_index_db()
-    _index(conn, src, tmp_path)
-    assert rtfm.search_index(conn, "shared_lib_name", source="s")
-
-
-def test_a_dotdot_paths_entry_selects_nothing(home, tmp_path):
-    # Task 1 rejects glob characters in `paths` but not a `..` segment. What's actually
-    # guaranteed: selection can never leave the source root, because the prefix match is
-    # against a relpath _rel produces relative to `base`, and access() only ever enumerates
-    # beneath that root — a relpath can neither render as absolute nor climb above it, so a
-    # ".." entry can't match anything.
-    (tmp_path / "a.md").write_text("x")
-    assert _selected(_src(tmp_path, paths=("..",))) == []
-
-
-def test_a_leading_slash_in_paths_normalizes_to_a_root_anchored_prefix(home, tmp_path):
-    # A leading "/" in a manifest's `paths` entry is root-anchoring, the same convention
-    # .gitignore uses — _normalize_paths strips it, so "/docs" becomes the source-relative
-    # prefix "docs" and DOES select the docs/ subtree. Going through _source_from_table (the
-    # real manifest parsing path), not _src: _src builds a Source directly and bypasses
-    # _normalize_paths, which is why an earlier version of this test could (wrongly) claim
-    # a leading-"/" entry matches nothing.
-    (tmp_path / "docs").mkdir()
-    (tmp_path / "etc").mkdir()
-    (tmp_path / "docs" / "a.md").write_text("x")
-    (tmp_path / "etc" / "passwd.md").write_text("x")
-    src = rtfm._source_from_table({
-        "name": "s", "type": "dir", "path": str(tmp_path),
-        "paths": ["/docs"], "ext_blocklist": [],
-    })
-    assert src.paths == ("docs",)
-    assert _selected(src) == ["a.md"]
-
-
-def test_access_returns_reachable_positions(tmp_path):
-    t = tmp_path / "c"
-    (t / "sub").mkdir(parents=True)
-    (t / "a.md").write_text("a")
-    (t / "sub" / "b.md").write_text("b")
-    s = rtfm.Source(name="s", type="dir", path=t)
-    got = rtfm.access(s)
-    assert sorted(r.path.name for r in got.kept) == ["a.md", "b.md"]
-    assert all(r.mtime == r.path.stat().st_mtime for r in got.kept)   # step 1 carries freshness
-    assert got.problems == []
-    assert rtfm._is_clean(got)
-
-
-def test_access_names_a_directory_it_cannot_enter(tmp_path, unopenable):
-    t = tmp_path / "c"
-    t.mkdir()
-    (t / "a.md").write_text("a")
-    unopenable(t / "vault", directory=True)
-    got = rtfm.access(rtfm.Source(name="s", type="dir", path=t))
-    # rglob swallows this inside scandir and yields nothing, which is indistinguishable from
-    # an empty directory — so the subtree was invisible to every code path.
-    assert rtfm._is_partial(got)
-    assert any("vault" in p.position for p in got.problems)
-
-
-def test_access_names_a_file_it_cannot_open(tmp_path, unopenable):
-    t = tmp_path / "c"
-    t.mkdir()
-    (t / "a.md").write_text("a")
-    unopenable(t / "locked.md")
-    got = rtfm.access(rtfm.Source(name="s", type="dir", path=t))
-    assert any(p.position == "locked.md" for p in got.problems)
-    assert [r.path.name for r in got.kept] == ["a.md"]
-
-
-def test_access_reports_unfiltered(tmp_path, unopenable):
-    # We cannot filter what we could not read — an inaccessible directory might hold exactly
-    # the files the user wants, and its contents are unknowable from outside (ADR 0015).
-    t = tmp_path / "c"
-    t.mkdir()
-    (t / "a.md").write_text("a")
-    unopenable(t / "image.png")
-    got = rtfm.access(rtfm.Source(name="s", type="dir", path=t))
-    assert any(p.position == "image.png" for p in got.problems)
-
-
-def test_read_hashes_what_it_can(tmp_path):
-    t = tmp_path / "c"
-    t.mkdir()
-    (t / "a.md").write_text("alpha")
-    got = rtfm.read_bytes_for(_reached(t / "a.md"), t, {})
-    assert len(got.kept) == 1
-    path, sha, mtime = got.kept[0]
-    assert path.name == "a.md" and len(sha) == 64
-    assert got.problems == []
-
-
-def test_read_names_a_file_deleted_since_the_scan(tmp_path):
-    # Step 1 stats, step 3A reads, and a file can vanish in between — the race ADR 0015 gives
-    # step 3A. A cache hit must not skip the check: reusing the stored sha for a file that is
-    # gone keeps its row and reports nothing, and the index then serves a path that 404s.
-    t = tmp_path / "c"
-    t.mkdir()
-    f = t / "a.md"
-    f.write_text("alpha")
-    scanned = _reached(f)                       # step 1 saw it
-    sha = rtfm.read_bytes_for(scanned, t, {}).kept[0].sha
-    f.unlink()                                  # ...and it goes before step 3A gets there
-    got = rtfm.read_bytes_for(scanned, t, {"a.md": (sha, scanned[0].mtime)})
-    assert got.kept == []
-    assert [p.position for p in got.problems] == ["a.md"]
-
-
-def test_read_keeps_the_scans_mtime_against_new_content(tmp_path):
-    # The mtime stored is step 1's, not a fresh one. A file edited between the scan and the
-    # read is hashed as it is now, but recorded with the older mtime, so the next run sees a
-    # mismatch and re-reads once. The reverse — a newer mtime against older bytes — would
-    # make the stale content read as fresh forever.
-    t = tmp_path / "c"
-    t.mkdir()
-    f = t / "a.md"
-    f.write_text("alpha")
-    scanned = _reached(f)
-    f.write_text("beta")                        # changed after the scan...
-    later = scanned[0].mtime + 10
-    os.utime(f, (later, later))                 # ...landing with a later mtime, deterministically
-    got = rtfm.read_bytes_for(scanned, t, {}).kept[0]
-    assert got.sha == hashlib.sha256(b"beta").hexdigest()      # hashed as it is now
-    assert got.mtime == scanned[0].mtime                       # recorded as it was scanned
-    assert got.mtime < f.stat().st_mtime                       # i.e. older, never newer
-
-
-def test_read_names_a_file_whose_bytes_it_cannot_get(tmp_path, unopenable):
-    t = tmp_path / "c"
-    t.mkdir()
-    (t / "a.md").write_text("alpha")
-    unopenable(t / "locked.md")
-    got = rtfm.read_bytes_for(_reached(t / "a.md", t / "locked.md"), t, {})
-    # One unreadable file used to raise straight out of the reindex.
-    assert [p.position for p in got.problems] == ["locked.md"]
-    assert len(got.kept) == 1
-
-
-def test_read_reuses_a_cached_hash(tmp_path):
-    t = tmp_path / "c"
-    t.mkdir()
-    f = t / "a.md"
-    f.write_text("alpha")
-    mtime = f.stat().st_mtime
-    got = rtfm.read_bytes_for(_reached(f), t, {"a.md": ("cafebabe", mtime)})
-    assert got.kept[0][1] == "cafebabe"      # no re-hash when the key matches
-
-
-def test_handle_fans_a_failed_content_out_to_every_position(home, tmp_path):
-    # Three byte-identical corrupt files are one extraction and three broken files. Reporting
-    # the sha would make every consumer convert contents into files — the conversion that
-    # printed a content count as "N file(s)".
-    t = tmp_path / "c"
-    t.mkdir()
-    bad = b"%PDF-1.4 not really a pdf" + bytes(range(256))
-    for n in ("v1.pdf", "v2.pdf", "v3.pdf"):
-        (t / n).write_bytes(bad)
-    read = rtfm.read_bytes_for(_reached(t / "v1.pdf", t / "v2.pdf", t / "v3.pdf"), t, {})
-    sha = read.kept[0][1]
-    got = rtfm.handle(read.kept, {sha}, t)
-    assert sorted(p.position for p in got.problems) == ["v1.pdf", "v2.pdf", "v3.pdf"]
-    assert all("pdf" not in p.reason.lower() or "utf-8" not in p.reason.lower()
-               for p in got.problems)          # reported in the handler's own terms
-
-
-def test_ingest_returns_each_step_s_result(home, tmp_path):
-    t = tmp_path / "c"
-    t.mkdir()
-    (t / "a.md").write_text("alpha keyword")
-    conn = rtfm.get_index_db()
-    got = _index(conn, rtfm.Source(name="s", type="dir", path=t), t)
-    assert isinstance(got, rtfm.Indexed)
-    assert [r.path.name for r in got.reachable.kept] == ["a.md"]
-    assert [r.path.name for r in got.wanted] == ["a.md"]
-    assert len(got.read.kept) == 1
-    assert got.cache.unique_contents == 1
-
-
-def test_an_unreadable_file_is_not_treated_as_vanished(home, tmp_path, unopenable):
-    # Failing a step is not the same as ceasing to exist. Reconciling against what SUCCEEDED
-    # would delete the row and GC the content — losing indexed content because a file's
-    # permissions changed.
-    t = tmp_path / "c"
-    t.mkdir()
-    f = t / "a.md"
-    f.write_text("findable keyword")
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="s", type="dir", path=t)
-    _index(conn, src, t)
-    assert rtfm.search_index(conn, "keyword", source="s")
-    f.chmod(0o000)
-    try:
-        got = _index(conn, src, t)
-        assert got.cache.purged == 0
-        rows = {r[0] for r in conn.execute(
-            "SELECT relpath FROM locations WHERE source='s'")}
-        assert rows == {"a.md"}
-    finally:
-        f.chmod(0o644)
-
-
 def test_a_file_under_an_unreadable_directory_is_not_treated_as_vanished(
         home, tmp_path, unopenable):
     # Asking the filesystem about a path under a directory it cannot enter gets no usable
@@ -881,7 +523,7 @@ def test_a_denied_source_root_does_not_purge_the_whole_source(home, tmp_path, un
     _index(conn, src, t)
     unopenable(t, directory=True)
     got = _index(conn, src, t)
-    assert got.reachable.problems == [rtfm.Problem(position=".", reason="Permission denied")]
+    assert got.reachable.problems == [staging.Problem(position=".", reason="Permission denied")]
     assert got.cache.purged == 0
     rows = {r[0] for r in conn.execute("SELECT relpath FROM locations WHERE source='s'")}
     assert rows == {"a.md"}
@@ -1004,7 +646,7 @@ def test_a_source_selecting_nothing_is_fresh_and_still_reported(home, tmp_path):
     assert verdict.scan.wanted == []                                       # wanted none of it
     result = rtfm._EMPTY_INDEXED._replace(reachable=verdict.scan.reachable,
                                           wanted=verdict.scan.wanted)
-    assert any("NOTHING SELECTED" in m for m in rtfm.report_all(conn, src, result))
+    assert any("NOTHING SELECTED" in m for m in staging.report_all(conn, src, result))
 
 
 def test_a_non_utf8_file_fails_loudly_rather_than_indexing_mangled(home, tmp_path):
@@ -1034,81 +676,37 @@ def test_errors_replace_is_gone_from_the_source():
     assert 'errors="replace"' not in pathlib.Path(rtfm.__file__).read_text()
 
 
-def test_nothing_selected_names_the_reachable_count_and_the_policy(home, tmp_path):
-    # A manifest whose extension list matches nothing indexes zero files and, before this,
-    # gave no reason (ADR 0015's opening example).
-    d = tmp_path / "c"
-    d.mkdir()
-    for n in ("a.md", "b.md", "c.md"):
-        (d / n).write_text("x")
-    src = rtfm.Source(name="bazel", type="dir", path=d, ext_allowlist=frozenset({".nomatch"}))
-    conn = rtfm.get_index_db()
-    result = _index(conn, src, d)
-    [msg] = rtfm.report_all(conn, src, result)
-    assert "NOTHING SELECTED 'bazel'" in msg
-    assert "3 path(s) reachable" in msg
-    assert "ext_allowlist = .nomatch" in msg
-
-
-def test_nothing_selected_names_the_paths_policy_too(home, tmp_path):
-    (tmp_path / "docs").mkdir()
-    (tmp_path / "docs" / "a.md").write_text("x")
-    src = rtfm.Source(name="s", type="dir", path=tmp_path, paths=("nope",),
-                      ext_blocklist=frozenset())
-    conn = rtfm.get_index_db()
-    result = _index(conn, src, tmp_path)
-    [msg] = rtfm.report_all(conn, src, result)
-    assert "paths = nope" in msg
-
-
-def test_nothing_selected_in_blocklist_mode_summarizes_defaults_by_count(home, tmp_path):
-    # The effective blocklist is the user's list unioned with rtfm's ~70 defaults. Dumping
-    # the whole union produced a 700-character wall the user could not act on and that
-    # buried the `paths` clause (fix round 1: a real defect, not a style choice). Name what
-    # the user wrote; summarize the rest by count, and never show a default extension the
-    # user never declared.
-    d = tmp_path / "c"
-    d.mkdir()
-    (d / "a.png").write_bytes(b"x")          # blocked by rtfm's default set, not by the user
-    src = rtfm.Source(name="s", type="dir", path=d, ext_blocklist=frozenset({".md"}))
-    conn = rtfm.get_index_db()
-    result = _index(conn, src, d)
-    [msg] = rtfm.report_all(conn, src, result)
-    assert "ext_blocklist = .md" in msg
-    assert f"rtfm's {len(rtfm.DEFAULT_EXT_BLOCKLIST)} default" in msg
-    assert ".png" not in msg                 # the user never wrote it; the wall is gone
-
-
-def test_nothing_selected_in_blocklist_mode_with_an_empty_user_list(home, tmp_path):
-    d = tmp_path / "c"
-    d.mkdir()
-    (d / "a.png").write_bytes(b"x")
-    src = rtfm.Source(name="s", type="dir", path=d, ext_blocklist=frozenset())
-    conn = rtfm.get_index_db()
-    result = _index(conn, src, d)
-    [msg] = rtfm.report_all(conn, src, result)
-    assert "ext_blocklist = []" in msg
-    assert f"rtfm's {len(rtfm.DEFAULT_EXT_BLOCKLIST)} default" in msg
-    assert ".png" not in msg
-
-
-def test_an_empty_source_directory_selects_silently(home, tmp_path):
-    # An empty folder is not a manifest error — reachable.kept is empty too, which is step
-    # 1's story (silence), never step 2's.
-    d = tmp_path / "c"
-    d.mkdir()
-    src = rtfm.Source(name="s", type="dir", path=d, ext_allowlist=frozenset({".md"}))
-    conn = rtfm.get_index_db()
-    result = _index(conn, src, d)
-    assert rtfm.report_all(conn, src, result) == []
-
-
-def test_an_unreadable_root_reports_access_only_not_nothing_selected(home, tmp_path, unopenable):
+def test_an_unreadable_file_is_not_treated_as_vanished(home, tmp_path, unopenable):
+    # Failing a step is not the same as ceasing to exist. Reconciling against what SUCCEEDED
+    # would delete the row and GC the content — losing indexed content because a file's
+    # permissions changed.
     t = tmp_path / "c"
-    unopenable(t, directory=True)
-    src = rtfm.Source(name="s", type="dir", path=t, ext_allowlist=frozenset({".md"}))
+    t.mkdir()
+    f = t / "a.md"
+    f.write_text("findable keyword")
     conn = rtfm.get_index_db()
-    result = _index(conn, src, t)
-    msgs = rtfm.report_all(conn, src, result)
-    assert any("COULD NOT OPEN" in m for m in msgs)
-    assert not any("NOTHING SELECTED" in m for m in msgs)
+    src = rtfm.Source(name="s", type="dir", path=t)
+    _index(conn, src, t)
+    assert rtfm.search_index(conn, "keyword", source="s")
+    f.chmod(0o000)
+    try:
+        got = _index(conn, src, t)
+        assert got.cache.purged == 0
+        rows = {r[0] for r in conn.execute(
+            "SELECT relpath FROM locations WHERE source='s'")}
+        assert rows == {"a.md"}
+    finally:
+        f.chmod(0o644)
+
+
+def test_ingest_returns_each_step_s_result(home, tmp_path):
+    t = tmp_path / "c"
+    t.mkdir()
+    (t / "a.md").write_text("alpha keyword")
+    conn = rtfm.get_index_db()
+    got = _index(conn, rtfm.Source(name="s", type="dir", path=t), t)
+    assert isinstance(got, staging.Indexed)
+    assert [r.path.name for r in got.reachable.kept] == ["a.md"]
+    assert [r.path.name for r in got.wanted] == ["a.md"]
+    assert len(got.read.kept) == 1
+    assert got.cache.unique_contents == 1
