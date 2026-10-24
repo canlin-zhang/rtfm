@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""rtfm launcher: prefer `uv run`, else a self-managed venv. Deps come from the
-server's PEP-723 block so there is one source of truth (ADR 0009)."""
+"""rtfm launcher: prefer `uv run`, else a self-managed venv.
+
+Dependencies come from pyproject.toml (the single source of truth). The venv
+path installs the project editable, so `python -m rtfm_server` runs the same
+code and entry point as the published package.
+"""
 import hashlib
 import os
-import re
 import shutil
 import subprocess
 import sys
+import tomllib
 import venv
 from pathlib import Path
 
@@ -14,22 +18,13 @@ ROOT = Path(__file__).resolve().parent.parent
 SERVER = ROOT / "rtfm_server.py"
 
 
-def parse_pep723_deps(server: Path) -> list[str]:
-    # The repo files are UTF-8 by contract; the server module's docstring
-    # carries em-dashes, and a locale read under an ASCII locale would break
-    # the launch (the FATAL handler below reports it, but the venv fallback
-    # would fail entirely).
-    text = server.read_text(encoding="utf-8")
-    block = re.search(r"# /// script\n(.*?)# ///", text, re.S)
-    if not block:
-        return []
-    # Strip PEP-723 comment prefix ("# " or "#") from each line before parsing
-    content = re.sub(r"^# ?", "", block.group(1), flags=re.MULTILINE)
-    # Anchor the closing bracket to start-of-line so "mcp[cli]" doesn't terminate early
-    dep_block = re.search(r"dependencies = \[(.*?)^\]", content, re.S | re.MULTILINE)
-    if not dep_block:
-        return []
-    return re.findall(r'"([^"]+)"', dep_block.group(1))
+def project_deps(root: Path) -> list[str]:
+    data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    return list(data["project"]["dependencies"])
+
+
+def deps_stamp(deps: list[str]) -> str:
+    return hashlib.sha256("\n".join(sorted(deps)).encode()).hexdigest()[:12]
 
 
 def _corpus_home() -> Path:
@@ -37,18 +32,30 @@ def _corpus_home() -> Path:
 
 
 def run_with_venv() -> None:
-    deps = parse_pep723_deps(SERVER)
+    deps = project_deps(ROOT)
     vdir = _corpus_home() / "venv"
     py = vdir / "bin" / "python"
     stamp = vdir / ".deps"
-    key = hashlib.sha256("\n".join(sorted(deps)).encode()).hexdigest()[:12]
+    key = deps_stamp(deps)
     if not py.exists():
         vdir.parent.mkdir(parents=True, exist_ok=True)
         venv.create(vdir, with_pip=True)
-    if not stamp.exists() or stamp.read_text() != key:
-        subprocess.check_call([str(py), "-m", "pip", "install", "--quiet", *deps])
-        stamp.write_text(key)
-    os.execv(str(py), [str(py), str(SERVER)])
+    if not stamp.exists() or stamp.read_text(encoding="utf-8") != key:
+        subprocess.check_call(
+            [
+                str(py),
+                "-m",
+                "pip",
+                "install",
+                "--quiet",
+                "--disable-pip-version-check",
+                "-e",
+                str(ROOT),
+            ],
+            stdout=sys.stderr,
+        )
+        stamp.write_text(key, encoding="utf-8")
+    os.execv(str(py), [str(py), "-m", "rtfm_server"])
 
 
 def main() -> None:

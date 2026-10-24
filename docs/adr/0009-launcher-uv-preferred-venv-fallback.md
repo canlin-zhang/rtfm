@@ -9,10 +9,11 @@ because a static command can't branch on what's installed. The launcher:
 
 - uses `uv run` when `uv` is on PATH — the fast path, unchanged for environments that ship
   uv (e.g. CI images or managed dev environments that preinstall it);
-- otherwise creates/reuses a venv under `~/.rtfm/venv`, pip-installs the deps, and runs the
-  server with it (cached; reinstalls only when deps change);
-- reads the dependency list from the server's PEP-723 `# /// script` block, so there is one
-  source of truth for deps;
+- otherwise creates/reuses a venv under `~/.rtfm/venv`, installs the project editable
+  (`pip install -e .`), and runs `python -m rtfm_server` (cached; reinstalls when the
+  pyproject dependency set changes);
+- reads the dependency list from `pyproject.toml`, the single source of truth for deps
+  (ADR 0017);
 - fails loudly and actionably if neither uv nor python3+pip is usable — never a silent hang.
 
 _Distribution note (ADR 0016):_ fronts no longer carry the server file. A thin

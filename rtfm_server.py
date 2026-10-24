@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.11"
-# dependencies = [
-#   "mcp[cli]>=1.28.1,<2",
-#   "pymupdf",
-#   "pypdf",
-# ]
-# ///
 """rtfm — Read The Full Manual. Local document-corpus search MCP server."""
 from __future__ import annotations
 

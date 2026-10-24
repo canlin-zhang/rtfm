@@ -34,9 +34,9 @@ officially supported.
 
 ## Hard structural rules
 
-1. **`rtfm_server.py` stays a single file.** Its PEP-723 `# /// script` block + the
-   `uv run script.py` distribution model are per-file. Do **not** split it into a package.
-   It is organized into labelled sections (`config` / `index` / `manifest` / `extractors` /
+1. **`rtfm_server.py` stays a single file until the package split (ADR 0017).**
+   Dependencies come from `pyproject.toml`; there is no PEP-723 block. The file is
+   organized into labelled sections (`config` / `index` / `manifest` / `extractors` /
    `tools`); keep logic in importable module-level functions.
 2. **MCP tools are thin `@mcp.tool()` wrappers** over those plain functions, so tests call
    the helpers directly. The `mcp = FastMCP("rtfm")` line must precede the tool defs; the

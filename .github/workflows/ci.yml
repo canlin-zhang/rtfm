@@ -53,11 +53,10 @@ jobs:
 
   consistency:
     # The release version lives in pyproject.toml, uv.lock, and both front
-    # manifests; the dependency list is mirrored in pyproject.toml and the
-    # PEP-723 block. Nothing mechanical linked them, and drift broke the 0.5.1
-    # launch fix (versions lagged; the lock resolved mcp below its pin). This
-    # job guards both: the script compares declared strings, uv lock --check
-    # compares resolved ones.
+    # manifests; dependencies have one source, pyproject.toml. Nothing mechanical
+    # linked the version values, and drift broke the 0.5.1 launch fix (versions
+    # lagged). This job guards both: the script compares declared strings,
+    # uv lock --check compares resolved ones.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

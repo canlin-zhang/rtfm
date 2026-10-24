@@ -10,7 +10,12 @@ launch = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(launch)
 
 
-def test_parse_pep723_deps_reads_server_block():
-    deps = launch.parse_pep723_deps(ROOT / "rtfm_server.py")
-    assert "pymupdf" in deps and "pypdf" in deps
+def test_project_deps_reads_pyproject():
+    deps = launch.project_deps(ROOT)
     assert any(d.startswith("mcp") for d in deps)
+    assert "pymupdf" in deps and "pypdf" in deps
+
+
+def test_deps_stamp_is_order_independent():
+    assert launch.deps_stamp(["a", "b"]) == launch.deps_stamp(["b", "a"])
+    assert launch.deps_stamp(["a"]) != launch.deps_stamp(["a", "b"])
