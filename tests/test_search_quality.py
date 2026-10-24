@@ -2,6 +2,7 @@
 import fitz
 
 import rtfm_server as rtfm
+from rtfm import config, index, manifest
 
 
 def _titled_pdf(path, title, toc_titles, pages):
@@ -21,8 +22,8 @@ def test_pdf_title_and_headings_indexed(home, tmp_path):
     d.mkdir()
     _titled_pdf(d / "spec.pdf", "Widget Protocol Specification",
                 ["Introduction", "Flit Format"], ["alpha body text", "more text"])
-    conn = rtfm.get_index_db()
-    rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    conn = index.get_index_db()
+    index.reindex_source(conn, manifest.Source("docs", "dir", d))
     row = conn.execute("SELECT title, headings FROM doc_fts").fetchone()
     assert row is not None
     assert "Widget Protocol Specification" in row[0]
@@ -33,8 +34,8 @@ def test_text_title_and_headings_indexed(home, tmp_path):
     d = tmp_path / "docs"
     d.mkdir()
     (d / "guide.md").write_text("# Gadget Manual\n\nintro\n\n## Setup\nsteps\n")
-    conn = rtfm.get_index_db()
-    rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    conn = index.get_index_db()
+    index.reindex_source(conn, manifest.Source("docs", "dir", d))
     row = conn.execute("SELECT title, headings FROM doc_fts").fetchone()
     assert "Gadget Manual" in row[0]
     assert "Setup" in row[1]
@@ -50,8 +51,8 @@ def test_title_match_ranks_bearing_doc_first(home, tmp_path):
     # Incidental doc: unrelated title; body mentions the terms several times.
     _titled_pdf(d / "incidental.pdf", "Misc Notes", [],
                 ["flux capacitor here", "flux capacitor again", "flux capacitor more"])
-    conn = rtfm.get_index_db()
-    rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    conn = index.get_index_db()
+    index.reindex_source(conn, manifest.Source("docs", "dir", d))
     hits = rtfm.search_index(conn, "flux capacitor")
     assert hits
     assert hits[0]["locations"][0]["relpath"] == "bearer.pdf"      # bearing doc ranks first
@@ -64,8 +65,8 @@ def test_body_hit_carries_doc_title(home, tmp_path):
     d.mkdir()
     _titled_pdf(d / "spec.pdf", "Widget Protocol Specification", [],
                 ["the gizmo defines flits clearly"])
-    conn = rtfm.get_index_db()
-    rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    conn = index.get_index_db()
+    index.reindex_source(conn, manifest.Source("docs", "dir", d))
     hits = rtfm.search_index(conn, "gizmo")                        # body-only match
     assert hits and "Widget Protocol Specification" in hits[0]["title"]
 
@@ -74,8 +75,8 @@ def test_fuzzy_marker_on_or_fallback(home, tmp_path):
     d = tmp_path / "docs"
     d.mkdir()
     (d / "a.md").write_text("the kitchen has a sink on one line\n")
-    conn = rtfm.get_index_db()
-    rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    conn = index.get_index_db()
+    index.reindex_source(conn, manifest.Source("docs", "dir", d))
     precise = rtfm.search_index(conn, "kitchen sink")              # both terms co-occur -> AND
     assert precise and precise[0]["fuzzy"] is False
     fuzzy = rtfm.search_index(conn, "kitchen zephyr")              # zephyr absent: AND empty -> OR
@@ -86,10 +87,10 @@ def test_search_tool_flags_fuzzy(home, tmp_path):
     d = tmp_path / "docs"
     d.mkdir()
     (d / "a.md").write_text("the kitchen has a sink\n")
-    rtfm.load_manifest()
+    manifest.load_manifest()
     rtfm.reindex(source=None)
     # put the doc in the default source so the tool searches it
-    (rtfm.default_source_dir() / "a.md").write_text("the kitchen has a sink\n")
+    (config.default_source_dir() / "a.md").write_text("the kitchen has a sink\n")
     out = rtfm.search(query="kitchen zephyr")
     assert out.get("fuzzy") is True
 
@@ -100,8 +101,8 @@ def test_heading_only_match_classified_as_heading(home, tmp_path):
     d = tmp_path / "docs"
     d.mkdir()
     _titled_pdf(d / "x.pdf", "Flux Capacitor Notes", ["Cap Reference"], ["unrelated body"])
-    conn = rtfm.get_index_db()
-    rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    conn = index.get_index_db()
+    index.reindex_source(conn, manifest.Source("docs", "dir", d))
     hits = rtfm.search_index(conn, "cap")            # 'cap' is a heading token, not in 'capacitor'
     assert hits and hits[0]["locator_kind"] == "heading"
 
@@ -112,8 +113,8 @@ def test_frontmatter_not_treated_as_title(home, tmp_path):
     d = tmp_path / "docs"
     d.mkdir()
     (d / "g.md").write_text("---\ntitle: meta\nauthor: bar\n---\n\n# Real Heading\n\nbody\n")
-    conn = rtfm.get_index_db()
-    rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    conn = index.get_index_db()
+    index.reindex_source(conn, manifest.Source("docs", "dir", d))
     assert conn.execute("SELECT title FROM doc_fts").fetchone()[0] == "Real Heading"
 
 
@@ -124,8 +125,8 @@ def test_title_match_outranks_heading_match(home, tmp_path):
     d.mkdir()
     _titled_pdf(d / "a.pdf", "Zephyr Protocol", [], ["body one"])             # match in title
     _titled_pdf(d / "b.pdf", "Other Doc", ["Zephyr Appendix"], ["body two"])  # match in heading
-    conn = rtfm.get_index_db()
-    rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    conn = index.get_index_db()
+    index.reindex_source(conn, manifest.Source("docs", "dir", d))
     hits = rtfm.search_index(conn, "zephyr")
     assert hits[0]["locations"][0]["relpath"] == "a.pdf"
     assert hits[0]["locator_kind"] == "title"
@@ -136,8 +137,8 @@ def test_pdf_title_falls_back_to_page_text(home, tmp_path):
     d = tmp_path / "docs"
     d.mkdir()
     _titled_pdf(d / "x.pdf", None, [], ["Quokka Reference Manual", "body text here"])
-    conn = rtfm.get_index_db()
-    rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    conn = index.get_index_db()
+    index.reindex_source(conn, manifest.Source("docs", "dir", d))
     assert "Quokka Reference Manual" in conn.execute("SELECT title FROM doc_fts").fetchone()[0]
 
 
@@ -145,11 +146,11 @@ def test_doc_fts_purged_when_file_removed(home, tmp_path):
     d = tmp_path / "docs"
     d.mkdir()
     (d / "g.md").write_text("# Gadget Manual\nbody\n")
-    conn = rtfm.get_index_db()
-    rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    conn = index.get_index_db()
+    index.reindex_source(conn, manifest.Source("docs", "dir", d))
     assert conn.execute("SELECT COUNT(*) FROM doc_fts").fetchone()[0] == 1
     (d / "g.md").unlink()
-    rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    index.reindex_source(conn, manifest.Source("docs", "dir", d))
     assert conn.execute("SELECT COUNT(*) FROM doc_fts").fetchone()[0] == 0    # GC'd with the file
 
 
@@ -160,9 +161,9 @@ def test_title_ranking_respects_source_filter(home, tmp_path):
     db_ = tmp_path / "b"
     db_.mkdir()
     (db_ / "y.md").write_text("nothing relevant\n")
-    conn = rtfm.get_index_db()
-    rtfm.reindex_source(conn, rtfm.Source("a", "dir", da))
-    rtfm.reindex_source(conn, rtfm.Source("b", "dir", db_))
+    conn = index.get_index_db()
+    index.reindex_source(conn, manifest.Source("a", "dir", da))
+    index.reindex_source(conn, manifest.Source("b", "dir", db_))
     assert rtfm.search_index(conn, "quasar", source="a")             # title hit in its own source
     assert rtfm.search_index(conn, "quasar", source="b") == []       # scoped out of source b
 
@@ -175,8 +176,8 @@ def test_body_docs_not_starved_by_dedup(home, tmp_path):
     (d / "a.md").write_text("# Widget Guide\n" + "\n".join(["widget"] * 300))  # title + ~6 chunks
     (d / "b.md").write_text("widget appears here\n")
     (d / "c.md").write_text("widget also here\n")
-    conn = rtfm.get_index_db()
-    rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    conn = index.get_index_db()
+    index.reindex_source(conn, manifest.Source("docs", "dir", d))
     hits = rtfm.search_index(conn, "widget", limit=2)
     assert len({h["sha256"] for h in hits}) == 2          # A (title) + a body doc, not just A
 
@@ -186,8 +187,8 @@ def test_sane_title_rejects_authoring_artifacts(home, tmp_path):
     d = tmp_path / "docs"
     d.mkdir()
     _titled_pdf(d / "x.pdf", "Microsoft Word - draft.docx", [], ["Quokka Reference Manual", "body"])
-    conn = rtfm.get_index_db()
-    rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    conn = index.get_index_db()
+    index.reindex_source(conn, manifest.Source("docs", "dir", d))
     assert conn.execute("SELECT title FROM doc_fts").fetchone()[0] == "Quokka Reference Manual"
 
 
@@ -198,18 +199,18 @@ def test_serial_extraction_path_indexes_doc_signal(home, tmp_path, monkeypatch):
     d.mkdir()
     (d / "a.md").write_text("# Alpha Guide\nbody one\n")
     (d / "b.md").write_text("# Bravo Guide\nbody two\n")          # 2 distinct jobs, run serially
-    conn = rtfm.get_index_db()
-    rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    conn = index.get_index_db()
+    index.reindex_source(conn, manifest.Source("docs", "dir", d))
     titles = {r[0] for r in conn.execute("SELECT title FROM doc_fts")}
     assert titles == {"Alpha Guide", "Bravo Guide"}
 
 
 def test_search_warns_on_index_corruption(home, tmp_path):
     """A corrupt/missing FTS table surfaces a reindex warning, not a silent empty result."""
-    rtfm.load_manifest()
-    (rtfm.default_source_dir() / "a.md").write_text("widget here\n")
+    manifest.load_manifest()
+    (config.default_source_dir() / "a.md").write_text("widget here\n")
     rtfm.reindex(source=None)
-    conn = rtfm.get_index_db()
+    conn = index.get_index_db()
     conn.execute("DROP TABLE content_fts")                       # simulate index corruption
     conn.commit()
     out = rtfm.search(query="widget")
@@ -224,7 +225,7 @@ def test_snippet_picks_best_coverage_line(home, tmp_path):
         "widget alone here\n"
         "the widget protocol together\n"          # the only line with BOTH terms
         "protocol alone here\n")
-    conn = rtfm.get_index_db()
-    rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    conn = index.get_index_db()
+    index.reindex_source(conn, manifest.Source("docs", "dir", d))
     hits = rtfm.search_index(conn, "widget protocol")
     assert "widget protocol together" in hits[0]["snippet"]

@@ -11,7 +11,7 @@ import pytest
 from conftest import make_git_repo
 
 import rtfm_server as rtfm
-from rtfm import git_ops
+from rtfm import config, git_ops, index, manifest
 
 # --- reindex_source for git_repo ---
 
@@ -29,10 +29,10 @@ def test_reindex_git_repo_linked_clean_indexes_files(home, tmp_path):
     dest = tmp_path / "dest"
     git_ops.clone(str(remote), "main", dest, timeout=30)
 
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref="main")
-    summary = rtfm.reindex_source(conn, src)
+    summary = index.reindex_source(conn, src)
     assert summary["files_seen"] >= 1
     assert summary["newly_extracted"] >= 1
 
@@ -65,10 +65,10 @@ def test_reindex_git_repo_dirty_refuses(home, tmp_path):
     # Dirty the tree
     (dest / "guide.md").write_text("locally modified content\n")
 
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref="main")
-    summary = rtfm.reindex_source(conn, src)
+    summary = index.reindex_source(conn, src)
     assert "error" in summary
     assert "dirty" in summary.get("error", "").lower()
     assert "guide.md" in summary.get("error", "")
@@ -103,10 +103,10 @@ def test_reindex_git_repo_linked_ahead_indexes_without_mutating(home, tmp_path):
     origin_before = git_ops.run(["rev-parse", "origin/main"], cwd=dest,
                               timeout=10).stdout.strip()
 
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref="main")
-    summary = rtfm.reindex_source(conn, src)
+    summary = index.reindex_source(conn, src)
     assert "error" not in summary
     assert summary["files_seen"] >= 1
     assert summary["newly_extracted"] >= 1
@@ -130,14 +130,14 @@ def test_reindex_git_repo_managed_clones_and_indexes(home, tmp_path):
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "init"], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
 
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref="main")
-    summary = rtfm.reindex_source(conn, src)
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", url=str(remote), ref="main")
+    summary = index.reindex_source(conn, src)
     assert summary["files_seen"] >= 1
     assert summary["newly_extracted"] >= 1
 
     # Verify clone was created at the managed path
-    managed = rtfm._managed_repo_path("specs")
+    managed = config.managed_repo_path("specs")
     assert managed.is_dir()
     assert (managed / ".git").is_dir()
 
@@ -157,9 +157,9 @@ def test_read_document_text_managed_git_repo_resolves_clone(home, tmp_path):
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "init"], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
 
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref="main")
-    rtfm.reindex_source(conn, src)
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", url=str(remote), ref="main")
+    index.reindex_source(conn, src)
 
     text = rtfm.read_document_text(src, "ref.md", start=2, end=3)
     assert "line two" in text and "line three" in text
@@ -168,7 +168,7 @@ def test_read_document_text_managed_git_repo_resolves_clone(home, tmp_path):
 
 def test_read_before_reindex_managed_repo_guides_recovery(home, tmp_path):
     """Reading a never-cloned managed git_repo points the user at reindex."""
-    src = rtfm.Source(name="specs", type="git_repo", url="https://example.com/r.git")
+    src = manifest.Source(name="specs", type="git_repo", url="https://example.com/r.git")
     text = rtfm.read_document_text(src, "ref.md")
     assert "no clone yet" in text
     assert "reindex('specs')" in text
@@ -185,8 +185,8 @@ def test_search_then_read_managed_git_repo(home, tmp_path):
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "init"], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
 
-    rtfm.load_manifest()
-    mp = rtfm.manifest_path()
+    manifest.load_manifest()
+    mp = config.manifest_path()
     mp.write_text(
         f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\next_blocklist=[]\n'
     )
@@ -218,8 +218,8 @@ def test_search_auto_reindexes_stale_git_repo(home, tmp_path):
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
 
-    rtfm.load_manifest()  # bootstrap default
-    mp = rtfm.manifest_path()
+    manifest.load_manifest()  # bootstrap default
+    mp = config.manifest_path()
     mp.write_text(
         f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\next_blocklist=[]\n'
     )
@@ -255,8 +255,8 @@ def test_search_auto_reindexes_linked_after_user_refresh(home, tmp_path):
     dest = tmp_path / "dest"
     git_ops.clone(str(remote), "main", dest, timeout=30)
 
-    rtfm.load_manifest()  # bootstrap default
-    mp = rtfm.manifest_path()
+    manifest.load_manifest()  # bootstrap default
+    mp = config.manifest_path()
     mp.write_text(
         f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\next_blocklist=[]\n'
     )
@@ -291,12 +291,12 @@ def test_search_warns_when_git_repo_fetch_fails(home, tmp_path, monkeypatch):
     subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
 
     # Clone into the managed location so the source is 'managed' (rtfm owns it)
-    dest = rtfm._managed_repo_path("specs")
+    dest = config.managed_repo_path("specs")
     git_ops.clone(str(remote), "main", dest, timeout=30)
 
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref="main")
-    rtfm.reindex_source(conn, src)
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", url=str(remote), ref="main")
+    index.reindex_source(conn, src)
 
     # Push v2
     (seed / "guide.md").write_text("widget v2 content\n")
@@ -309,8 +309,8 @@ def test_search_warns_when_git_repo_fetch_fails(home, tmp_path, monkeypatch):
         raise RuntimeError("simulated network failure")
     monkeypatch.setattr(git_ops, "fetch", broken_fetch)
 
-    rtfm.load_manifest()
-    mp = rtfm.manifest_path()
+    manifest.load_manifest()
+    mp = config.manifest_path()
     mp.write_text(
         f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\next_blocklist=[]\n'
     )
@@ -346,10 +346,10 @@ def test_reindex_linked_missing_git_is_git_missing(home, tmp_path, monkeypatch):
     git_ops.clone(str(remote), "main", dest, timeout=30)
 
     _no_git(monkeypatch, tmp_path)
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref="main")
-    summary = rtfm.reindex_source(conn, src)
+    summary = index.reindex_source(conn, src)
     assert "GIT_MISSING" in summary["error"]
     assert "NOT_GIT_REPO" not in summary["error"]
 
@@ -365,22 +365,22 @@ def test_reindex_managed_missing_git_is_git_missing(home, tmp_path, monkeypatch)
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
-    dest = rtfm._managed_repo_path("specs")
+    dest = config.managed_repo_path("specs")
     git_ops.clone(str(remote), "main", dest, timeout=30)
 
     _no_git(monkeypatch, tmp_path)
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref="main")
-    summary = rtfm.reindex_source(conn, src)
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", url=str(remote), ref="main")
+    summary = index.reindex_source(conn, src)
     assert "GIT_MISSING" in summary["error"]
 
 
 def test_managed_clone_failed_classified(home, tmp_path):
     """A bad managed URL yields ERROR:CLONE_FAILED with recovery steps."""
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo",
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo",
                       url=str(tmp_path / "no-such-remote.git"), ref="main")
-    summary = rtfm.reindex_source(conn, src)
+    summary = index.reindex_source(conn, src)
     assert "CLONE_FAILED" in summary["error"]
     assert "Recover" in summary["error"]
 
@@ -397,12 +397,12 @@ def test_managed_checkout_failed_classified(home, tmp_path):
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
-    dest = rtfm._managed_repo_path("specs")
+    dest = config.managed_repo_path("specs")
     git_ops.clone(str(remote), "main", dest, timeout=30)
 
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref="no-such-ref")
-    summary = rtfm.reindex_source(conn, src)
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", url=str(remote), ref="no-such-ref")
+    summary = index.reindex_source(conn, src)
     assert "CHECKOUT_FAILED" in summary["error"]
     assert "Recover" in summary["error"]
 
@@ -417,14 +417,14 @@ def test_managed_no_remote_classified(home, tmp_path):
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
-    dest = rtfm._managed_repo_path("specs")
+    dest = config.managed_repo_path("specs")
     git_ops.clone(str(remote), "main", dest, timeout=30)
     subprocess.run(["git", "-C", str(dest), "remote", "remove", "origin"],
                    capture_output=True)
 
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", url=str(remote))  # ref omitted
-    summary = rtfm.reindex_source(conn, src)
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", url=str(remote))  # ref omitted
+    summary = index.reindex_source(conn, src)
     assert "NO_REMOTE" in summary["error"]
 
 
@@ -438,25 +438,25 @@ def test_managed_remote_mismatch_classified(home, tmp_path):
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
-    dest = rtfm._managed_repo_path("specs")
+    dest = config.managed_repo_path("specs")
     git_ops.clone(str(remote), "main", dest, timeout=30)
 
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo",
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo",
                       url=str(tmp_path / "other.git"), ref="main")
-    summary = rtfm.reindex_source(conn, src)
+    summary = index.reindex_source(conn, src)
     assert "REMOTE_MISMATCH" in summary["error"]
 
 
 def test_managed_fake_git_dir_is_not_git_repo(home, tmp_path):
     """A managed path with a fake .git dir (no repo) is NOT_GIT_REPO, not a
     remote failure."""
-    dest = rtfm._managed_repo_path("specs")
+    dest = config.managed_repo_path("specs")
     (dest / ".git").mkdir(parents=True)
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo",
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo",
                       url=str(tmp_path / "remote.git"), ref="main")
-    summary = rtfm.reindex_source(conn, src)
+    summary = index.reindex_source(conn, src)
     assert "NOT_GIT_REPO" in summary["error"]
 
 
@@ -477,8 +477,8 @@ def test_search_warns_on_dirty_linked(home, tmp_path):
     dest = tmp_path / "dest"
     git_ops.clone(str(remote), "main", dest, timeout=30)
 
-    rtfm.load_manifest()
-    mp = rtfm.manifest_path()
+    manifest.load_manifest()
+    mp = config.manifest_path()
     mp.write_text(
         f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\next_blocklist=[]\n'
     )
@@ -505,9 +505,9 @@ def test_managed_ref_less_full_flow(home, tmp_path):
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
 
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", url=str(remote))  # no ref
-    summary = rtfm.reindex_source(conn, src)
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", url=str(remote))  # no ref
+    summary = index.reindex_source(conn, src)
     assert "error" not in summary
     assert summary["files_seen"] >= 1
     hits = rtfm.search_index(conn, "alpha bravo")
@@ -526,14 +526,14 @@ def test_clone_vanished_is_recreated(home, tmp_path):
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
 
-    rtfm.load_manifest()
-    mp = rtfm.manifest_path()
+    manifest.load_manifest()
+    mp = config.manifest_path()
     mp.write_text(f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\next_blocklist=[]\n')
     out = rtfm.search(query="alpha bravo")
     assert any("alpha bravo" in h["snippet"] for h in out["results"])
 
     import shutil
-    shutil.rmtree(rtfm._managed_repo_path("specs"))
+    shutil.rmtree(config.managed_repo_path("specs"))
     out = rtfm.search(query="alpha bravo")
     assert any("alpha bravo" in h["snippet"] for h in out["results"])  # recreated
 
@@ -545,10 +545,10 @@ def test_linked_empty_repo_is_emptied(home, tmp_path):
     subprocess.run(["git", "init", str(dest)], capture_output=True)
     subprocess.run(["git", "-C", str(dest), "remote", "add", "origin",
                     "https://example.com/repo.git"], capture_output=True)
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", path=dest,
                       url="https://example.com/repo.git", ref="main")
-    summary = rtfm.reindex_source(conn, src)
+    summary = index.reindex_source(conn, src)
     assert "EMPTY_REPO" in summary["error"]
     assert "no commits" in summary["error"]
 
@@ -570,9 +570,9 @@ def test_managed_sha_ref_first_run(home, tmp_path, sha_form):
     sha = git_ops.current_commit(seed)
     ref = sha if sha_form == "full" else sha[:7]
 
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref=ref)
-    summary = rtfm.reindex_source(conn, src)
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", url=str(remote), ref=ref)
+    summary = index.reindex_source(conn, src)
     assert "error" not in summary
     assert summary["commit"] == sha  # the pinned commit was indexed
 
@@ -589,9 +589,9 @@ def test_tag_only_commit_ref_checkout(home, tmp_path):
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
 
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref="main")
-    assert "error" not in rtfm.reindex_source(conn, src)
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", url=str(remote), ref="main")
+    assert "error" not in index.reindex_source(conn, src)
 
     # A commit reachable only through a tag (pushed via a temp branch, then the
     # branch deleted) — plain fetch will not materialize the tag.
@@ -604,8 +604,8 @@ def test_tag_only_commit_ref_checkout(home, tmp_path):
     subprocess.run(["git", "-C", str(seed), "tag", "v2"], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "push", "origin", "v2"], capture_output=True)
 
-    src2 = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref="v2")
-    summary = rtfm.reindex_source(conn, src2)
+    src2 = manifest.Source(name="specs", type="git_repo", url=str(remote), ref="v2")
+    summary = index.reindex_source(conn, src2)
     assert "error" not in summary
     assert summary["files_seen"] >= 1
 
@@ -626,10 +626,10 @@ def test_deleted_linked_clone_is_path_missing(home, tmp_path):
     import shutil
     shutil.rmtree(dest)
 
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref="main")
-    summary = rtfm.reindex_source(conn, src)
+    summary = index.reindex_source(conn, src)
     assert "PATH_MISSING" in summary["error"]
     assert "does not exist" in summary["error"]
     assert "GIT_MISSING" not in summary["error"]
@@ -653,12 +653,12 @@ def test_hex_named_branch_not_detached(home, tmp_path):
     subprocess.run(["git", "-C", str(dest), "push", "origin", "deadbeef"],
                    capture_output=True)
 
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref="deadbeef")
-    rtfm.reindex_source(conn, src)
-    rtfm.load_manifest()
-    mp = rtfm.manifest_path()
+    index.reindex_source(conn, src)
+    manifest.load_manifest()
+    mp = config.manifest_path()
     mp.write_text(
         f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\n'
         f'ref="deadbeef"\npath="{dest}"\next_blocklist=[]\n'
@@ -679,10 +679,10 @@ def test_remote_mismatch_normalized(home, tmp_path):
     subprocess.run(["git", "-C", str(dest), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(dest), "commit", "-m", "v1"], capture_output=True)
 
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", path=dest,
                       url="https://example.com/org/repo", ref="main")
-    summary = rtfm.reindex_source(conn, src)
+    summary = index.reindex_source(conn, src)
     assert "error" not in summary
 
 
@@ -695,18 +695,18 @@ def test_managed_ref_less_missing_git_is_git_missing(home, tmp_path, monkeypatch
     remote = tmp_path / "remote.git"
     subprocess.run(["git", "init", "--bare", str(remote)], capture_output=True)
     _no_git(monkeypatch, tmp_path)
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", url=str(remote))  # no ref
-    summary = rtfm.reindex_source(conn, src)
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", url=str(remote))  # no ref
+    summary = index.reindex_source(conn, src)
     assert "GIT_MISSING" in summary["error"]
 
 
 def test_managed_ref_less_bad_url_clone_failed(home, tmp_path):
     """A ref-less managed source with a bad URL: CLONE_FAILED, never a TypeError."""
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo",
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo",
                       url=str(tmp_path / "no-such-remote.git"))  # no ref
-    summary = rtfm.reindex_source(conn, src)
+    summary = index.reindex_source(conn, src)
     assert "CLONE_FAILED" in summary["error"]
 
 
@@ -726,10 +726,10 @@ def test_reindex_linked_corrupt_index_is_git_failed(home, tmp_path):
     git_ops.clone(str(remote), "main", dest, timeout=30)
     (dest / ".git" / "index").write_bytes(b"garbage")  # corrupt the index
 
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref="main")
-    summary = rtfm.reindex_source(conn, src)
+    summary = index.reindex_source(conn, src)
     assert "GIT_FAILED" in summary["error"]
     assert "NOT_GIT_REPO" not in summary["error"]
 
@@ -745,14 +745,14 @@ def test_managed_dirty_tree_classified(home, tmp_path):
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
-    dest = rtfm._managed_repo_path("specs")
+    dest = config.managed_repo_path("specs")
     git_ops.clone(str(remote), "main", dest, timeout=30)
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref="main")
-    assert "error" not in rtfm.reindex_source(conn, src)
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", url=str(remote), ref="main")
+    assert "error" not in index.reindex_source(conn, src)
 
     (dest / "a.md").write_text("local edit\n")  # dirty the managed clone
-    summary = rtfm.reindex_source(conn, src)
+    summary = index.reindex_source(conn, src)
     assert "DIRTY_TREE" in summary["error"]
     assert "CHECKOUT_FAILED" not in summary["error"]
 
@@ -768,10 +768,10 @@ def test_remote_mismatch_ssh_form_and_case(home, tmp_path):
     subprocess.run(["git", "-C", str(dest), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(dest), "commit", "-m", "v1"], capture_output=True)
 
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", path=dest,
                       url="https://Example.COM/Org/Repo", ref="main")
-    summary = rtfm.reindex_source(conn, src)
+    summary = index.reindex_source(conn, src)
     assert "error" not in summary
 
 
@@ -786,14 +786,14 @@ def test_remote_mismatch_port_and_trailing_slash(home, tmp_path):
     subprocess.run(["git", "-C", str(dest), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(dest), "commit", "-m", "v1"], capture_output=True)
 
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", path=dest,
                       url="https://example.com/org/repo/", ref="main")
-    assert "error" not in rtfm.reindex_source(conn, src)
+    assert "error" not in index.reindex_source(conn, src)
 
-    bad = rtfm.Source(name="specs", type="git_repo", path=dest,
+    bad = manifest.Source(name="specs", type="git_repo", path=dest,
                       url="https://example.com/other/repo", ref="main")
-    summary = rtfm.reindex_source(conn, bad)
+    summary = index.reindex_source(conn, bad)
     assert "REMOTE_MISMATCH" in summary["error"]
 
 
@@ -808,7 +808,7 @@ def test_fetch_counts(monkeypatch, home, tmp_path):
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
-    dest = rtfm._managed_repo_path("specs")
+    dest = config.managed_repo_path("specs")
     git_ops.clone(str(remote), "main", dest, timeout=30)
 
     calls = []
@@ -819,16 +819,16 @@ def test_fetch_counts(monkeypatch, home, tmp_path):
         return real_fetch(path, timeout=timeout)
 
     monkeypatch.setattr(git_ops, "fetch", counting_fetch)
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref="main")
-    rtfm.reindex_source(conn, src)
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", url=str(remote), ref="main")
+    index.reindex_source(conn, src)
     assert len(calls) == 1  # the managed refresh: exactly one fetch
 
     linked = tmp_path / "linked"
     git_ops.clone(str(remote), "main", linked, timeout=30)
-    src2 = rtfm.Source(name="specs2", type="git_repo", path=linked,
+    src2 = manifest.Source(name="specs2", type="git_repo", path=linked,
                        url=str(remote), ref="main")
-    rtfm.reindex_source(conn, src2)
+    index.reindex_source(conn, src2)
     assert len(calls) == 1  # linked reindex: zero fetches
 
 
@@ -847,12 +847,12 @@ def test_managed_hex_branch_first_run(home, tmp_path):
     subprocess.run(["git", "-C", str(seed), "push", "origin", "deadbeef"],
                    capture_output=True)
 
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref="deadbeef")
-    summary = rtfm.reindex_source(conn, src)
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", url=str(remote), ref="deadbeef")
+    summary = index.reindex_source(conn, src)
     assert "error" not in summary
-    rtfm.load_manifest()
-    mp = rtfm.manifest_path()
+    manifest.load_manifest()
+    mp = config.manifest_path()
     mp.write_text(
         f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="deadbeef"\next_blocklist=[]\n'
     )
@@ -872,14 +872,14 @@ def test_managed_fetch_failed_classified(home, tmp_path):
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
-    dest = rtfm._managed_repo_path("specs")
+    dest = config.managed_repo_path("specs")
     git_ops.clone(str(remote), "main", dest, timeout=30)
     import shutil
     shutil.rmtree(remote)  # the origin vanishes — fetch fails, URL still matches
 
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref="main")
-    summary = rtfm.reindex_source(conn, src)
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", url=str(remote), ref="main")
+    summary = index.reindex_source(conn, src)
     assert "FETCH_FAILED" in summary["error"]
     assert "Recover" in summary["error"]
 
@@ -898,14 +898,14 @@ def test_list_sources_error_status(home, tmp_path):
     subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
     dest = tmp_path / "dest"
     git_ops.clone(str(remote), "main", dest, timeout=30)
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref="main")
-    rtfm.reindex_source(conn, src)
+    index.reindex_source(conn, src)
     (dest / ".git" / "index").write_bytes(b"garbage")  # corrupt → status fails
 
-    rtfm.load_manifest()
-    mp = rtfm.manifest_path()
+    manifest.load_manifest()
+    mp = config.manifest_path()
     mp.write_text(
         f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\next_blocklist=[]\n'
     )
@@ -917,8 +917,8 @@ def test_list_sources_error_status(home, tmp_path):
 def test_health_check_git_probe(home, tmp_path, monkeypatch):
     """health_check reports git presence and flips ok=False when git_repo sources
     exist on a git-less machine."""
-    rtfm.load_manifest()
-    mp = rtfm.manifest_path()
+    manifest.load_manifest()
+    mp = config.manifest_path()
     mp.write_text(
         '[[source]]\nname="specs"\ntype="git_repo"\n'
         'url="https://example.com/repo.git"\nref="main"\next_blocklist=[]\n'
@@ -941,10 +941,10 @@ def test_linked_unparseable_config_is_git_failed(home, tmp_path):
     subprocess.run(["git", "-C", str(dest), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(dest), "commit", "-m", "v1"], capture_output=True)
     (dest / ".git" / "config").write_text("[core\nbroken=")  # unparseable
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", path=dest,
                       url="https://example.com/repo.git", ref="main")
-    summary = rtfm.reindex_source(conn, src)
+    summary = index.reindex_source(conn, src)
     assert "GIT_FAILED" in summary["error"]
 
 
@@ -956,10 +956,10 @@ def test_linked_no_origin_proceeds(home, tmp_path):
     (dest / "a.md").write_text("v1\n")
     subprocess.run(["git", "-C", str(dest), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(dest), "commit", "-m", "v1"], capture_output=True)
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", path=dest,
                       url="https://example.com/repo.git", ref="main")
-    summary = rtfm.reindex_source(conn, src)
+    summary = index.reindex_source(conn, src)
     assert "error" not in summary
 
 
@@ -982,12 +982,12 @@ def test_managed_pin_change_detected(home, tmp_path):
     subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
     sha2 = git_ops.current_commit(seed)
 
-    conn = rtfm.get_index_db()
-    src1 = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref=sha1)
-    assert "error" not in rtfm.reindex_source(conn, src1)
+    conn = index.get_index_db()
+    src1 = manifest.Source(name="specs", type="git_repo", url=str(remote), ref=sha1)
+    assert "error" not in index.reindex_source(conn, src1)
 
-    src2 = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref=sha2)
-    summary = rtfm.reindex_source(conn, src2)  # explicit reindex works either way
+    src2 = manifest.Source(name="specs", type="git_repo", url=str(remote), ref=sha2)
+    summary = index.reindex_source(conn, src2)  # explicit reindex works either way
     assert "error" not in summary
     assert summary["commit"] == sha2
 
@@ -998,11 +998,11 @@ def test_reindex_purges_manifest_absent_sources(home, tmp_path):
     d = tmp_path / "docs"
     d.mkdir()
     (d / "a.md").write_text("orphan content keyword\n")
-    conn = rtfm.get_index_db()
-    rtfm.reindex_source(conn, rtfm.Source(name="gone", type="dir", path=d))
+    conn = index.get_index_db()
+    index.reindex_source(conn, manifest.Source(name="gone", type="dir", path=d))
     assert rtfm.search_index(conn, "orphan content")
 
-    rtfm.load_manifest()  # bootstrap default (no 'gone' source)
+    manifest.load_manifest()  # bootstrap default (no 'gone' source)
     rtfm.reindex()
     assert not rtfm.search_index(conn, "orphan content")
     assert conn.execute(
@@ -1022,11 +1022,11 @@ def test_staleness_memo_bounds_checks_and_invalidates(home, tmp_path, monkeypatc
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v1"], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
-    dest = rtfm._managed_repo_path("specs")
+    dest = config.managed_repo_path("specs")
     git_ops.clone(str(remote), "main", dest, timeout=30)
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref="main")
-    rtfm.reindex_source(conn, src)
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", url=str(remote), ref="main")
+    index.reindex_source(conn, src)
 
     calls = []
     real_fetch = git_ops.fetch
@@ -1036,29 +1036,29 @@ def test_staleness_memo_bounds_checks_and_invalidates(home, tmp_path, monkeypatc
         return real_fetch(path, timeout=timeout)
 
     monkeypatch.setattr(git_ops, "fetch", counting_fetch)
-    assert rtfm._freshness(conn, src)[:3] == (0, False, False) and len(calls) == 1
-    assert rtfm._freshness(conn, src).cached is True and len(calls) == 1  # memoized
-    rtfm.reindex_source(conn, src)             # invalidates the entry (its own fetch +1)
-    assert rtfm._freshness(conn, src).cached is False and len(calls) == 3  # 1 + 1 + 1
+    assert index.freshness(conn, src)[:3] == (0, False, False) and len(calls) == 1
+    assert index.freshness(conn, src).cached is True and len(calls) == 1  # memoized
+    index.reindex_source(conn, src)             # invalidates the entry (its own fetch +1)
+    assert index.freshness(conn, src).cached is False and len(calls) == 3  # 1 + 1 + 1
 
 
 def test_search_does_not_reattempt_broken_source_within_ttl(home, tmp_path, monkeypatch):
     """A broken source is attempted on the first query of each memo window only —
     the reindex attempt and its failure warning must not repeat on every query."""
-    rtfm.load_manifest()
-    mp = rtfm.manifest_path()
+    manifest.load_manifest()
+    mp = config.manifest_path()
     mp.write_text(
         f'[[source]]\nname="specs"\ntype="git_repo"\n'
         f'url="{tmp_path / "no-such-remote.git"}"\nref="main"\next_blocklist=[]\n'
     )
     attempts = []
-    real_reindex = rtfm.reindex_source
+    real_reindex = index.reindex_source
 
     def counting_reindex(conn, src):
         attempts.append(src.name)
         return real_reindex(conn, src)
 
-    monkeypatch.setattr(rtfm, "reindex_source", counting_reindex)
+    monkeypatch.setattr(index, "reindex_source", counting_reindex)
 
     out1 = rtfm.search(query="widget")
     assert len(attempts) == 1
@@ -1087,8 +1087,8 @@ def test_managed_pin_change_detected_on_search(home, tmp_path):
     subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
     sha2 = git_ops.current_commit(seed)
 
-    rtfm.load_manifest()
-    mp = rtfm.manifest_path()
+    manifest.load_manifest()
+    mp = config.manifest_path()
 
     def write_manifest(ref):
         mp.write_text(
@@ -1115,14 +1115,14 @@ def test_search_dedupes_warnings_per_clone(home, tmp_path):
     subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
     dest = tmp_path / "dest"
     git_ops.clone(str(remote), "main", dest, timeout=30)
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="s1", type="git_repo", path=dest, url=str(remote), ref="main")
-    src2 = rtfm.Source(name="s2", type="git_repo", path=dest, url=str(remote), ref="main")
-    rtfm.reindex_source(conn, src)
-    rtfm.reindex_source(conn, src2)
+    conn = index.get_index_db()
+    src = manifest.Source(name="s1", type="git_repo", path=dest, url=str(remote), ref="main")
+    src2 = manifest.Source(name="s2", type="git_repo", path=dest, url=str(remote), ref="main")
+    index.reindex_source(conn, src)
+    index.reindex_source(conn, src2)
 
-    rtfm.load_manifest()
-    mp = rtfm.manifest_path()
+    manifest.load_manifest()
+    mp = config.manifest_path()
     mp.write_text(
         f'[[source]]\nname="s1"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\next_blocklist=[]\n'
         f'[[source]]\nname="s2"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\next_blocklist=[]\n'
@@ -1148,10 +1148,10 @@ def test_reindex_linked_typo_ref_warns(home, tmp_path):
     dest = tmp_path / "dest"
     git_ops.clone(str(remote), "main", dest, timeout=30)
 
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref="matser")
-    summary = rtfm.reindex_source(conn, src)
+    summary = index.reindex_source(conn, src)
     assert "error" not in summary
     assert "does not resolve" in summary["warning"]
     assert "fetch --tags" in summary["warning"]
@@ -1169,10 +1169,10 @@ def test_git_clone_hex_ref_bad_url_single_attempt(home, tmp_path, monkeypatch):
         return real_git(args, cwd=cwd, timeout=timeout, allow_exit_codes=allow_exit_codes)
 
     monkeypatch.setattr(git_ops, "run", counting_git)
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo",
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo",
                       url=str(tmp_path / "no-such-remote.git"), ref="a" * 40)
-    summary = rtfm.reindex_source(conn, src)
+    summary = index.reindex_source(conn, src)
     assert "CLONE_FAILED" in summary["error"]
     assert len(calls) == 1
 
@@ -1183,9 +1183,9 @@ def test_reindex_malformed_manifest_does_not_purge(home, tmp_path):
     d = tmp_path / "docs"
     d.mkdir()
     (d / "a.md").write_text("survivor keyword\n")
-    conn = rtfm.get_index_db()
-    rtfm.reindex_source(conn, rtfm.Source(name="docs", type="dir", path=d))
-    mp = rtfm.manifest_path()
+    conn = index.get_index_db()
+    index.reindex_source(conn, manifest.Source(name="docs", type="dir", path=d))
+    mp = config.manifest_path()
     mp.write_text("[[source\nbroken")  # unparseable TOML
     resp = rtfm.reindex()
     assert "purged_sources" not in resp
@@ -1198,10 +1198,10 @@ def test_search_sources_searched_respects_filter(home, tmp_path):
     d = tmp_path / "docs"
     d.mkdir()
     (d / "a.md").write_text("filtered keyword body\n")
-    conn = rtfm.get_index_db()
-    rtfm.reindex_source(conn, rtfm.Source(name="docs", type="dir", path=d))
-    rtfm.load_manifest()
-    mp = rtfm.manifest_path()
+    conn = index.get_index_db()
+    index.reindex_source(conn, manifest.Source(name="docs", type="dir", path=d))
+    manifest.load_manifest()
+    mp = config.manifest_path()
     mp.write_text(
         f'[[source]]\nname="docs"\ntype="dir"\npath="{d}"\next_blocklist=[]\n'
         '[[source]]\nname="typoed"\ntype="Git_Repo"\nurl="https://example.com/r.git"\next_blocklist=[]\n'
@@ -1226,10 +1226,10 @@ def test_reindex_unreadable_clone_is_git_failed(home, tmp_path):
     git_ops.clone(str(remote), "main", dest, timeout=30)
     dest.chmod(0o000)
     try:
-        conn = rtfm.get_index_db()
-        src = rtfm.Source(name="specs", type="git_repo", path=dest,
+        conn = index.get_index_db()
+        src = manifest.Source(name="specs", type="git_repo", path=dest,
                           url=str(remote), ref="main")
-        summary = rtfm.reindex_source(conn, src)
+        summary = index.reindex_source(conn, src)
         assert "GIT_FAILED" in summary["error"]
     finally:
         dest.chmod(0o755)  # let pytest clean up the tmp dir
@@ -1239,15 +1239,15 @@ def test_reindex_unreadable_clone_is_git_failed(home, tmp_path):
 
 def test_editing_a_git_repo_scope_makes_it_stale(home, tmp_path, git_branch):
     remote, seed, branch = make_git_repo(tmp_path, git_branch)
-    conn = rtfm.get_index_db()
-    wide = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=branch,
+    conn = index.get_index_db()
+    wide = manifest.Source(name="g", type="git_repo", url=str(remote), ref=branch,
                        ext_blocklist=frozenset())
-    rtfm.reindex_source(conn, wide)
-    assert rtfm._freshness(conn, wide)[1] is False
+    index.reindex_source(conn, wide)
+    assert index.freshness(conn, wide)[1] is False
 
-    narrow = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=branch,
+    narrow = manifest.Source(name="g", type="git_repo", url=str(remote), ref=branch,
                          ext_allowlist=frozenset({".md"}))
-    assert rtfm._freshness(conn, narrow)[1] is True
+    assert index.freshness(conn, narrow)[1] is True
 
 
 def test_editing_a_git_repo_scope_by_exclude_paths_alone_makes_it_stale(
@@ -1257,16 +1257,16 @@ def test_editing_a_git_repo_scope_by_exclude_paths_alone_makes_it_stale(
     # unnoticed. Two sources differing only in exclude_paths must scope differently and the
     # second must read stale against the first's indexed state.
     remote, seed, branch = make_git_repo(tmp_path, git_branch)
-    conn = rtfm.get_index_db()
-    unscoped = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=branch,
+    conn = index.get_index_db()
+    unscoped = manifest.Source(name="g", type="git_repo", url=str(remote), ref=branch,
                            ext_blocklist=frozenset())
-    rtfm.reindex_source(conn, unscoped)
-    assert rtfm._freshness(conn, unscoped)[1] is False
+    index.reindex_source(conn, unscoped)
+    assert index.freshness(conn, unscoped)[1] is False
 
-    excluded = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=branch,
+    excluded = manifest.Source(name="g", type="git_repo", url=str(remote), ref=branch,
                            exclude_paths=("nope",), ext_blocklist=frozenset())
-    assert rtfm._config_scope(unscoped) != rtfm._config_scope(excluded)
-    assert rtfm._freshness(conn, excluded)[1] is True
+    assert index.config_scope(unscoped) != index.config_scope(excluded)
+    assert index.freshness(conn, excluded)[1] is True
 
 
 def test_a_scope_edit_beats_a_sha_pin(home, tmp_path, git_branch):
@@ -1275,15 +1275,15 @@ def test_a_scope_edit_beats_a_sha_pin(home, tmp_path, git_branch):
     remote, seed, branch = make_git_repo(tmp_path, git_branch)
     sha = subprocess.run(["git", "-C", str(seed), "rev-parse", "HEAD"],
                          capture_output=True, text=True).stdout.strip()
-    conn = rtfm.get_index_db()
-    pinned = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=sha,
+    conn = index.get_index_db()
+    pinned = manifest.Source(name="g", type="git_repo", url=str(remote), ref=sha,
                          path=seed, ext_blocklist=frozenset())
-    rtfm.reindex_source(conn, pinned)
-    assert rtfm._freshness(conn, pinned)[1] is False
+    index.reindex_source(conn, pinned)
+    assert index.freshness(conn, pinned)[1] is False
 
-    rescoped = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=sha,
+    rescoped = manifest.Source(name="g", type="git_repo", url=str(remote), ref=sha,
                            path=seed, ext_allowlist=frozenset({".md"}))
-    assert rtfm._freshness(conn, rescoped)[1] is True
+    assert index.freshness(conn, rescoped)[1] is True
 
 
 def test_git_repo_scope_selects_only_the_matching_subset(home, tmp_path):
@@ -1302,10 +1302,10 @@ def test_git_repo_scope_selects_only_the_matching_subset(home, tmp_path):
     subprocess.run(["git", "-C", str(seed), "push", "origin", branch],
                    capture_output=True)
 
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=branch,
+    conn = index.get_index_db()
+    src = manifest.Source(name="g", type="git_repo", url=str(remote), ref=branch,
                       paths=("docs",), ext_allowlist=frozenset({".md"}))
-    rtfm.reindex_source(conn, src)
+    index.reindex_source(conn, src)
     rows = {r[0] for r in conn.execute("SELECT relpath FROM locations WHERE source='g'")}
     assert rows == {"docs/a.md"}
 
@@ -1327,13 +1327,13 @@ def test_two_git_repo_sources_sharing_one_clone_keep_separate_scopes(home, tmp_p
     dest = tmp_path / "dest"
     git_ops.clone(str(remote), branch, dest, timeout=30)
 
-    conn = rtfm.get_index_db()
-    src1 = rtfm.Source(name="s1", type="git_repo", path=dest, url=str(remote), ref=branch,
+    conn = index.get_index_db()
+    src1 = manifest.Source(name="s1", type="git_repo", path=dest, url=str(remote), ref=branch,
                        paths=("docs",), ext_blocklist=frozenset())
-    src2 = rtfm.Source(name="s2", type="git_repo", path=dest, url=str(remote), ref=branch,
+    src2 = manifest.Source(name="s2", type="git_repo", path=dest, url=str(remote), ref=branch,
                        paths=("other",), ext_blocklist=frozenset())
-    rtfm.reindex_source(conn, src1)
-    rtfm.reindex_source(conn, src2)
+    index.reindex_source(conn, src1)
+    index.reindex_source(conn, src2)
 
     rows1 = {r[0] for r in conn.execute("SELECT relpath FROM locations WHERE source='s1'")}
     rows2 = {r[0] for r in conn.execute("SELECT relpath FROM locations WHERE source='s2'")}

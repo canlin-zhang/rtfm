@@ -4,20 +4,20 @@ import subprocess
 from conftest import make_git_repo
 
 import rtfm_server as rtfm
-from rtfm import staging
+from rtfm import config, git_ops, index, manifest, staging
 
 
 def _seed(home, tmp_path, name="docs"):
     d = tmp_path / name
     d.mkdir()
     (d / "guide.md").write_text("intro line\nthe widget protocol defines flits\nmore text\n")
-    conn = rtfm.get_index_db()
-    rtfm.reindex_source(conn, rtfm.Source(name=name, type="dir", path=d))
+    conn = index.get_index_db()
+    index.reindex_source(conn, manifest.Source(name=name, type="dir", path=d))
     return conn, d
 
 
 def _add_source(name, path):
-    mp = rtfm.manifest_path()
+    mp = config.manifest_path()
     mp.write_text(
         mp.read_text()
         + f'\n[[source]]\nname="{name}"\ntype="dir"\npath="{path}"\next_blocklist=[]\n'
@@ -41,8 +41,8 @@ def test_search_dedup_lists_all_paths(home, tmp_path):
     body = "the widget protocol defines flits\n"
     for n in ("a.md", "b.md", "c.md"):
         (d / n).write_text(body)
-    conn = rtfm.get_index_db()
-    rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    conn = index.get_index_db()
+    index.reindex_source(conn, manifest.Source("docs", "dir", d))
     hits = rtfm.search_index(conn, "widget protocol")
     assert len(hits) == 1  # one content, not three
     assert hits[0]["total_locations"] == 3
@@ -55,8 +55,8 @@ def test_search_caps_locations(home, tmp_path):
     body = "the widget protocol defines flits\n"
     for i in range(7):
         (d / f"f{i}.md").write_text(body)
-    conn = rtfm.get_index_db()
-    rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    conn = index.get_index_db()
+    index.reindex_source(conn, manifest.Source("docs", "dir", d))
     hits = rtfm.search_index(conn, "widget protocol", max_locations=5)
     assert len(hits[0]["locations"]) == 5
     assert hits[0]["total_locations"] == 7
@@ -76,7 +76,7 @@ def test_search_malformed_query_does_not_raise(home, tmp_path):
 
 def test_read_text_line_range(home, tmp_path):
     conn, d = _seed(home, tmp_path)
-    text = rtfm.read_document_text(rtfm.Source("docs", "dir", d), "guide.md", 2, 2)
+    text = rtfm.read_document_text(manifest.Source("docs", "dir", d), "guide.md", 2, 2)
     assert "widget protocol" in text and "intro line" not in text
 
 
@@ -84,7 +84,7 @@ def test_read_reports_a_non_utf8_file_instead_of_raising(home, tmp_path):
     d = tmp_path / "docs"
     d.mkdir()
     (d / "cp1252.md").write_bytes(b"caf\xe9 keyword\n")
-    msg = rtfm.read_document_text(rtfm.Source("docs", "dir", d), "cp1252.md")
+    msg = rtfm.read_document_text(manifest.Source("docs", "dir", d), "cp1252.md")
     assert "cp1252.md" in msg
     assert "utf-8" in msg.lower()
 
@@ -95,11 +95,11 @@ def test_search_auto_reindexes_small_unindexed_source(home, tmp_path):
     d = tmp_path / "manual"
     d.mkdir()
     (d / "m.md").write_text("the widget protocol defines flits\n")
-    rtfm.load_manifest()  # bootstrap default
+    manifest.load_manifest()  # bootstrap default
     _add_source("manual", d)  # configured but NOT reindexed
     out = rtfm.search(query="widget protocol", source="manual")
     assert any("widget protocol" in h["snippet"] for h in out["results"])
-    conn = rtfm.get_index_db()
+    conn = index.get_index_db()
     assert conn.execute("SELECT COUNT(*) FROM locations WHERE source='manual'").fetchone()[0] == 1
 
 
@@ -111,12 +111,12 @@ def test_search_warns_and_falls_back_on_large_unindexed_source(home, tmp_path, m
     d.mkdir()
     for i in range(3):  # 3 new files > budget of 2
         (d / f"f{i}.md").write_text("the widget protocol defines flits\n")
-    rtfm.load_manifest()
+    manifest.load_manifest()
     _add_source("big", d)
     out = rtfm.search(query="widget protocol", source="big")
     assert out["results"] == []
     assert "WARNING" in out and any("big" in w and "reindex" in w for w in out["WARNING"])
-    conn = rtfm.get_index_db()
+    conn = index.get_index_db()
     assert conn.execute("SELECT COUNT(*) FROM locations WHERE source='big'").fetchone()[0] == 0
 
 
@@ -127,9 +127,9 @@ def test_search_auto_reindexes_changed_file(home, tmp_path):
     d.mkdir()
     f = d / "m.md"
     f.write_text("the gadget protocol is old\n")
-    conn = rtfm.get_index_db()
-    rtfm.reindex_source(conn, rtfm.Source("manual", "dir", d))
-    rtfm.load_manifest()
+    conn = index.get_index_db()
+    index.reindex_source(conn, manifest.Source("manual", "dir", d))
+    manifest.load_manifest()
     _add_source("manual", d)
     f.write_text("the widget protocol is new\n")          # changed content...
     os.utime(f, (1_900_000_000, 1_900_000_000))            # ...and a clearly newer mtime
@@ -145,15 +145,15 @@ def test_search_survives_inline_reindex_failure(home, tmp_path, monkeypatch):
     d = tmp_path / "manual"
     d.mkdir()
     (d / "m.md").write_text("the widget protocol defines flits\n")
-    conn = rtfm.get_index_db()
-    rtfm.reindex_source(conn, rtfm.Source("manual", "dir", d))   # prior content indexed
-    rtfm.load_manifest()
+    conn = index.get_index_db()
+    index.reindex_source(conn, manifest.Source("manual", "dir", d))   # prior content indexed
+    manifest.load_manifest()
     _add_source("manual", d)
     (d / "new.md").write_text("more widget content\n")            # make it look stale...
 
     def boom(*a, **k):
         raise OSError("simulated mid-rebuild failure")
-    monkeypatch.setattr(rtfm, "_ingest", boom)                    # ...then blow up the rebuild
+    monkeypatch.setattr(index, "ingest", boom)                    # ...then blow up the rebuild
     out = rtfm.search(query="widget protocol", source="manual")
     assert any("widget protocol" in h["snippet"] for h in out["results"])   # prior content served
     assert "WARNING" in out and any("AUTO-REINDEX FAILED" in w and "manual" in w
@@ -168,11 +168,11 @@ def test_search_auto_reindex_at_budget_boundary_indexes(home, tmp_path, monkeypa
     d.mkdir()
     (d / "a.md").write_text("widget alpha\n")
     (d / "b.md").write_text("widget bravo\n")                     # exactly 2 new == budget 2
-    rtfm.load_manifest()
+    manifest.load_manifest()
     _add_source("edge", d)
     out = rtfm.search(query="widget", source="edge")
     assert any("widget" in h["snippet"] for h in out["results"])
-    conn = rtfm.get_index_db()
+    conn = index.get_index_db()
     assert conn.execute("SELECT COUNT(*) FROM locations WHERE source='edge'").fetchone()[0] == 2
 
 
@@ -183,9 +183,9 @@ def test_search_purges_vanished_file_inline(home, tmp_path):
     d.mkdir()
     (d / "keep.md").write_text("widget keeper\n")
     (d / "gone.md").write_text("widget goner\n")
-    conn = rtfm.get_index_db()
-    rtfm.reindex_source(conn, rtfm.Source("manual", "dir", d))
-    rtfm.load_manifest()
+    conn = index.get_index_db()
+    index.reindex_source(conn, manifest.Source("manual", "dir", d))
+    manifest.load_manifest()
     _add_source("manual", d)
     (d / "gone.md").unlink()                                      # vanish
     out = rtfm.search(query="goner", source="manual")
@@ -202,7 +202,7 @@ def test_search_auto_reindex_disabled_with_zero_budget(home, tmp_path, monkeypat
     d = tmp_path / "manual"
     d.mkdir()
     (d / "m.md").write_text("the widget protocol defines flits\n")
-    rtfm.load_manifest()
+    manifest.load_manifest()
     _add_source("manual", d)
     out = rtfm.search(query="widget protocol", source="manual")
     assert out["results"] == []
@@ -222,8 +222,8 @@ def test_search_reports_a_file_it_could_not_open(home, tmp_path, unopenable):
 
 
 def test_default_self_heals_on_search(home):
-    rtfm.load_manifest()
-    (rtfm.default_source_dir() / "n.md").write_text("zephyr keyword here\n")
+    manifest.load_manifest()
+    (config.default_source_dir() / "n.md").write_text("zephyr keyword here\n")
     out = rtfm.search(query="zephyr")
     assert any("zephyr" in h["snippet"] for h in out["results"])
 
@@ -232,7 +232,7 @@ def test_reindex_tool_returns_summary(home, tmp_path):
     d = tmp_path / "manual"
     d.mkdir()
     (d / "m.md").write_text("widget protocol\n")
-    rtfm.load_manifest()
+    manifest.load_manifest()
     _add_source("manual", d)
     out = rtfm.reindex(source="manual")
     assert out["reindexed"][0]["source"] == "manual"
@@ -247,8 +247,8 @@ def test_list_sources_reports_counts(home):
 
 def _status_of(home, tmp_path, name="specs", src=None, remote=None, ref=None):
     """Manifest with one git_repo source, return its list_sources git_status."""
-    rtfm.load_manifest()
-    mp = rtfm.manifest_path()
+    manifest.load_manifest()
+    mp = config.manifest_path()
     url = str(remote) if remote is not None else str(src.url)
     path = f'\npath="{src.path}"' if src.path is not None else ""
     mp.write_text(
@@ -265,11 +265,11 @@ def test_list_sources_reports_git_status(home, tmp_path, git_branch):
     remote, seed, branch = make_git_repo(tmp_path, git_branch,
                                          filename="a.md", content="hello\n")
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), branch, dest, timeout=30)
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+    git_ops.clone(str(remote), branch, dest, timeout=30)
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref=branch)
-    rtfm.reindex_source(conn, src)
+    index.reindex_source(conn, src)
     assert _status_of(home, tmp_path, src=src) == "up to date"
 
 
@@ -278,14 +278,14 @@ def test_list_sources_linked_ahead(home, tmp_path, git_branch):
     remote, seed, branch = make_git_repo(tmp_path, git_branch,
                                          filename="a.md", content="hello\n")
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), branch, dest, timeout=30)
+    git_ops.clone(str(remote), branch, dest, timeout=30)
     (dest / "local.md").write_text("unpushed work\n")
     subprocess.run(["git", "-C", str(dest), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(dest), "commit", "-m", "local"], capture_output=True)
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref=branch)
-    rtfm.reindex_source(conn, src)  # index AFTER the local commit — status compares the index
+    index.reindex_source(conn, src)  # index AFTER the local commit — status compares the index
     assert _status_of(home, tmp_path, src=src) == "ahead"
 
 
@@ -295,11 +295,11 @@ def test_list_sources_linked_behind(home, tmp_path, git_branch):
     remote, seed, branch = make_git_repo(tmp_path, git_branch,
                                          filename="a.md", content="v1\n")
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), branch, dest, timeout=30)
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+    git_ops.clone(str(remote), branch, dest, timeout=30)
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref=branch)
-    rtfm.reindex_source(conn, src)
+    index.reindex_source(conn, src)
     (seed / "a.md").write_text("v2\n")
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "v2"], capture_output=True)
@@ -314,11 +314,11 @@ def test_list_sources_linked_diverged(home, tmp_path, git_branch):
     remote, seed, branch = make_git_repo(tmp_path, git_branch,
                                          filename="a.md", content="v1\n")
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), branch, dest, timeout=30)
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+    git_ops.clone(str(remote), branch, dest, timeout=30)
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref=branch)
-    rtfm.reindex_source(conn, src)
+    index.reindex_source(conn, src)
     (seed / "a.md").write_text("remote v2\n")
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "remote v2"], capture_output=True)
@@ -327,7 +327,7 @@ def test_list_sources_linked_diverged(home, tmp_path, git_branch):
     subprocess.run(["git", "-C", str(dest), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(dest), "commit", "-m", "local v2"], capture_output=True)
     subprocess.run(["git", "-C", str(dest), "fetch", "origin"], capture_output=True)
-    rtfm.reindex_source(conn, src)  # index AFTER both sides moved — status compares the index
+    index.reindex_source(conn, src)  # index AFTER both sides moved — status compares the index
     assert _status_of(home, tmp_path, src=src) == "diverged"
 
 
@@ -336,12 +336,12 @@ def test_list_sources_detached_pinned_sha(home, tmp_path, git_branch):
     remote, seed, branch = make_git_repo(tmp_path, git_branch,
                                          filename="a.md", content="hello\n")
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), branch, dest, timeout=30)
-    sha = rtfm._git_current_commit(dest)
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+    git_ops.clone(str(remote), branch, dest, timeout=30)
+    sha = git_ops.current_commit(dest)
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref=sha)
-    rtfm.reindex_source(conn, src)
+    index.reindex_source(conn, src)
     assert _status_of(home, tmp_path, src=src, ref=sha) == "detached"
 
 
@@ -350,11 +350,11 @@ def test_list_sources_unknown_ref(home, tmp_path, git_branch):
     remote, seed, branch = make_git_repo(tmp_path, git_branch,
                                          filename="a.md", content="hello\n")
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), branch, dest, timeout=30)
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+    git_ops.clone(str(remote), branch, dest, timeout=30)
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref=branch)
-    rtfm.reindex_source(conn, src)
+    index.reindex_source(conn, src)
     assert _status_of(home, tmp_path, src=src, ref="no-such-branch") == "unknown"
 
 
@@ -362,7 +362,7 @@ def test_list_sources_never_indexed(home, tmp_path):
     """A managed source with no source_meta row reports 'never indexed'."""
     remote, seed, branch = make_git_repo(tmp_path, "main",
                                          filename="a.md", content="hello\n")
-    src = rtfm.Source(name="specs", type="git_repo", url=str(remote), ref=branch)
+    src = manifest.Source(name="specs", type="git_repo", url=str(remote), ref=branch)
     assert _status_of(home, tmp_path, src=src, remote=remote) == "never indexed"
 
 
@@ -371,11 +371,11 @@ def test_list_sources_dirty(home, tmp_path, git_branch):
     remote, seed, branch = make_git_repo(tmp_path, git_branch,
                                          filename="a.md", content="hello\n")
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), branch, dest, timeout=30)
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="specs", type="git_repo", path=dest,
+    git_ops.clone(str(remote), branch, dest, timeout=30)
+    conn = index.get_index_db()
+    src = manifest.Source(name="specs", type="git_repo", path=dest,
                       url=str(remote), ref=branch)
-    rtfm.reindex_source(conn, src)
+    index.reindex_source(conn, src)
     (dest / "a.md").write_text("locally edited\n")
     assert _status_of(home, tmp_path, src=src) == "dirty"
 
@@ -383,7 +383,7 @@ def test_list_sources_dirty(home, tmp_path, git_branch):
 def test_health_check_reports_schema_version(home):
     out = rtfm.health_check()
     assert out["ok"] is True
-    assert out["schema_version"] == rtfm.SCHEMA_VERSION
+    assert out["schema_version"] == config.SCHEMA_VERSION
 
 
 def test_health_check_calls_step_one_without_indexing(home, tmp_path, unopenable):
@@ -407,8 +407,8 @@ def test_find_duplicates_groups_by_content(home, tmp_path):
     for n in ("a.md", "b.md", "c.md"):
         (d / n).write_text(body)
     (d / "unique.md").write_text("different body\n")
-    conn = rtfm.get_index_db()
-    rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
+    conn = index.get_index_db()
+    index.reindex_source(conn, manifest.Source("docs", "dir", d))
     out = rtfm.find_duplicates()
     assert len(out["duplicates"]) == 1  # only the 3-way duplicate
     g = out["duplicates"][0]
@@ -425,17 +425,17 @@ def test_find_duplicates_source_scopes_count_and_paths(home, tmp_path):
     d_a.mkdir()
     (d_a / "a1.md").write_text(body)
     (d_a / "a2.md").write_text(body)
-    conn = rtfm.get_index_db()
-    rtfm.reindex_source(conn, rtfm.Source(name="srcA", type="dir", path=d_a))
+    conn = index.get_index_db()
+    index.reindex_source(conn, manifest.Source(name="srcA", type="dir", path=d_a))
 
     # Source B: one file with the same content (not a within-source duplicate)
     d_b = tmp_path / "srcB"
     d_b.mkdir()
     (d_b / "b1.md").write_text(body)
-    rtfm.load_manifest()
+    manifest.load_manifest()
     _add_source("srcA", d_a)
     _add_source("srcB", d_b)
-    rtfm.reindex_source(conn, rtfm.Source(name="srcB", type="dir", path=d_b))
+    index.reindex_source(conn, manifest.Source(name="srcB", type="dir", path=d_b))
 
     # Within source A: one group, count=2, only A paths
     out_a = rtfm.find_duplicates(source="srcA")
@@ -465,15 +465,15 @@ def test_source_filter_restricts_search(home, tmp_path):
     d_docs = tmp_path / "docs"
     d_docs.mkdir()
     (d_docs / "guide.md").write_text("alpha unique_one content here\n")
-    conn = rtfm.get_index_db()
-    rtfm.reindex_source(conn, rtfm.Source(name="docs", type="dir", path=d_docs))
+    conn = index.get_index_db()
+    index.reindex_source(conn, manifest.Source(name="docs", type="dir", path=d_docs))
 
     d_manual = tmp_path / "manual"
     d_manual.mkdir()
     (d_manual / "ref.md").write_text("bravo unique_two content here\n")
-    rtfm.load_manifest()  # bootstrap default so manifest exists
+    manifest.load_manifest()  # bootstrap default so manifest exists
     _add_source("manual", d_manual)
-    rtfm.reindex_source(conn, rtfm.Source(name="manual", type="dir", path=d_manual))
+    index.reindex_source(conn, manifest.Source(name="manual", type="dir", path=d_manual))
 
     # unique_two is in manual, not docs.
     hits_manual = rtfm.search_index(conn, "unique_two", source="manual")
@@ -489,9 +489,9 @@ def test_reindex_tool_handles_git_repo(home, tmp_path, git_branch):
                                          filename="a.md",
                                          content="hello world content\n")
     dest = tmp_path / "dest"
-    rtfm._git_clone(str(remote), branch, dest, timeout=30)
-    rtfm.load_manifest()
-    mp = rtfm.manifest_path()
+    git_ops.clone(str(remote), branch, dest, timeout=30)
+    manifest.load_manifest()
+    mp = config.manifest_path()
     mp.write_text(
         f'[[source]]\nname="specs"\ntype="git_repo"\n'
         f'url="{remote}"\nref="{branch}"\npath="{dest}"\next_blocklist=[]\n'
@@ -504,8 +504,8 @@ def test_reindex_tool_handles_git_repo(home, tmp_path, git_branch):
 
 def test_health_check_reports_git_repo_sources(home, tmp_path):
     """health_check includes git_repo sources."""
-    rtfm.load_manifest()
-    mp = rtfm.manifest_path()
+    manifest.load_manifest()
+    mp = config.manifest_path()
     mp.write_text(
         '[[source]]\nname="specs"\ntype="git_repo"\n'
         'url="https://example.com/repo.git"\nref="feat-x"\next_blocklist=[]\n'
@@ -519,10 +519,10 @@ def test_health_check_reports_git_repo_sources(home, tmp_path):
 def test_a_git_repo_source_reports_its_steps(home, tmp_path, git_branch):
     remote, seed, branch = make_git_repo(tmp_path, git_branch, filename="broken.pdf",
                                          content="%PDF-1.4\nnot really a pdf\n")
-    conn = rtfm.get_index_db()
-    src = rtfm.Source(name="g", type="git_repo", url=str(remote), ref=branch,
+    conn = index.get_index_db()
+    src = manifest.Source(name="g", type="git_repo", url=str(remote), ref=branch,
                       ext_blocklist=frozenset())
-    summary = rtfm.reindex_source(conn, src)
+    summary = index.reindex_source(conn, src)
     assert any("COULD NOT HANDLE" in w for w in summary.get("warnings", []))
 
 
@@ -530,7 +530,7 @@ def test_reindex_surfaces_a_handling_failure(home, tmp_path):
     d = tmp_path / "docs"
     d.mkdir()
     (d / "broken.pdf").write_bytes(b"%PDF-1.4\nnot really a pdf\n")
-    rtfm.load_manifest()
+    manifest.load_manifest()
     _add_source("docs", d)
     out = rtfm.reindex(source="docs")
     assert any("COULD NOT HANDLE" in w for w in out.get("WARNING", []))
@@ -541,14 +541,14 @@ def test_search_surfaces_a_handling_failure(home, tmp_path):
     d.mkdir()
     (d / "ok.md").write_text("findable keyword")
     (d / "broken.pdf").write_bytes(b"%PDF-1.4\nnot really a pdf\n")
-    rtfm.load_manifest()
+    manifest.load_manifest()
     _add_source("docs", d)
     out = rtfm.search(query="keyword", source="docs")
     assert any("COULD NOT HANDLE" in w for w in out.get("WARNING", []))
 
 
 def _add_allowlisted_source(name, path, allow):
-    mp = rtfm.manifest_path()
+    mp = config.manifest_path()
     exts = ", ".join(f'"{e}"' for e in allow)
     mp.write_text(
         mp.read_text()
@@ -560,7 +560,7 @@ def test_reindex_reports_nothing_selected(home, tmp_path):
     d = tmp_path / "docs"
     d.mkdir()
     (d / "a.md").write_text("x")
-    rtfm.load_manifest()
+    manifest.load_manifest()
     _add_allowlisted_source("docs", d, [".nomatch"])
     out = rtfm.reindex(source="docs")
     assert any("NOTHING SELECTED" in w for w in out.get("WARNING", []))
@@ -570,7 +570,7 @@ def test_search_reports_nothing_selected(home, tmp_path):
     d = tmp_path / "docs"
     d.mkdir()
     (d / "a.md").write_text("findable keyword")
-    rtfm.load_manifest()
+    manifest.load_manifest()
     _add_allowlisted_source("docs", d, [".nomatch"])
     out = rtfm.search(query="keyword", source="docs")
     assert any("NOTHING SELECTED" in w for w in out.get("WARNING", []))
@@ -580,7 +580,7 @@ def test_health_check_reports_an_extraction_failure_on_every_run(home, tmp_path)
     d = tmp_path / "docs"
     d.mkdir()
     (d / "broken.pdf").write_bytes(b"%PDF-1.4\nnot really a pdf\n")
-    rtfm.load_manifest()
+    manifest.load_manifest()
     _add_source("docs", d)
     rtfm.reindex(source="docs")
     out = rtfm.health_check()
@@ -597,7 +597,7 @@ def test_health_check_clean_corpus_has_no_extraction_issue(home, tmp_path):
     d = tmp_path / "docs"
     d.mkdir()
     (d / "ok.md").write_text("clean content")
-    rtfm.load_manifest()
+    manifest.load_manifest()
     _add_source("docs", d)
     rtfm.reindex(source="docs")
     out = rtfm.health_check()
@@ -611,7 +611,7 @@ def test_health_check_names_every_broken_position_not_a_content_count(home, tmp_
     body = b"%PDF-1.4\nnot really a pdf\n"
     for n in ("a.pdf", "b.pdf", "c.pdf"):
         (d / n).write_bytes(body)
-    rtfm.load_manifest()
+    manifest.load_manifest()
     _add_source("docs", d)
     rtfm.reindex(source="docs")
     out = rtfm.health_check()
@@ -626,8 +626,8 @@ def test_health_check_skips_extraction_rows_for_a_source_dropped_from_the_manife
     d = tmp_path / "docs"
     d.mkdir()
     (d / "broken.pdf").write_bytes(b"%PDF-1.4\nnot really a pdf\n")
-    rtfm.load_manifest()
-    mp = rtfm.manifest_path()
+    manifest.load_manifest()
+    mp = config.manifest_path()
     original = mp.read_text()
     _add_source("docs", d)
     rtfm.reindex(source="docs")
@@ -637,13 +637,13 @@ def test_health_check_skips_extraction_rows_for_a_source_dropped_from_the_manife
 
 
 def test_the_zero_path_summary_has_the_same_keys_as_a_real_one(home, tmp_path):
-    conn = rtfm.get_index_db()
-    missing = rtfm.Source(name="s", type="dir", path=tmp_path / "nope",
+    conn = index.get_index_db()
+    missing = manifest.Source(name="s", type="dir", path=tmp_path / "nope",
                           ext_blocklist=frozenset())
-    real = rtfm.Source(name="s", type="dir", path=tmp_path, ext_blocklist=frozenset())
+    real = manifest.Source(name="s", type="dir", path=tmp_path, ext_blocklist=frozenset())
     (tmp_path / "a.md").write_text("x")
-    assert (set(rtfm.reindex_source(conn, missing))
-            == set(rtfm.reindex_source(conn, real)) - {"warnings"})
+    assert (set(index.reindex_source(conn, missing))
+            == set(index.reindex_source(conn, real)) - {"warnings"})
 
 
 # --- rtfm#29: step reports reach every query, and a query walks once ---------
@@ -660,7 +660,7 @@ def test_search_reports_a_denied_file_on_every_run(home, tmp_path, unopenable):
     d.mkdir()
     (d / "guide.md").write_text("the widget protocol defines flits\n")
     unopenable(d / "locked.md")
-    rtfm.load_manifest()                 # bootstraps the manifest file
+    manifest.load_manifest()                 # bootstraps the manifest file
     _add_source("docs", d)
     for run in (1, 2, 3):
         out = rtfm.search(query="widget protocol", source="docs")
@@ -675,7 +675,7 @@ def test_search_reports_a_denied_directory_on_every_run(home, tmp_path, unopenab
     d.mkdir()
     (d / "guide.md").write_text("the widget protocol defines flits\n")
     unopenable(d / "vault", directory=True)
-    rtfm.load_manifest()                 # bootstraps the manifest file
+    manifest.load_manifest()                 # bootstraps the manifest file
     _add_source("docs", d)
     for run in (1, 2, 3):
         out = rtfm.search(query="widget protocol", source="docs")
@@ -693,8 +693,8 @@ def test_search_reports_nothing_selected_on_every_run(home, tmp_path):
     d = tmp_path / "docs"
     d.mkdir()
     (d / "a.png").write_text("x")
-    rtfm.load_manifest()                 # bootstraps the manifest file
-    mp = rtfm.manifest_path()
+    manifest.load_manifest()                 # bootstraps the manifest file
+    mp = config.manifest_path()
     mp.write_text(mp.read_text()
                   + f'\n[[source]]\nname="shots"\ntype="dir"\npath="{d}"\next_allowlist=[".md"]\n')
     for run in (1, 2, 3):
@@ -711,7 +711,7 @@ def test_search_reports_a_broken_file_on_every_run(home, tmp_path):
     d.mkdir()
     (d / "guide.md").write_text("the widget protocol defines flits\n")
     (d / "broken.pdf").write_bytes(b"%PDF-1.4\nnot really a pdf\n")
-    rtfm.load_manifest()                 # bootstraps the manifest file
+    manifest.load_manifest()                 # bootstraps the manifest file
     _add_source("docs", d)
     for run in (1, 2, 3):
         out = rtfm.search(query="widget protocol", source="docs")
@@ -727,7 +727,7 @@ def test_a_query_walks_the_tree_once(home, tmp_path, monkeypatch):
     d = tmp_path / "docs"
     d.mkdir()
     (d / "guide.md").write_text("the widget protocol defines flits\n")
-    rtfm.load_manifest()                 # bootstraps the manifest file
+    manifest.load_manifest()                 # bootstraps the manifest file
     _add_source("docs", d)
 
     calls = []
@@ -754,8 +754,8 @@ def test_search_reports_a_broken_file_in_a_fresh_git_source(home, tmp_path):
     subprocess.run(["git", "-C", str(seed), "add", "."], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "commit", "-m", "broken"], capture_output=True)
     subprocess.run(["git", "-C", str(seed), "push", "origin", branch], capture_output=True)
-    rtfm.load_manifest()
-    mp = rtfm.manifest_path()
+    manifest.load_manifest()
+    mp = config.manifest_path()
     mp.write_text(mp.read_text() + f'\n[[source]]\nname="specs"\ntype="git_repo"\n'
                                    f'url="{remote}"\nref="{branch}"\next_blocklist=[]\n')
     for run in (1, 2, 3):

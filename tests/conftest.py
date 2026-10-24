@@ -3,7 +3,7 @@ import subprocess
 
 import pytest
 
-import rtfm_server as rtfm
+from rtfm import index
 
 # Fresh `git init` repos must get a `main` branch — the tests assume main, but the
 # machine default may be `master`. Pass init.defaultBranch=main to every git
@@ -17,9 +17,9 @@ os.environ.setdefault("GIT_CONFIG_VALUE_0", "main")
 def _clear_freshness_cache():
     """The git_repo freshness memo is module-level and TTL'd — a verdict cached by
     one test must not leak into the next (or the same test's later assertions)."""
-    rtfm._freshness_cache.clear()
+    index.freshness_cache.clear()
     yield
-    rtfm._freshness_cache.clear()
+    index.freshness_cache.clear()
 
 
 @pytest.fixture(autouse=True)
