@@ -242,6 +242,7 @@ def test_main_execs_the_resolved_command(monkeypatch):
 def test_fronts_do_not_contain_the_core():
     for front in ("claude", "opencode"):
         assert not (ROOT / "plugins" / front / "rtfm_server.py").exists()
+        assert not (ROOT / "plugins" / front / "rtfm").exists()
 
 
 def test_no_cross_discovered_skill_dirs():
