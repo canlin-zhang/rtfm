@@ -5,10 +5,5 @@
   "author": { "name": "Canlin Zhang" },
   "license": "MIT",
   "homepage": "https://github.com/canlin-zhang/rtfm",
-  "mcpServers": {
-    "rtfm": {
-      "command": "python3",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/launch"]
-    }
-  }
+  "repository": "https://github.com/canlin-zhang/rtfm"
 }

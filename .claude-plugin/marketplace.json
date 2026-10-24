@@ -4,7 +4,7 @@
   "plugins": [
     {
       "name": "rtfm",
-      "source": "./",
+      "source": "./plugins/claude",
       "description": "Read The Full Manual — local document-corpus search."
     }
   ]
