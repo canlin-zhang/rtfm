@@ -19,69 +19,26 @@ from typing import NamedTuple
 
 from mcp.server.fastmcp import FastMCP
 
+from rtfm.config import (
+    CHUNK_LINES,
+    DEFAULT_EXT_BLOCKLIST,
+    MARKUP_EXTS,
+    MAX_LOCATIONS,
+    SCHEMA_VERSION,
+    corpus_home,
+    default_source_dir,
+    git_timeout,
+    index_db_path,
+    managed_repo_path,
+    manifest_path,
+)
+
 # --- config -----------------------------------------------------------------
 _log = logging.getLogger("rtfm")
 
-# The markup routine's extension set — a HANDLING concern (ATX/setext heading extraction
-# for doc-level ranking, ADR 0012), never a selection default. TEXT_EXTS did both jobs
-# under one name, which is how a .bzl file came to be selected and then extracted to zero
-# rows (ADR 0014).
-MARKUP_EXTS = frozenset({".txt", ".md", ".mdx", ".rst", ".rest"})
-
-# Step 2's default deny set, consulted in ext_blocklist mode only. Growing this list
-# removes garbage from an index; growing an allowlist would silently add content to every
-# source that never asked for it, which is why there is no default allowlist (ADR 0014).
-DEFAULT_EXT_BLOCKLIST = frozenset({
-    # images and assets
-    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".tiff", ".tif",
-    ".svg", ".svgz", ".psd", ".ai", ".eps",
-    # fonts
-    ".woff", ".woff2", ".ttf", ".otf", ".eot",
-    # archives
-    ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar", ".jar", ".whl",
-    # audio and video
-    ".mp3", ".wav", ".flac", ".ogg", ".m4a", ".mp4", ".avi", ".mov", ".mkv", ".webm",
-    # compiled and linkable artifacts
-    ".so", ".dylib", ".dll", ".exe", ".o", ".a", ".lib", ".pyc", ".pyo", ".class",
-    ".wasm", ".node",
-    # binary data and containers
-    ".db", ".sqlite", ".sqlite3", ".bin", ".dat", ".pickle", ".pkl", ".npy", ".npz",
-    ".parquet", ".avro", ".pb",
-    # office binaries (zip containers; never valid UTF-8)
-    ".doc", ".xls", ".ppt", ".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp",
-})
-CHUNK_LINES = 50
-SCHEMA_VERSION = 5                   # index DB is a cache; mismatch ⇒ drop & rebuild
-MAX_LOCATIONS = 5                    # default cap on locations listed per search hit
-
-
-def corpus_home() -> Path:
-    return Path(os.environ.get("RTFM_HOME", Path.home() / ".rtfm")).expanduser()
-
-
-def manifest_path() -> Path:
-    return corpus_home() / "manifest.toml"
-
-
-def default_source_dir() -> Path:
-    return corpus_home() / "default"
-
-
-def index_db_path() -> Path:
-    return corpus_home() / "cache" / "index.db"
-
-
-def _managed_repo_path(name: str) -> Path:
-    """Path rtfm uses when a git_repo source omits `path`."""
-    return corpus_home() / "repos" / name
-
-
-def _git_timeout() -> int:
-    """Timeout in seconds for git subprocess calls. 0 = no timeout."""
-    env = os.environ.get("RTFM_GIT_TIMEOUT")
-    if env and env.isdigit():
-        return int(env)
-    return 60
+# Temporary alias for the not-yet-moved tests; the package path is the source
+# of truth and the facade is trimmed in the final task.
+_managed_repo_path = managed_repo_path
 
 # --- git operations ----------------------------------------------------------
 
@@ -91,7 +48,7 @@ def _git(args: list[str], cwd: Path, timeout: int | None = None,
     subprocess failure (missing/untraversable cwd, missing git binary, permissions).
     `allow_exit_codes` are non-zero exits that are legitimate answers, not failures
     (git merge-base --is-ancestor exits 1 for a genuine 'not an ancestor')."""
-    t = timeout if timeout is not None else _git_timeout()
+    t = timeout if timeout is not None else git_timeout()
     if not cwd.is_dir():
         # subprocess.run raises FileNotFoundError for a missing cwd exactly as for a
         # missing git binary — distinguish, or a deleted clone would be misreported
@@ -200,7 +157,7 @@ def _git_resolve_ref(path: Path, ref: str) -> str:
 
 def _git_fetch(path: Path, timeout: int | None = None) -> None:
     """git fetch origin. Timeout-guarded; raises RuntimeError on failure."""
-    t = timeout if timeout is not None else _git_timeout()
+    t = timeout if timeout is not None else git_timeout()
     _git(["fetch", "origin"], cwd=path, timeout=t)
 
 
@@ -209,7 +166,7 @@ def _git_clone(url: str, ref: str | None, dest: Path, timeout: int | None = None
     branch/tag; with ref=None or a pinned SHA, clones the remote's default branch
     (git rejects `--branch HEAD`, and `git clone --branch <sha>` fails — the pinned
     SHA is checked out afterwards by _git_checkout's detached path). Raises RuntimeError."""
-    t = timeout if timeout is not None else _git_timeout()
+    t = timeout if timeout is not None else git_timeout()
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
     except OSError as e:
@@ -253,23 +210,23 @@ def _git_checkout(path: Path, ref: str) -> None:
     if is_branch:
         # Reset to match the remote the caller just fetched
         _git(["checkout", "-B", ref, f"origin/{ref}"], cwd=path,
-             timeout=_git_timeout())
+             timeout=git_timeout())
     else:
         # Tag or SHA: direct checkout. A plain `git fetch origin` does not bring a
         # tag whose commit is unreachable from a fetched branch, so the retry must
         # fetch the tag by explicit refspec — and only when the failure was the
         # ref missing locally (a dirty tree would fail identically after the fetch).
         try:
-            _git(["checkout", ref], cwd=path, timeout=_git_timeout())
+            _git(["checkout", ref], cwd=path, timeout=git_timeout())
         except RuntimeError as e:
             if "did not match any file(s) known to git" not in str(e):
                 raise
             try:
                 _git(["fetch", "origin", f"refs/tags/{ref}:refs/tags/{ref}"],
-                     cwd=path, timeout=_git_timeout())
+                     cwd=path, timeout=git_timeout())
             except RuntimeError:
                 raise e from None           # the ref really doesn't exist — original error
-            _git(["checkout", ref], cwd=path, timeout=_git_timeout())
+            _git(["checkout", ref], cwd=path, timeout=git_timeout())
 
 
 def _is_sha(ref: str) -> bool:
@@ -867,7 +824,7 @@ def _ensure_git_repo_ready(src: Source) -> tuple[Path, str | None]:
         return repo_path, None
 
     # Managed mode: clone if needed
-    repo_path = _managed_repo_path(src.name)
+    repo_path = managed_repo_path(src.name)
     if not (repo_path / ".git").exists():
         try:
             _git_clone(src.url, src.ref, repo_path)   # ref None → default branch
@@ -1185,7 +1142,7 @@ def _repo_freshness(conn: sqlite3.Connection, src: Source) -> tuple[int, bool]:
             return 0, True  # never indexed — always stale
         if row[1] != _config_scope(src):
             return 0, True  # the manifest moved; a pin freezes the commit, not the scope
-        repo_path = src.path if src.path is not None else _managed_repo_path(src.name)
+        repo_path = src.path if src.path is not None else managed_repo_path(src.name)
         if not repo_path.exists():
             return 0, True  # clone vanished
         ref = src.ref or _default_branch(repo_path)
@@ -1856,7 +1813,7 @@ def read_document_text(src: Source, relpath: str, start: int = 1, end: int | Non
     if src.path is not None:
         root = src.path
     elif src.type == "git_repo":
-        root = _managed_repo_path(src.name)
+        root = managed_repo_path(src.name)
         if not root.exists():
             return (f"!!! ERROR !!! source '{src.name}' has no clone yet — "
                     f"run reindex('{src.name}') first.")
@@ -1955,7 +1912,7 @@ def search(query: str, source: str | None = None, max_files: int = 20,
             # Multiple sources on one clone (or one broken remote) would
             # otherwise repeat the identical warning once per source.
             key = (s.path if s.path is not None
-                   else str(_managed_repo_path(s.name)))
+                   else str(managed_repo_path(s.name)))
             message = None
             if summary.get("error"):
                 message = (f"!!! AUTO-REINDEX FAILED '{s.name}' !!! {summary['error']} — "
@@ -2101,7 +2058,7 @@ def list_sources() -> dict:
     out = []
     for s in sources:
         item: dict = {"name": s.name, "type": s.type,
-                      "path": str(s.path) if s.path else str(_managed_repo_path(s.name)),
+                      "path": str(s.path) if s.path else str(managed_repo_path(s.name)),
                       "mutable": s.mutable,
                       "indexed_files": conn.execute(
                           "SELECT COUNT(*) FROM locations WHERE source=?",
@@ -2111,7 +2068,7 @@ def list_sources() -> dict:
                           (s.name,)).fetchone()[0]}
         if s.type == "git_repo":
             item["url"] = s.url
-            repo_path = s.path if s.path else _managed_repo_path(s.name)
+            repo_path = s.path if s.path else managed_repo_path(s.name)
             # Guarded: a path-less never-cloned repo has no origin to ask, and one bad
             # source must never break the listing for the others.
             try:
@@ -2176,7 +2133,7 @@ def health_check() -> dict:
         for src in sources:
             if src.type not in ("dir", "git_repo"):
                 continue
-            root = src.path if src.path is not None else _managed_repo_path(src.name)
+            root = src.path if src.path is not None else managed_repo_path(src.name)
             if not root.exists():
                 continue
             reachable = access(src, root)
