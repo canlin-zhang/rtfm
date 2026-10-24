@@ -5,6 +5,12 @@ The structural tests pin the manifests, the bootstrap helpers, and the front
 layout; this page covers the checks that need a real client or the published
 package. Run them after a core release.
 
+The front does not resolve the core on every launch. It installs the pinned
+`rtfm-mcp` once into `data_dir(front)/venv`, stamps the version in
+`.core-version`, and then runs that venv's interpreter. The first launch after
+an install or update performs the install; later launches do not touch the
+network. See [ADR 0019](adr/0019-front-persistent-install.md).
+
 ## Automated check
 
 ```bash
@@ -25,7 +31,9 @@ OK   claude plugin validate --strict
 
 It needs network access, so it is deliberately outside the test suite (ADR
 0018). A failure here means the pin, the bootstrap, or the published wheel is
-broken, not that the code changed.
+broken, not that the code changed. The script uses a temporary `RTFM_HOME`, so
+each run performs the one-time install there; that run is slower than a normal
+launch.
 
 ## OpenCode session
 
