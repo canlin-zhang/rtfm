@@ -13,9 +13,10 @@ uvx ruff check .          # lint (config in pyproject.toml [tool.ruff]); add --f
 uv run rtfm_server.py     # run the MCP server directly (dev; installed fronts use bootstrap.py)
 ```
 
-`python3` on PATH with a working `venv`/`pip` module is the only hard prerequisite; `uv` is the
-fast path; `poppler` (`pdftotext`) is an optional PDF-quality bonus (the `pymupdf`/`pypdf`
-fallback covers extraction without it). Supported platforms: Linux and macOS; Windows is not
+`python3` on PATH with a working `venv`/`pip` module is the hard prerequisite for the front's
+fallback installer; `uv` is the preferred installer (`uv venv` + `uv pip install`); `poppler`
+(`pdftotext`) is an optional PDF-quality bonus (the `pymupdf`/`pypdf` fallback covers extraction
+without it). Supported platforms: Linux and macOS; Windows is not
 officially supported.
 
 ## Layout

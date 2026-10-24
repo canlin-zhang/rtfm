@@ -56,11 +56,15 @@ Point the client's MCP configuration at that command:
 }
 ```
 
-**Prerequisites:** `python3` on PATH with a working `venv`/`pip` module
-(Debian/Ubuntu: `python3-venv`) is the only hard requirement for the plugin. It
-prefers `uvx`/`uv` and otherwise builds a private venv on first run —
-`$CLAUDE_PLUGIN_DATA/venv` for Claude Code, else `~/.rtfm/fronts/<front>/venv`.
-The PyPI path needs `uv` (for `uvx`) or `pipx`.
+**Prerequisites:** the plugin builds a private venv under
+`$CLAUDE_PLUGIN_DATA/venv` (Claude Code) or `~/.rtfm/fronts/<front>/venv`
+(otherwise), installs the pinned `rtfm-mcp` there once, and runs it from there.
+It uses `uv` when present (`uv venv` + `uv pip install`); without uv it falls
+back to `python3 -m venv` + pip, so `python3` with a working `venv`/`pip` module
+is the hard requirement (Debian/Ubuntu: `python3-venv`). Later launches do not
+touch the network. See [ADR 0019](docs/adr/0019-front-persistent-install.md).
+The manual `uvx`/`pipx` commands above are for a one-off MCP client config, not
+the plugin.
 *Optional:* install `poppler-utils` (`pdftotext`) for best-quality PDF extraction.
 
 **Platform support:** Linux and macOS. Windows is not officially supported.
