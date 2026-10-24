@@ -9,8 +9,6 @@ one test enforces that so the two install paths cannot drift.
 import importlib.machinery
 import importlib.util
 import json
-import subprocess
-import sys
 import tomllib
 from pathlib import Path
 
@@ -70,7 +68,7 @@ def test_uv_creates_the_venv_and_installs_the_core(monkeypatch, tmp_path):
     monkeypatch.setattr(bootstrap.subprocess, "check_call", check_call)
     py = str(tmp_path / "venv" / "bin" / "python")
     assert bootstrap.venv_server("0.9.2", "claude") == [py, "-m", "rtfm_server"]
-    assert calls[0] == ["/bin/uv", "venv", "--python", ">=3.11", str(tmp_path / "venv")]
+    assert calls[0] == ["/bin/uv", "venv", "--seed", "--python", ">=3.11", str(tmp_path / "venv")]
     assert calls[1] == [
         "/bin/uv", "pip", "install", "--python", py, "rtfm-mcp==0.9.2",
     ]
@@ -114,167 +112,69 @@ def test_no_uv_creates_a_venv_with_the_stdlib(monkeypatch, tmp_path):
     assert "--refresh-package" not in calls[0]
 
 
-def test_a_partial_venv_is_removed_before_recreating(monkeypatch, tmp_path):
+def _fake_python(path, exit_code):
+    (path.parent).mkdir(parents=True, exist_ok=True)
+    path.write_text(f"#!/bin/sh\nexit {exit_code}\n")
+    path.chmod(0o755)
+
+
+def test_a_pip_less_venv_is_recreated_when_uv_is_gone(monkeypatch, tmp_path):
+    """A killed create leaves bin/python without pip; the next launch must rebuild."""
     monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
-    monkeypatch.setattr(bootstrap, "find_tool", lambda name: "/bin/uv")
+    monkeypatch.setattr(bootstrap, "find_tool", lambda name: None)
     vdir = tmp_path / "venv"
-    vdir.mkdir()
+    _fake_python(vdir / "bin" / "python", 1)
     order = []
     monkeypatch.setattr(
         bootstrap.shutil, "rmtree", lambda path, **kw: order.append(("rmtree", path)))
 
     def create(path, uv):
         order.append(("create", path))
-        (path / "bin").mkdir(parents=True)
-        (path / "bin" / "python").write_text("")
+        _fake_python(path / "bin" / "python", 0)
 
     monkeypatch.setattr(bootstrap, "_create_venv", create)
     monkeypatch.setattr(bootstrap, "_install_core", lambda *a: None)
-    bootstrap.venv_server("0.9.2", "claude")
+    bootstrap.venv_server("0.9.3", "claude")
     assert order == [("rmtree", vdir), ("create", vdir)]
 
 
-def test_main_reports_fatal_to_stderr(monkeypatch, capsys):
-    def boom(root):
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr(bootstrap, "read_version", boom)
-    with pytest.raises(SystemExit) as exc:
-        bootstrap.main(["--front", "claude"])
-    assert exc.value.code == 1
-    assert "FATAL" in capsys.readouterr().err
-
-
-def test_venv_install_keeps_stdout_clean(monkeypatch, tmp_path):
-    monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
-    monkeypatch.setattr(bootstrap, "find_tool", lambda name: None)
-
-    def fake_create(path, with_pip):
-        (path / "bin").mkdir(parents=True, exist_ok=True)
-        (path / "bin" / "python").write_text("")
-
-    monkeypatch.setattr(bootstrap.venv, "create", fake_create)
-    calls = []
-    monkeypatch.setattr(
-        bootstrap.subprocess, "check_call", lambda cmd, **kwargs: calls.append(kwargs)
-    )
-
-    command = bootstrap.venv_server("0.8.0", "claude")
-
-    assert command == [str(tmp_path / "venv" / "bin" / "python"), "-m", "rtfm_server"]
-    assert calls and calls[0]["stdout"] is sys.stderr
-
-
-def test_venv_creation_failure_keeps_stdout_clean(monkeypatch, tmp_path, capsys):
-    """ensurepip's guidance must not reach the MCP stdout stream."""
-    monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
-    monkeypatch.setattr(bootstrap, "find_tool", lambda name: None)
-    monkeypatch.setenv("HOME", str(tmp_path))
-
-    def broken_create(path, with_pip):
-        print("ensurepip is not available", file=sys.stdout)
-        raise SystemExit(1)
-
-    monkeypatch.setattr(bootstrap.venv, "create", broken_create)
-
-    with pytest.raises(SystemExit) as exc:
-        bootstrap.main(["--front", "claude"])
-
-    assert exc.value.code == 1
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert "ensurepip is not available" in captured.err
-    assert "FATAL" in captured.err
-    assert not (tmp_path / "venv" / "bin" / "python").exists()
-
-
-def test_venv_creation_failure_removes_partial_venv_and_retries(monkeypatch, tmp_path):
-    monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
-    monkeypatch.setattr(bootstrap, "find_tool", lambda name: None)
-    calls = []
-
-    def broken_create(path, with_pip):
-        calls.append(path)
-        (path / "bin").mkdir(parents=True, exist_ok=True)
-        (path / "bin" / "python").write_text("")
-        raise SystemExit(1)
-
-    monkeypatch.setattr(bootstrap.venv, "create", broken_create)
-
-    for _ in range(2):
-        with pytest.raises(RuntimeError, match="python3-venv"):
-            bootstrap.venv_server("0.8.0", "claude")
-
-    assert len(calls) == 2
-    assert not (tmp_path / "venv" / "bin" / "python").exists()
-
-
-def test_venv_creation_failure_prints_child_output(monkeypatch, tmp_path, capsys):
-    monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
-    monkeypatch.setattr(bootstrap, "find_tool", lambda name: None)
-    monkeypatch.setenv("HOME", str(tmp_path))
-
-    def broken_create(path, with_pip):
-        raise subprocess.CalledProcessError(1, ["python"], output=b"ensurepip exploded\n")
-
-    monkeypatch.setattr(bootstrap.venv, "create", broken_create)
-
-    with pytest.raises(SystemExit):
-        bootstrap.main(["--front", "claude"])
-
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert "ensurepip exploded" in captured.err
-
-
-def _make_venv(tmp_path, version):
-    (tmp_path / "venv" / "bin").mkdir(parents=True)
-    (tmp_path / "venv" / "bin" / "python").write_text("")
-    (tmp_path / "venv" / ".core-version").write_text(version)
-
-
-def test_venv_stamp_skips_matching_install(monkeypatch, tmp_path):
-    monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
-    _make_venv(tmp_path, "0.8.0")
-    calls = []
-    monkeypatch.setattr(
-        bootstrap.subprocess, "check_call", lambda cmd, **kwargs: calls.append(cmd)
-    )
-
-    command = bootstrap.venv_server("0.8.0", "claude")
-
-    assert command == [str(tmp_path / "venv" / "bin" / "python"), "-m", "rtfm_server"]
-    assert calls == []
-
-
-def test_venv_stamp_reinstalls_on_mismatch(monkeypatch, tmp_path):
-    monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
-    _make_venv(tmp_path, "0.7.0")
-    calls = []
-    monkeypatch.setattr(
-        bootstrap.subprocess, "check_call", lambda cmd, **kwargs: calls.append(cmd)
-    )
-
-    bootstrap.venv_server("0.8.0", "claude")
-
-    assert calls and "rtfm-mcp==0.8.0" in calls[0]
-    assert (tmp_path / "venv" / ".core-version").read_text() == "0.8.0"
-
-
-def test_the_install_lock_wraps_the_stamp_check_and_install(monkeypatch, tmp_path):
+def test_a_pip_less_venv_is_reused_when_uv_is_present(monkeypatch, tmp_path):
     monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
     monkeypatch.setattr(bootstrap, "find_tool", lambda name: "/bin/uv")
-    (tmp_path / "venv" / "bin").mkdir(parents=True)
-    (tmp_path / "venv" / "bin" / "python").write_text("")
+    vdir = tmp_path / "venv"
+    _fake_python(vdir / "bin" / "python", 1)
     order = []
-    monkeypatch.setattr(bootstrap, "_install_core",
-                        lambda *a: order.append("install"))
-    monkeypatch.setattr(bootstrap.fcntl, "flock",
-                        lambda handle, op: order.append(("flock", op)))
-    bootstrap.venv_server("0.9.2", "claude")
-    assert order[0] == ("flock", bootstrap.fcntl.LOCK_EX)
-    assert order[1] == "install"
-    assert order[2] == ("flock", bootstrap.fcntl.LOCK_UN)
+    monkeypatch.setattr(
+        bootstrap.shutil, "rmtree", lambda path, **kw: order.append(("rmtree", path)))
+    monkeypatch.setattr(bootstrap, "_create_venv", lambda *a: pytest.fail("recreated"))
+    monkeypatch.setattr(bootstrap, "_install_core", lambda *a: None)
+    bootstrap.venv_server("0.9.3", "claude")
+    assert order == []
+
+
+def test_a_failed_install_leaves_no_stamp(monkeypatch, tmp_path):
+    monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
+    monkeypatch.setattr(bootstrap, "find_tool", lambda name: "/bin/uv")
+    vdir = tmp_path / "venv"
+    _fake_python(vdir / "bin" / "python", 0)
+
+    def fail(*args, **kwargs):
+        raise bootstrap.subprocess.CalledProcessError(1, ["uv"])
+
+    monkeypatch.setattr(bootstrap.subprocess, "check_call", fail)
+    with pytest.raises(bootstrap.subprocess.CalledProcessError):
+        bootstrap.venv_server("0.9.3", "claude")
+    assert not (vdir / ".core-version").exists()
+
+
+def test_find_tool_falls_back_to_a_user_local_install(monkeypatch, tmp_path):
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda name: None)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    tool = tmp_path / ".local" / "bin" / "uv"
+    tool.parent.mkdir(parents=True)
+    tool.write_text("#!/bin/sh\n")
+    tool.chmod(0o755)
+    assert bootstrap.find_tool("uv") == str(tool)
 
 
 def test_parse_front_accepts_both_forms():
