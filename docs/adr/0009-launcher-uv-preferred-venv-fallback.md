@@ -15,6 +15,11 @@ because a static MCP command can't branch on what's installed. The launcher:
   source of truth for deps;
 - fails loudly and actionably if neither uv nor python3+pip is usable — never a silent hang.
 
+_Distribution note (ADR 0016):_ fronts no longer carry the server file. A thin
+bootstrap installs the pinned `rtfm-mcp` package into a harness-private venv and
+execs its console script; the launcher described here remains for source and
+development runs. Its uv-preferred/venv-fallback behaviour is unchanged.
+
 The only hard prerequisite is therefore **`python3` on PATH** (the launcher's interpreter
 and the fallback's common denominator). `uv` is a speed bonus; `poppler` is a PDF-quality
 bonus (the pymupdf/pypdf fallback chain covers extraction without it).
