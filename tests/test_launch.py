@@ -10,7 +10,7 @@ launch = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(launch)
 
 
-def test_project_deps_reads_pyproject():
+def test_launcher_reads_dependencies_from_pyproject():
     deps = launch.project_deps(ROOT)
     assert any(d.startswith("mcp") for d in deps)
     assert "pymupdf" in deps and "pypdf" in deps

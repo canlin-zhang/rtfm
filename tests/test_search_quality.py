@@ -16,7 +16,7 @@ def _titled_pdf(path, title, toc_titles, pages):
     doc.close()
 
 
-def test_pdf_title_and_headings_indexed(home, tmp_path):
+def test_pdf_metadata_title_and_bookmarks_are_indexed(home, tmp_path):
     d = tmp_path / "docs"
     d.mkdir()
     _titled_pdf(d / "spec.pdf", "Widget Protocol Specification",
@@ -29,7 +29,7 @@ def test_pdf_title_and_headings_indexed(home, tmp_path):
     assert "Flit Format" in row[1]
 
 
-def test_text_title_and_headings_indexed(home, tmp_path):
+def test_markup_title_and_headings_are_indexed(home, tmp_path):
     d = tmp_path / "docs"
     d.mkdir()
     (d / "guide.md").write_text("# Gadget Manual\n\nintro\n\n## Setup\nsteps\n")
@@ -70,7 +70,7 @@ def test_body_hit_carries_doc_title(home, tmp_path):
     assert hits and "Widget Protocol Specification" in hits[0]["title"]
 
 
-def test_fuzzy_marker_on_or_fallback(home, tmp_path):
+def test_or_fallback_marks_hits_fuzzy(home, tmp_path):
     d = tmp_path / "docs"
     d.mkdir()
     (d / "a.md").write_text("the kitchen has a sink on one line\n")
@@ -82,7 +82,7 @@ def test_fuzzy_marker_on_or_fallback(home, tmp_path):
     assert fuzzy and fuzzy[0]["fuzzy"] is True
 
 
-def test_search_tool_flags_fuzzy(home, tmp_path):
+def test_search_sets_fuzzy_when_the_or_fallback_runs(home, tmp_path):
     d = tmp_path / "docs"
     d.mkdir()
     (d / "a.md").write_text("the kitchen has a sink\n")
@@ -141,7 +141,7 @@ def test_pdf_title_falls_back_to_page_text(home, tmp_path):
     assert "Quokka Reference Manual" in conn.execute("SELECT title FROM doc_fts").fetchone()[0]
 
 
-def test_doc_fts_purged_when_file_removed(home, tmp_path):
+def test_removing_a_file_purges_its_doc_signal(home, tmp_path):
     d = tmp_path / "docs"
     d.mkdir()
     (d / "g.md").write_text("# Gadget Manual\nbody\n")
@@ -181,7 +181,7 @@ def test_body_docs_not_starved_by_dedup(home, tmp_path):
     assert len({h["sha256"] for h in hits}) == 2          # A (title) + a body doc, not just A
 
 
-def test_sane_title_rejects_authoring_artifacts(home, tmp_path):
+def test_authoring_tool_titles_are_rejected(home, tmp_path):
     """A junk metadata title (authoring artifact) is rejected; title falls back to page text."""
     d = tmp_path / "docs"
     d.mkdir()
@@ -191,7 +191,7 @@ def test_sane_title_rejects_authoring_artifacts(home, tmp_path):
     assert conn.execute("SELECT title FROM doc_fts").fetchone()[0] == "Quokka Reference Manual"
 
 
-def test_serial_extraction_path_indexes_doc_signal(home, tmp_path, monkeypatch):
+def test_serial_extraction_indexes_the_doc_signal(home, tmp_path, monkeypatch):
     """RTFM_WORKERS=1 serial extraction yields the same _Extracted shape as the pool path."""
     monkeypatch.setenv("RTFM_WORKERS", "1")
     d = tmp_path / "docs"

@@ -18,7 +18,9 @@ Split the core into an `rtfm/` package by responsibility:
 - `config.py` — paths, extensions, schema/version constants, `Problem`-free
   configuration only.
 - `manifest.py` — `Source` and manifest parsing/validation.
-- `git.py` — the git primitives; source-status helpers live with indexing.
+- `git_ops.py` — the git primitives; source-status helpers live with indexing.
+  The name is not a bare `git`: it cannot be confused with the git CLI or a
+  third-party `git` package in tracebacks.
 - `extract.py` — PDF/text extraction, per-file rows, and doc-level signals.
 - `staging.py` — the staged indexing pipeline (`StepResult`, `Problem`,
   `access`, `select`, `read_bytes_for`, `handle`, reporting types).

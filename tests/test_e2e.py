@@ -3,7 +3,7 @@ import rtfm_server as rtfm
 from rtfm import config, manifest
 
 
-def test_zero_config_drop_and_search(home, sample_pdf):
+def test_zero_config_drop_then_search_finds_the_pdf(home, sample_pdf):
     # 1) fresh home: bootstrap default source by loading the manifest
     manifest.load_manifest()
     # 2) user drops a PDF into the default source

@@ -34,7 +34,7 @@ def _pyproject_version():
     return tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
 
 
-def test_read_version_prefers_package_json(tmp_path):
+def test_read_version_prefers_the_opencode_package_json(tmp_path):
     (tmp_path / "package.json").write_text('{"version": "2.0.0"}')
     (tmp_path / ".claude-plugin").mkdir()
     (tmp_path / ".claude-plugin/plugin.json").write_text('{"version": "1.2.3"}')
