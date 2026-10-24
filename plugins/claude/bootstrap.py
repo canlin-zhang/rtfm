@@ -8,6 +8,8 @@ Diagnostics go to stderr; stdout belongs to the MCP protocol.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -61,7 +63,21 @@ def venv_server(version: str, front: str) -> list[str]:
     py = _venv_python(vdir)
     stamp = vdir / ".core-version"
     if not py.exists():
-        venv.create(vdir, with_pip=True)
+        # venv.create prints ensurepip's guidance to stdout (and raises
+        # SystemExit) when python3-venv is missing. stdout is the MCP stream,
+        # so capture it and route it to stderr through the normal FATAL path.
+        captured = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(captured):
+                venv.create(vdir, with_pip=True)
+        except BaseException as e:
+            sys.stderr.write(captured.getvalue())
+            if isinstance(e, SystemExit):
+                raise RuntimeError(
+                    "cannot create the venv: python3-venv may be missing "
+                    "(Debian/Ubuntu: apt install python3-venv)"
+                ) from None
+            raise
     if not stamp.is_file() or stamp.read_text(encoding="utf-8") != version:
         subprocess.check_call(
             [

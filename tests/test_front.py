@@ -115,6 +115,27 @@ def test_venv_install_keeps_stdout_clean(monkeypatch, tmp_path):
     assert calls and calls[0]["stdout"] is sys.stderr
 
 
+def test_venv_creation_failure_keeps_stdout_clean(monkeypatch, tmp_path, capsys):
+    """ensurepip's guidance must not reach the MCP stdout stream."""
+    monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda name: None)
+
+    def broken_create(path, with_pip):
+        print("ensurepip is not available", file=sys.stdout)
+        raise SystemExit(1)
+
+    monkeypatch.setattr(bootstrap.venv, "create", broken_create)
+
+    with pytest.raises(SystemExit) as exc:
+        bootstrap.main(["--front", "claude"])
+
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "ensurepip is not available" in captured.err
+    assert "FATAL" in captured.err
+
+
 def test_front_bootstraps_are_byte_identical():
     assert (ROOT / "plugins/claude/bootstrap.py").read_bytes() == (
         ROOT / "plugins/opencode/bootstrap.py"
