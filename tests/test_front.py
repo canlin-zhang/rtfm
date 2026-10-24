@@ -11,6 +11,7 @@ import importlib.util
 import json
 import subprocess
 import sys
+import textwrap
 import tomllib
 from pathlib import Path
 
@@ -70,7 +71,7 @@ def test_uv_creates_the_venv_and_installs_the_core(monkeypatch, tmp_path):
     monkeypatch.setattr(bootstrap.subprocess, "check_call", check_call)
     py = str(tmp_path / "venv" / "bin" / "python")
     assert bootstrap.venv_server("0.9.2", "claude") == [py, "-m", "rtfm_server"]
-    assert calls[0] == ["/bin/uv", "venv", "--python", ">=3.11", str(tmp_path / "venv")]
+    assert calls[0] == ["/bin/uv", "venv", "--seed", "--python", ">=3.11", str(tmp_path / "venv")]
     assert calls[1] == [
         "/bin/uv", "pip", "install", "--python", py, "rtfm-mcp==0.9.2",
     ]
@@ -114,24 +115,70 @@ def test_no_uv_creates_a_venv_with_the_stdlib(monkeypatch, tmp_path):
     assert "--refresh-package" not in calls[0]
 
 
-def test_a_partial_venv_is_removed_before_recreating(monkeypatch, tmp_path):
+def _fake_python(path, exit_code):
+    (path.parent).mkdir(parents=True, exist_ok=True)
+    path.write_text(f"#!/bin/sh\nexit {exit_code}\n")
+    path.chmod(0o755)
+
+
+def test_a_pip_less_venv_is_recreated_when_uv_is_gone(monkeypatch, tmp_path):
+    """A killed create leaves bin/python without pip; the next launch must rebuild."""
     monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
-    monkeypatch.setattr(bootstrap, "find_tool", lambda name: "/bin/uv")
+    monkeypatch.setattr(bootstrap, "find_tool", lambda name: None)
     vdir = tmp_path / "venv"
-    vdir.mkdir()
+    _fake_python(vdir / "bin" / "python", 1)
     order = []
     monkeypatch.setattr(
         bootstrap.shutil, "rmtree", lambda path, **kw: order.append(("rmtree", path)))
 
     def create(path, uv):
         order.append(("create", path))
-        (path / "bin").mkdir(parents=True)
-        (path / "bin" / "python").write_text("")
+        _fake_python(path / "bin" / "python", 0)
 
     monkeypatch.setattr(bootstrap, "_create_venv", create)
     monkeypatch.setattr(bootstrap, "_install_core", lambda *a: None)
-    bootstrap.venv_server("0.9.2", "claude")
+    bootstrap.venv_server("0.9.3", "claude")
     assert order == [("rmtree", vdir), ("create", vdir)]
+
+
+def test_a_pip_less_venv_is_reused_when_uv_is_present(monkeypatch, tmp_path):
+    monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
+    monkeypatch.setattr(bootstrap, "find_tool", lambda name: "/bin/uv")
+    vdir = tmp_path / "venv"
+    _fake_python(vdir / "bin" / "python", 1)
+    order = []
+    monkeypatch.setattr(
+        bootstrap.shutil, "rmtree", lambda path, **kw: order.append(("rmtree", path)))
+    monkeypatch.setattr(
+        bootstrap, "_create_venv", lambda *a: pytest.fail("recreated"))
+    monkeypatch.setattr(bootstrap, "_install_core", lambda *a: None)
+    bootstrap.venv_server("0.9.3", "claude")
+    assert order == []
+
+
+def test_a_failed_install_leaves_no_stamp(monkeypatch, tmp_path):
+    monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
+    monkeypatch.setattr(bootstrap, "find_tool", lambda name: "/bin/uv")
+    vdir = tmp_path / "venv"
+    _fake_python(vdir / "bin" / "python", 0)
+
+    def fail(*args, **kwargs):
+        raise bootstrap.subprocess.CalledProcessError(1, ["uv"])
+
+    monkeypatch.setattr(bootstrap.subprocess, "check_call", fail)
+    with pytest.raises(bootstrap.subprocess.CalledProcessError):
+        bootstrap.venv_server("0.9.3", "claude")
+    assert not (vdir / ".core-version").exists()
+
+
+def test_find_tool_falls_back_to_a_user_local_install(monkeypatch, tmp_path):
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda name: None)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    tool = tmp_path / ".local" / "bin" / "uv"
+    tool.parent.mkdir(parents=True)
+    tool.write_text("#!/bin/sh\n")
+    tool.chmod(0o755)
+    assert bootstrap.find_tool("uv") == str(tool)
 
 
 def test_main_reports_fatal_to_stderr(monkeypatch, capsys):
@@ -235,6 +282,7 @@ def _make_venv(tmp_path, version):
 
 def test_venv_stamp_skips_matching_install(monkeypatch, tmp_path):
     monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
+    monkeypatch.setattr(bootstrap, "find_tool", lambda name: "/bin/uv")
     _make_venv(tmp_path, "0.8.0")
     calls = []
     monkeypatch.setattr(
@@ -249,6 +297,7 @@ def test_venv_stamp_skips_matching_install(monkeypatch, tmp_path):
 
 def test_venv_stamp_reinstalls_on_mismatch(monkeypatch, tmp_path):
     monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
+    monkeypatch.setattr(bootstrap, "find_tool", lambda name: "/bin/uv")
     _make_venv(tmp_path, "0.7.0")
     calls = []
     monkeypatch.setattr(
@@ -261,20 +310,70 @@ def test_venv_stamp_reinstalls_on_mismatch(monkeypatch, tmp_path):
     assert (tmp_path / "venv" / ".core-version").read_text() == "0.8.0"
 
 
-def test_the_install_lock_wraps_the_stamp_check_and_install(monkeypatch, tmp_path):
+def test_a_pip_venv_is_reused_when_uv_is_gone(monkeypatch, tmp_path):
     monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
-    monkeypatch.setattr(bootstrap, "find_tool", lambda name: "/bin/uv")
-    (tmp_path / "venv" / "bin").mkdir(parents=True)
-    (tmp_path / "venv" / "bin" / "python").write_text("")
-    order = []
-    monkeypatch.setattr(bootstrap, "_install_core",
-                        lambda *a: order.append("install"))
-    monkeypatch.setattr(bootstrap.fcntl, "flock",
-                        lambda handle, op: order.append(("flock", op)))
-    bootstrap.venv_server("0.9.2", "claude")
-    assert order[0] == ("flock", bootstrap.fcntl.LOCK_EX)
-    assert order[1] == "install"
-    assert order[2] == ("flock", bootstrap.fcntl.LOCK_UN)
+    monkeypatch.setattr(bootstrap, "find_tool", lambda name: None)
+    vdir = tmp_path / "venv"
+    _fake_python(vdir / "bin" / "python", 0)
+    (vdir / ".core-version").write_text("0.9.3")
+    monkeypatch.setattr(
+        bootstrap, "_create_venv", lambda *a: pytest.fail("recreated"))
+    monkeypatch.setattr(
+        bootstrap.subprocess, "check_call", lambda *a, **k: pytest.fail("installed"))
+    assert bootstrap.venv_server("0.9.3", "claude") == [
+        str(vdir / "bin" / "python"), "-m", "rtfm_server"]
+
+
+_LOCK_CHILD = textwrap.dedent(
+    """
+    import importlib.machinery, importlib.util, os, pathlib, sys, time
+    path, vdir, log, version = sys.argv[1:5]
+    loader = importlib.machinery.SourceFileLoader("front_bootstrap_child", path)
+    spec = importlib.util.spec_from_loader("front_bootstrap_child", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    module.data_dir = lambda front: pathlib.Path(vdir).parent
+    module.find_tool = lambda name: "/bin/uv"
+
+    def slow_install(py, version, uv):
+        with open(log, "a") as fh:
+            fh.write(f"start {os.getpid()} {time.monotonic()}\\n")
+        time.sleep(0.6)
+        with open(log, "a") as fh:
+            fh.write(f"end {os.getpid()} {time.monotonic()}\\n")
+
+    module._install_core = slow_install
+    module.venv_server(version, "claude")
+    """
+).strip()
+
+
+def test_two_installs_do_not_overlap(tmp_path):
+    """A real process-level check: a no-op lock lets the installs overlap."""
+    vdir = tmp_path / "venv"
+    (vdir / "bin").mkdir(parents=True)
+    (vdir / "bin" / "python").write_text("")
+    log = tmp_path / "installs.log"
+    script = str(ROOT / "plugins" / "claude" / "bootstrap.py")
+    procs = [
+        subprocess.Popen(
+            [sys.executable, "-c", _LOCK_CHILD, script, str(vdir), str(log), version])
+        for version in ("0.9.3", "0.9.4")
+    ]
+    try:
+        for proc in procs:
+            assert proc.wait(timeout=15) == 0
+    finally:
+        for proc in procs:
+            if proc.poll() is None:
+                proc.kill()
+
+    by_pid = {}
+    for kind, pid, stamp in (line.split() for line in log.read_text().splitlines()):
+        by_pid.setdefault(pid, {})[kind] = float(stamp)
+    intervals = sorted((slot["start"], slot["end"]) for slot in by_pid.values())
+    assert len(intervals) == 2
+    assert intervals[0][1] <= intervals[1][0], intervals
 
 
 def test_parse_front_accepts_both_forms():

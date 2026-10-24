@@ -49,10 +49,11 @@ def tool_names(front: str) -> set[str]:
     root = ROOT / "plugins" / front
     payload = "\n".join(json.dumps(message) for message in HANDSHAKE) + "\n"
     with tempfile.TemporaryDirectory(prefix="rtfm-front-") as home:
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PLUGIN_DATA"}
+        env["RTFM_HOME"] = home
         proc = subprocess.run(
             [sys.executable, str(root / "bootstrap.py"), "--front", front],
-            input=payload, capture_output=True, text=True, timeout=600,
-            env={**os.environ, "RTFM_HOME": home},
+            input=payload, capture_output=True, text=True, timeout=600, env=env,
         )
     if proc.returncode != 0:
         raise SystemExit(f"ERROR: {front} bootstrap exited {proc.returncode}:\n{proc.stderr}")

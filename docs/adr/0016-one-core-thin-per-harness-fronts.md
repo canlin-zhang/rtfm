@@ -52,11 +52,11 @@ environment; each installable artifact lives under `plugins/<harness>/`.**
 
 **The core is published once as `rtfm-mcp` on PyPI** (the name `rtfm` is taken;
 the console script is `rtfm-server`). A front contains no `rtfm_server.py`. Its
-bootstrap prefers `uvx` / `uv tool run`; otherwise it installs the pinned core
-into a harness-private venv (`${CLAUDE_PLUGIN_DATA}/venv` for Claude,
-`~/.rtfm/fronts/<front>/venv` for OpenCode) and runs `python -m rtfm_server`.
-This is the Python analogue of `npx --prefix ${PLUGIN_DATA} <package>@<version>`,
-which is how a multi-harness MCP server keeps one core and thin fronts.
+bootstrap installs the pinned core into a harness-private, version-stamped venv
+(`${CLAUDE_PLUGIN_DATA}/venv` for Claude, `~/.rtfm/fronts/<front>/venv` for
+OpenCode) and runs `python -m rtfm_server` (amended by ADR 0019). It does not
+resolve the package at launch. This is how a multi-harness MCP server keeps one
+core and thin fronts.
 
 **A front does registration and skill delivery only.** It owns its harness's MCP
 entry and whatever that harness needs to load the skill. It never reimplements

@@ -109,7 +109,7 @@ def _create_venv(vdir: Path, uv: str | None) -> None:
     """Create the front's private venv. uv needs no system venv module."""
     if uv:
         subprocess.check_call(
-            [uv, "venv", "--python", ">=3.11", str(vdir)], stdout=sys.stderr)
+            [uv, "venv", "--seed", "--python", ">=3.11", str(vdir)], stdout=sys.stderr)
         return
     # venv.create prints ensurepip's guidance to stdout (and raises SystemExit)
     # when python3-venv is missing. stdout is the MCP stream, so capture it and
@@ -137,6 +137,17 @@ def _create_venv(vdir: Path, uv: str | None) -> None:
         raise
     if captured.getvalue():
         sys.stderr.write(captured.getvalue())
+
+
+def _has_pip(py: Path) -> bool:
+    """Does this interpreter have pip? A killed create leaves python without it."""
+    try:
+        return subprocess.run(
+            [str(py), "-m", "pip", "--version"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        ).returncode == 0
+    except OSError:
+        return False
 
 
 def _install_core(py: Path, version: str, uv: str | None) -> None:
@@ -167,8 +178,10 @@ def venv_server(version: str, front: str) -> list[str]:
     stamp = vdir / ".core-version"
     uv = find_tool("uv")
     with _install_lock(vdir):
-        if not py.exists():
-            if vdir.exists():           # an interrupted create: start clean
+        # A killed create leaves bin/python without pip. With uv gone, the pip
+        # branch would fail forever; rebuild that venv instead.
+        if not py.exists() or (uv is None and not _has_pip(py)):
+            if vdir.exists():
                 shutil.rmtree(vdir, ignore_errors=True)
             _create_venv(vdir, uv)
         if not stamp.is_file() or stamp.read_text(encoding="utf-8") != version:
