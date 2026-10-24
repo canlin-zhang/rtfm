@@ -10,8 +10,7 @@ import subprocess
 import pytest
 from conftest import make_git_repo
 
-import rtfm_server as rtfm
-from rtfm import config, git_ops, index, manifest
+from rtfm import config, git_ops, index, manifest, query
 
 # --- reindex_source for git_repo ---
 
@@ -45,7 +44,7 @@ def test_reindex_git_repo_linked_clean_indexes_files(home, tmp_path):
     assert "T" in row[1]       # ISO 8601 date
 
     # Verify content is searchable
-    hits = rtfm.search_index(conn, "widget protocol")
+    hits = query.search_index(conn, "widget protocol")
     assert any("widget protocol" in h["snippet"] for h in hits)
 
 
@@ -142,7 +141,7 @@ def test_reindex_git_repo_managed_clones_and_indexes(home, tmp_path):
     assert (managed / ".git").is_dir()
 
     # Verify content is searchable
-    hits = rtfm.search_index(conn, "alpha bravo")
+    hits = query.search_index(conn, "alpha bravo")
     assert any("alpha bravo" in h["snippet"] for h in hits)
 
 
@@ -161,7 +160,7 @@ def test_read_document_text_managed_git_repo_resolves_clone(home, tmp_path):
     src = manifest.Source(name="specs", type="git_repo", url=str(remote), ref="main")
     index.reindex_source(conn, src)
 
-    text = rtfm.read_document_text(src, "ref.md", start=2, end=3)
+    text = query.read_document_text(src, "ref.md", start=2, end=3)
     assert "line two" in text and "line three" in text
     assert "line one" not in text
 
@@ -169,7 +168,7 @@ def test_read_document_text_managed_git_repo_resolves_clone(home, tmp_path):
 def test_read_before_reindex_managed_repo_guides_recovery(home, tmp_path):
     """Reading a never-cloned managed git_repo points the user at reindex."""
     src = manifest.Source(name="specs", type="git_repo", url="https://example.com/r.git")
-    text = rtfm.read_document_text(src, "ref.md")
+    text = query.read_document_text(src, "ref.md")
     assert "no clone yet" in text
     assert "reindex('specs')" in text
 
@@ -192,14 +191,14 @@ def test_search_then_read_managed_git_repo(home, tmp_path):
     )
 
     # search auto-reindexes the managed clone and returns hit locations with relpaths
-    out = rtfm.search(query="alpha bravo")
+    out = query.search(query="alpha bravo")
     assert out["results"]
     hit = out["results"][0]
     assert any(loc["source"] == "specs" and loc["relpath"] == "ref.md"
                for loc in hit["locations"])
 
     # read the hit's file through the MCP tool — must resolve the managed clone
-    text = rtfm.read(source="specs", relpath="ref.md", start=1, end=2)
+    text = query.read(source="specs", relpath="ref.md", start=1, end=2)
     assert "alpha bravo charlie" in text
     assert "line three" not in text
 
@@ -225,7 +224,7 @@ def test_search_auto_reindexes_stale_git_repo(home, tmp_path):
     )
 
     # First search clones and indexes v1
-    out = rtfm.search(query="widget protocol")
+    out = query.search(query="widget protocol")
     assert any("v1" in h["snippet"] for h in out["results"])
 
     # Push v2 to remote
@@ -235,7 +234,7 @@ def test_search_auto_reindexes_stale_git_repo(home, tmp_path):
     subprocess.run(["git", "-C", str(seed), "push", "origin", "main"], capture_output=True)
 
     # Search again — fetches, resets, and reindexes
-    out = rtfm.search(query="widget protocol")
+    out = query.search(query="widget protocol")
     assert any("v2" in h["snippet"] for h in out["results"])
 
 
@@ -262,7 +261,7 @@ def test_search_auto_reindexes_linked_after_user_refresh(home, tmp_path):
     )
 
     # First search indexes v1
-    out = rtfm.search(query="widget protocol")
+    out = query.search(query="widget protocol")
     assert any("v1" in h["snippet"] for h in out["results"])
 
     # Push v2; the USER refreshes their own clone (rtfm never fetches for them)
@@ -275,7 +274,7 @@ def test_search_auto_reindexes_linked_after_user_refresh(home, tmp_path):
                     capture_output=True)
 
     # Search again — the moved HEAD triggers the auto-reindex
-    out = rtfm.search(query="widget protocol")
+    out = query.search(query="widget protocol")
     assert any("v2" in h["snippet"] for h in out["results"])
 
 
@@ -314,7 +313,7 @@ def test_search_warns_when_git_repo_fetch_fails(home, tmp_path, monkeypatch):
     mp.write_text(
         f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\next_blocklist=[]\n'
     )
-    out = rtfm.search(query="widget")
+    out = query.search(query="widget")
     # Should serve v1 (stale) with a warning
     assert any("v1" in h["snippet"] for h in out["results"])
     assert "WARNING" in out
@@ -482,12 +481,12 @@ def test_search_warns_on_dirty_linked(home, tmp_path):
     mp.write_text(
         f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\next_blocklist=[]\n'
     )
-    out = rtfm.search(query="widget protocol")
+    out = query.search(query="widget protocol")
     assert any("v1" in h["snippet"] for h in out["results"])
 
     # Uncommitted edit — the tree is now dirty
     (dest / "guide.md").write_text("the widget protocol defines flits v2-uncommitted\n")
-    out = rtfm.search(query="widget protocol")
+    out = query.search(query="widget protocol")
     assert any("v1" in h["snippet"] for h in out["results"])  # old content served
     assert "WARNING" in out
     assert any("DIRTY_TREE" in w and "guide.md" in w for w in out["WARNING"])
@@ -510,7 +509,7 @@ def test_managed_ref_less_full_flow(home, tmp_path):
     summary = index.reindex_source(conn, src)
     assert "error" not in summary
     assert summary["files_seen"] >= 1
-    hits = rtfm.search_index(conn, "alpha bravo")
+    hits = query.search_index(conn, "alpha bravo")
     assert any("alpha bravo" in h["snippet"] for h in hits)
 
 
@@ -529,12 +528,12 @@ def test_clone_vanished_is_recreated(home, tmp_path):
     manifest.load_manifest()
     mp = config.manifest_path()
     mp.write_text(f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\next_blocklist=[]\n')
-    out = rtfm.search(query="alpha bravo")
+    out = query.search(query="alpha bravo")
     assert any("alpha bravo" in h["snippet"] for h in out["results"])
 
     import shutil
     shutil.rmtree(config.managed_repo_path("specs"))
-    out = rtfm.search(query="alpha bravo")
+    out = query.search(query="alpha bravo")
     assert any("alpha bravo" in h["snippet"] for h in out["results"])  # recreated
 
 
@@ -663,7 +662,7 @@ def test_hex_named_branch_not_detached(home, tmp_path):
         f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\n'
         f'ref="deadbeef"\npath="{dest}"\next_blocklist=[]\n'
     )
-    out = rtfm.list_sources()
+    out = query.list_sources()
     specs = next(s for s in out["sources"] if s["name"] == "specs")
     assert specs["git_status"] == "up to date"  # a branch, not a pin
 
@@ -856,7 +855,7 @@ def test_managed_hex_branch_first_run(home, tmp_path):
     mp.write_text(
         f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="deadbeef"\next_blocklist=[]\n'
     )
-    out = rtfm.list_sources()
+    out = query.list_sources()
     specs = next(s for s in out["sources"] if s["name"] == "specs")
     assert specs["git_status"] == "up to date"
 
@@ -909,7 +908,7 @@ def test_list_sources_error_status(home, tmp_path):
     mp.write_text(
         f'[[source]]\nname="specs"\ntype="git_repo"\nurl="{remote}"\nref="main"\npath="{dest}"\next_blocklist=[]\n'
     )
-    out = rtfm.list_sources()
+    out = query.list_sources()
     specs = next(s for s in out["sources"] if s["name"] == "specs")
     assert specs["git_status"].startswith("error:")
 
@@ -924,7 +923,7 @@ def test_health_check_git_probe(home, tmp_path, monkeypatch):
         'url="https://example.com/repo.git"\nref="main"\next_blocklist=[]\n'
     )
     _no_git(monkeypatch, tmp_path)
-    out = rtfm.health_check()
+    out = query.health_check()
     assert out["git"] is False
     assert out["ok"] is False
     assert any("git" in issue.lower() for issue in out["issues"])
@@ -1000,11 +999,11 @@ def test_reindex_purges_manifest_absent_sources(home, tmp_path):
     (d / "a.md").write_text("orphan content keyword\n")
     conn = index.get_index_db()
     index.reindex_source(conn, manifest.Source(name="gone", type="dir", path=d))
-    assert rtfm.search_index(conn, "orphan content")
+    assert query.search_index(conn, "orphan content")
 
     manifest.load_manifest()  # bootstrap default (no 'gone' source)
-    rtfm.reindex()
-    assert not rtfm.search_index(conn, "orphan content")
+    query.reindex()
+    assert not query.search_index(conn, "orphan content")
     assert conn.execute(
         "SELECT COUNT(*) FROM locations WHERE source='gone'").fetchone()[0] == 0
 
@@ -1060,10 +1059,10 @@ def test_search_does_not_reattempt_broken_source_within_ttl(home, tmp_path, monk
 
     monkeypatch.setattr(index, "reindex_source", counting_reindex)
 
-    out1 = rtfm.search(query="widget")
+    out1 = query.search(query="widget")
     assert len(attempts) == 1
     assert any("CLONE_FAILED" in w for w in out1["WARNING"])
-    out2 = rtfm.search(query="widget")   # within the TTL — cached verdict
+    out2 = query.search(query="widget")   # within the TTL — cached verdict
     assert len(attempts) == 1            # no re-attempt
     assert "WARNING" not in out2         # no repeated warning
 
@@ -1096,10 +1095,10 @@ def test_managed_pin_change_detected_on_search(home, tmp_path):
         )
 
     write_manifest(sha1)
-    out = rtfm.search(query="keyword")
+    out = query.search(query="keyword")
     assert any("pin v1" in h["snippet"] for h in out["results"])
     write_manifest(sha2)
-    out = rtfm.search(query="keyword")   # immediately — no 30s wait
+    out = query.search(query="keyword")   # immediately — no 30s wait
     assert any("pin v2" in h["snippet"] for h in out["results"])
 
 
@@ -1129,7 +1128,7 @@ def test_search_dedupes_warnings_per_clone(home, tmp_path):
     )
     (dest / "a.md").write_text("uncommitted edit\n")  # dirty the shared clone
 
-    out = rtfm.search(query="shared keyword")
+    out = query.search(query="shared keyword")
     dirty_warns = [w for w in out["WARNING"] if "DIRTY_TREE" in w]
     assert len(dirty_warns) == 1  # one warning per clone, not per source
 
@@ -1187,9 +1186,9 @@ def test_reindex_malformed_manifest_does_not_purge(home, tmp_path):
     index.reindex_source(conn, manifest.Source(name="docs", type="dir", path=d))
     mp = config.manifest_path()
     mp.write_text("[[source\nbroken")  # unparseable TOML
-    resp = rtfm.reindex()
+    resp = query.reindex()
     assert "purged_sources" not in resp
-    assert rtfm.search_index(conn, "survivor keyword")  # rows survived
+    assert query.search_index(conn, "survivor keyword")  # rows survived
 
 
 def test_search_sources_searched_respects_filter(home, tmp_path):
@@ -1206,7 +1205,7 @@ def test_search_sources_searched_respects_filter(home, tmp_path):
         f'[[source]]\nname="docs"\ntype="dir"\npath="{d}"\next_blocklist=[]\n'
         '[[source]]\nname="typoed"\ntype="Git_Repo"\nurl="https://example.com/r.git"\next_blocklist=[]\n'
     )
-    out = rtfm.search(query="filtered keyword", source="docs")
+    out = query.search(query="filtered keyword", source="docs")
     assert out["sources_searched"] == ["docs"]
 
 

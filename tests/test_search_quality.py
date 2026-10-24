@@ -1,8 +1,7 @@
 # tests/test_search_quality.py — Tier 1: doc-level signal (title/headings) + FTS5 parity
 import fitz
 
-import rtfm_server as rtfm
-from rtfm import config, index, manifest
+from rtfm import config, index, manifest, query
 
 
 def _titled_pdf(path, title, toc_titles, pages):
@@ -53,7 +52,7 @@ def test_title_match_ranks_bearing_doc_first(home, tmp_path):
                 ["flux capacitor here", "flux capacitor again", "flux capacitor more"])
     conn = index.get_index_db()
     index.reindex_source(conn, manifest.Source("docs", "dir", d))
-    hits = rtfm.search_index(conn, "flux capacitor")
+    hits = query.search_index(conn, "flux capacitor")
     assert hits
     assert hits[0]["locations"][0]["relpath"] == "bearer.pdf"      # bearing doc ranks first
     assert "Flux Capacitor" in hits[0]["title"]
@@ -67,7 +66,7 @@ def test_body_hit_carries_doc_title(home, tmp_path):
                 ["the gizmo defines flits clearly"])
     conn = index.get_index_db()
     index.reindex_source(conn, manifest.Source("docs", "dir", d))
-    hits = rtfm.search_index(conn, "gizmo")                        # body-only match
+    hits = query.search_index(conn, "gizmo")                        # body-only match
     assert hits and "Widget Protocol Specification" in hits[0]["title"]
 
 
@@ -77,9 +76,9 @@ def test_fuzzy_marker_on_or_fallback(home, tmp_path):
     (d / "a.md").write_text("the kitchen has a sink on one line\n")
     conn = index.get_index_db()
     index.reindex_source(conn, manifest.Source("docs", "dir", d))
-    precise = rtfm.search_index(conn, "kitchen sink")              # both terms co-occur -> AND
+    precise = query.search_index(conn, "kitchen sink")              # both terms co-occur -> AND
     assert precise and precise[0]["fuzzy"] is False
-    fuzzy = rtfm.search_index(conn, "kitchen zephyr")              # zephyr absent: AND empty -> OR
+    fuzzy = query.search_index(conn, "kitchen zephyr")              # zephyr absent: AND empty -> OR
     assert fuzzy and fuzzy[0]["fuzzy"] is True
 
 
@@ -88,10 +87,10 @@ def test_search_tool_flags_fuzzy(home, tmp_path):
     d.mkdir()
     (d / "a.md").write_text("the kitchen has a sink\n")
     manifest.load_manifest()
-    rtfm.reindex(source=None)
+    query.reindex(source=None)
     # put the doc in the default source so the tool searches it
     (config.default_source_dir() / "a.md").write_text("the kitchen has a sink\n")
-    out = rtfm.search(query="kitchen zephyr")
+    out = query.search(query="kitchen zephyr")
     assert out.get("fuzzy") is True
 
 
@@ -103,7 +102,7 @@ def test_heading_only_match_classified_as_heading(home, tmp_path):
     _titled_pdf(d / "x.pdf", "Flux Capacitor Notes", ["Cap Reference"], ["unrelated body"])
     conn = index.get_index_db()
     index.reindex_source(conn, manifest.Source("docs", "dir", d))
-    hits = rtfm.search_index(conn, "cap")            # 'cap' is a heading token, not in 'capacitor'
+    hits = query.search_index(conn, "cap")            # 'cap' is a heading token, not in 'capacitor'
     assert hits and hits[0]["locator_kind"] == "heading"
 
 
@@ -127,7 +126,7 @@ def test_title_match_outranks_heading_match(home, tmp_path):
     _titled_pdf(d / "b.pdf", "Other Doc", ["Zephyr Appendix"], ["body two"])  # match in heading
     conn = index.get_index_db()
     index.reindex_source(conn, manifest.Source("docs", "dir", d))
-    hits = rtfm.search_index(conn, "zephyr")
+    hits = query.search_index(conn, "zephyr")
     assert hits[0]["locations"][0]["relpath"] == "a.pdf"
     assert hits[0]["locator_kind"] == "title"
 
@@ -164,8 +163,8 @@ def test_title_ranking_respects_source_filter(home, tmp_path):
     conn = index.get_index_db()
     index.reindex_source(conn, manifest.Source("a", "dir", da))
     index.reindex_source(conn, manifest.Source("b", "dir", db_))
-    assert rtfm.search_index(conn, "quasar", source="a")             # title hit in its own source
-    assert rtfm.search_index(conn, "quasar", source="b") == []       # scoped out of source b
+    assert query.search_index(conn, "quasar", source="a")             # title hit in its own source
+    assert query.search_index(conn, "quasar", source="b") == []       # scoped out of source b
 
 
 def test_body_docs_not_starved_by_dedup(home, tmp_path):
@@ -178,7 +177,7 @@ def test_body_docs_not_starved_by_dedup(home, tmp_path):
     (d / "c.md").write_text("widget also here\n")
     conn = index.get_index_db()
     index.reindex_source(conn, manifest.Source("docs", "dir", d))
-    hits = rtfm.search_index(conn, "widget", limit=2)
+    hits = query.search_index(conn, "widget", limit=2)
     assert len({h["sha256"] for h in hits}) == 2          # A (title) + a body doc, not just A
 
 
@@ -209,11 +208,11 @@ def test_search_warns_on_index_corruption(home, tmp_path):
     """A corrupt/missing FTS table surfaces a reindex warning, not a silent empty result."""
     manifest.load_manifest()
     (config.default_source_dir() / "a.md").write_text("widget here\n")
-    rtfm.reindex(source=None)
+    query.reindex(source=None)
     conn = index.get_index_db()
     conn.execute("DROP TABLE content_fts")                       # simulate index corruption
     conn.commit()
-    out = rtfm.search(query="widget")
+    out = query.search(query="widget")
     assert out["results"] == []
     assert "WARNING" in out and any("reindex" in w.lower() for w in out["WARNING"])
 
@@ -227,5 +226,5 @@ def test_snippet_picks_best_coverage_line(home, tmp_path):
         "protocol alone here\n")
     conn = index.get_index_db()
     index.reindex_source(conn, manifest.Source("docs", "dir", d))
-    hits = rtfm.search_index(conn, "widget protocol")
+    hits = query.search_index(conn, "widget protocol")
     assert "widget protocol together" in hits[0]["snippet"]

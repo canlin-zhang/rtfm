@@ -3,8 +3,7 @@ import pathlib
 import subprocess
 from pathlib import Path
 
-from rtfm import config, manifest
-from rtfm_server import search
+from rtfm import config, manifest, query
 
 # --- scope (ADR 0014): paths and extension lists ---
 
@@ -126,7 +125,7 @@ def test_malformed_manifest_degrades_loudly(home):
     assert sources == []
     assert warnings and "MALFORMED" in warnings[0]
     # the search tool must degrade without raising
-    out = search(query="anything")
+    out = query.search(query="anything")
     assert out["results"] == [] and "WARNING" in out
 
 
@@ -174,7 +173,7 @@ def test_search_tolerates_invalid_source(home, tmp_path):
         f'[[source]]\nname="good"\ntype="dir"\npath="{good}"\next_blocklist=[]\n'
         '[[source]]\nname="broken"\ntype="dir"\npath="/no/such/place"\next_blocklist=[]\n'
     )
-    out = search(query="widget protocol")
+    out = query.search(query="widget protocol")
     assert any("widget protocol" in h["snippet"] for h in out["results"])
     assert "WARNING" in out and any("broken" in w for w in out["WARNING"])
 

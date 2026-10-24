@@ -5,8 +5,7 @@ import subprocess
 
 from conftest import make_git_repo
 
-from rtfm import config, git_ops, index, manifest, staging
-from rtfm_server import search_index
+from rtfm import config, git_ops, index, manifest, query, staging
 
 
 def _index(conn, src, root):
@@ -125,9 +124,9 @@ def test_edit_in_place_reextracts_and_gcs_old_sha(home, tmp_path):
     assert sha_y != sha_x
 
     # FTS finds the new content, not the old.
-    hits = search_index(conn, "replacement")
+    hits = query.search_index(conn, "replacement")
     assert hits and any("replacement" in h["snippet"] for h in hits)
-    assert not search_index(conn, "original")
+    assert not query.search_index(conn, "original")
 
 
 def test_parallel_extraction_matches_serial(home, tmp_path, monkeypatch):
@@ -139,7 +138,7 @@ def test_parallel_extraction_matches_serial(home, tmp_path, monkeypatch):
     conn = index.get_index_db()
     summary = index.reindex_source(conn, manifest.Source("docs", "dir", d))
     assert summary["unique_contents"] == 4 and summary["newly_extracted"] == 4
-    hits = search_index(conn, "keyword2")
+    hits = query.search_index(conn, "keyword2")
     assert hits and hits[0]["locations"][0]["relpath"] == "f2.md"
 
 
@@ -280,8 +279,8 @@ def test_reindex_indexes_rst_files(home, tmp_path):
     assert summary["files_seen"] == 2 and summary["newly_extracted"] == 2
     rows = conn.execute("SELECT locator_kind FROM content_fts").fetchall()
     assert rows and all(r[0] == "line" for r in rows)
-    assert search_index(conn, "widget protocol flits")
-    assert search_index(conn, "credits flit pipeline downstream")
+    assert query.search_index(conn, "widget protocol flits")
+    assert query.search_index(conn, "credits flit pipeline downstream")
 
 
 def test_reindex_indexes_mdx_files(home, tmp_path):
@@ -299,7 +298,7 @@ def test_reindex_indexes_mdx_files(home, tmp_path):
     conn = index.get_index_db()
     summary = index.reindex_source(conn, manifest.Source("docs", "dir", d))
     assert summary["files_seen"] == 1 and summary["newly_extracted"] == 1
-    assert search_index(conn, "widget protocol flits")
+    assert query.search_index(conn, "widget protocol flits")
 
 
 # --- _freshness for git_repo ---
@@ -461,7 +460,7 @@ def test_a_file_under_an_unreadable_directory_is_not_treated_as_vanished(
     conn = index.get_index_db()
     src = manifest.Source(name="s", type="dir", path=t)
     _index(conn, src, t)
-    assert search_index(conn, "keyword", source="s")
+    assert query.search_index(conn, "keyword", source="s")
     unopenable(t / "vault", directory=True)
     got = _index(conn, src, t)
     assert got.cache.purged == 0
@@ -470,7 +469,7 @@ def test_a_file_under_an_unreadable_directory_is_not_treated_as_vanished(
     assert rows == {"vault/deep.md"}
     # Still searchable: the row and its content were never GC'd, so search_index answers
     # from what was already indexed — it does not need to re-read the now-unreachable file.
-    assert search_index(conn, "keyword", source="s")
+    assert query.search_index(conn, "keyword", source="s")
 
 
 def test_freshness_converges_after_an_unreadable_file(home, tmp_path):
@@ -527,7 +526,7 @@ def test_a_denied_source_root_does_not_purge_the_whole_source(home, tmp_path, un
     assert got.cache.purged == 0
     rows = {r[0] for r in conn.execute("SELECT relpath FROM locations WHERE source='s'")}
     assert rows == {"a.md"}
-    assert search_index(conn, "keyword", source="s")
+    assert query.search_index(conn, "keyword", source="s")
 
 
 def test_freshness_converges_after_a_denied_source_root(home, tmp_path, unopenable):
@@ -589,7 +588,7 @@ def test_a_de_selected_files_content_survives_via_a_still_selected_twin(home, tm
     wide = manifest.Source(name="s", type="dir", path=tmp_path, ext_blocklist=frozenset())
     _index(conn, wide, tmp_path)
     assert conn.execute("SELECT count(*) FROM contents").fetchone()[0] == 1  # one shared sha
-    assert search_index(conn, "shared identical keyword", source="s")
+    assert query.search_index(conn, "shared identical keyword", source="s")
 
     narrow = manifest.Source(name="s", type="dir", path=tmp_path,
                          ext_blocklist=frozenset({".log"}))
@@ -598,7 +597,7 @@ def test_a_de_selected_files_content_survives_via_a_still_selected_twin(home, tm
     rows = {r[0] for r in conn.execute("SELECT relpath FROM locations WHERE source='s'")}
     assert rows == {"keep.md"}
     assert conn.execute("SELECT count(*) FROM contents").fetchone()[0] == 1  # content survives
-    assert search_index(conn, "shared identical keyword", source="s")
+    assert query.search_index(conn, "shared identical keyword", source="s")
 
 
 def test_key_order_does_not_change_the_scope(home, tmp_path):
@@ -688,7 +687,7 @@ def test_an_unreadable_file_is_not_treated_as_vanished(home, tmp_path, unopenabl
     conn = index.get_index_db()
     src = manifest.Source(name="s", type="dir", path=t)
     _index(conn, src, t)
-    assert search_index(conn, "keyword", source="s")
+    assert query.search_index(conn, "keyword", source="s")
     f.chmod(0o000)
     try:
         got = _index(conn, src, t)

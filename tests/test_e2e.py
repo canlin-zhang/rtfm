@@ -1,12 +1,13 @@
 # tests/test_e2e.py
 import rtfm_server as rtfm
+from rtfm import config, manifest
 
 
 def test_zero_config_drop_and_search(home, sample_pdf):
     # 1) fresh home: bootstrap default source by loading the manifest
-    rtfm.load_manifest()
+    manifest.load_manifest()
     # 2) user drops a PDF into the default source
-    dest = rtfm.default_source_dir() / "spec.pdf"
+    dest = config.default_source_dir() / "spec.pdf"
     dest.write_bytes(sample_pdf.read_bytes())
     # 3) search finds it with a page locator
     out = rtfm.search(query="foxtrot")
