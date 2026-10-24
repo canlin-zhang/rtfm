@@ -9,6 +9,7 @@ one test enforces that so the two install paths cannot drift.
 import importlib.machinery
 import importlib.util
 import json
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -134,6 +135,143 @@ def test_venv_creation_failure_keeps_stdout_clean(monkeypatch, tmp_path, capsys)
     assert captured.out == ""
     assert "ensurepip is not available" in captured.err
     assert "FATAL" in captured.err
+    assert not (tmp_path / "venv" / "bin" / "python").exists()
+
+
+def test_venv_creation_failure_removes_partial_venv_and_retries(monkeypatch, tmp_path):
+    monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
+    calls = []
+
+    def broken_create(path, with_pip):
+        calls.append(path)
+        (path / "bin").mkdir(parents=True, exist_ok=True)
+        (path / "bin" / "python").write_text("")
+        raise SystemExit(1)
+
+    monkeypatch.setattr(bootstrap.venv, "create", broken_create)
+
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="python3-venv"):
+            bootstrap.venv_server("0.8.0", "claude")
+
+    assert len(calls) == 2
+    assert not (tmp_path / "venv" / "bin" / "python").exists()
+
+
+def test_venv_creation_failure_prints_child_output(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda name: None)
+
+    def broken_create(path, with_pip):
+        raise subprocess.CalledProcessError(1, ["python"], output=b"ensurepip exploded\n")
+
+    monkeypatch.setattr(bootstrap.venv, "create", broken_create)
+
+    with pytest.raises(SystemExit):
+        bootstrap.main(["--front", "claude"])
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "ensurepip exploded" in captured.err
+
+
+def _make_venv(tmp_path, version):
+    (tmp_path / "venv" / "bin").mkdir(parents=True)
+    (tmp_path / "venv" / "bin" / "python").write_text("")
+    (tmp_path / "venv" / ".core-version").write_text(version)
+
+
+def test_venv_stamp_skips_matching_install(monkeypatch, tmp_path):
+    monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
+    _make_venv(tmp_path, "0.8.0")
+    calls = []
+    monkeypatch.setattr(
+        bootstrap.subprocess, "check_call", lambda cmd, **kwargs: calls.append(cmd)
+    )
+
+    command = bootstrap.venv_server("0.8.0", "claude")
+
+    assert command == [str(tmp_path / "venv" / "bin" / "python"), "-m", "rtfm_server"]
+    assert calls == []
+
+
+def test_venv_stamp_reinstalls_on_mismatch(monkeypatch, tmp_path):
+    monkeypatch.setattr(bootstrap, "data_dir", lambda front: tmp_path)
+    _make_venv(tmp_path, "0.7.0")
+    calls = []
+    monkeypatch.setattr(
+        bootstrap.subprocess, "check_call", lambda cmd, **kwargs: calls.append(cmd)
+    )
+
+    bootstrap.venv_server("0.8.0", "claude")
+
+    assert calls and "rtfm-mcp==0.8.0" in calls[0]
+    assert (tmp_path / "venv" / ".core-version").read_text() == "0.8.0"
+
+
+def test_parse_front_accepts_both_forms():
+    assert bootstrap.parse_front(["--front", "claude"], "claude") == "claude"
+    assert bootstrap.parse_front(["--front=opencode"], "opencode") == "opencode"
+    assert bootstrap.parse_front([], "claude") == "claude"
+
+
+def test_parse_front_rejects_mismatch_and_unknown():
+    with pytest.raises(SystemExit, match="does not match"):
+        bootstrap.parse_front(["--front", "opencode"], "claude")
+    with pytest.raises(SystemExit, match="unknown front"):
+        bootstrap.parse_front(["--front", "claud"], "claude")
+    with pytest.raises(SystemExit, match="needs a value"):
+        bootstrap.parse_front(["--front"], "claude")
+
+
+def test_main_execs_the_resolved_command(monkeypatch):
+    monkeypatch.setattr(bootstrap, "read_version", lambda root: "0.8.0")
+    monkeypatch.setattr(
+        bootstrap, "resolve_command", lambda version, front: ["/bin/rtfm-server"]
+    )
+    calls = []
+    monkeypatch.setattr(
+        bootstrap.os, "execvp", lambda file, args: calls.append((file, args))
+    )
+
+    bootstrap.main(["--front", "claude"])
+
+    assert calls == [("/bin/rtfm-server", ["/bin/rtfm-server"])]
+
+
+def test_fronts_do_not_contain_the_core():
+    for front in ("claude", "opencode"):
+        assert not (ROOT / "plugins" / front / "rtfm_server.py").exists()
+
+
+def test_no_cross_discovered_skill_dirs():
+    assert not (ROOT / ".claude" / "skills").exists()
+    assert not (ROOT / ".agents" / "skills").exists()
+
+
+def test_claude_manifest_has_no_inline_mcp_servers():
+    manifest = json.loads(
+        (ROOT / "plugins/claude/.claude-plugin/plugin.json").read_text()
+    )
+    assert "mcpServers" not in manifest
+
+
+def test_front_skill_blocks_are_well_formed():
+    for front in ("claude", "opencode"):
+        text = (ROOT / "plugins" / front / "skills/read-the-manual/SKILL.md").read_text()
+        assert text.count("<!-- front-specific:start -->") == 1
+        assert text.count("<!-- front-specific:end -->") == 1
+        assert text.index("<!-- front-specific:start -->") < text.index(
+            "<!-- front-specific:end -->"
+        )
+
+
+def test_opencode_index_parses_skill_before_registering_mcp():
+    text = (ROOT / "plugins/opencode/index.ts").read_text()
+    assert text.index("readFile(skillPath") < text.index("ctx.mcp.transform")
+    assert "throw new Error" in text
+    assert 'const SERVER_NAME = "rtfm"' in text
+    assert "editor.set(SERVER_NAME" in text
 
 
 def test_front_bootstraps_are_byte_identical():

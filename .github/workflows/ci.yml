@@ -56,8 +56,8 @@ jobs:
     # manifests; the dependency list is mirrored in pyproject.toml and the
     # PEP-723 block. Nothing mechanical linked them, and drift broke the 0.5.1
     # launch fix (versions lagged; the lock resolved mcp below its pin). This
-    # job guards both: the
-    # script compares declared strings, uv lock --check compares resolved ones.
+    # job guards both: the script compares declared strings, uv lock --check
+    # compares resolved ones.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

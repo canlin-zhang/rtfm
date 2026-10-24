@@ -74,8 +74,9 @@ _Avoid_: adapter, wrapper (neither names the installable artifact); plugin (the 
 
 **Corpus home**:
 The single directory holding all of the tool's state — the Manifest (`manifest.toml`), the
-Default source's drop-dir (`default/`), and the FTS cache (`cache/`). Defaults to
-`~/.rtfm/`, overridable via `RTFM_HOME`.
+Default source's drop-dir (`default/`), the FTS cache (`cache/`), managed Repo clones
+(`repos/`), and the fronts' private data dirs (`fronts/`). Defaults to `~/.rtfm/`,
+overridable via `RTFM_HOME`.
 _Avoid_: config dir, data dir, root
 
 **Default source**:

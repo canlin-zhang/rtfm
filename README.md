@@ -56,10 +56,14 @@ Point the client's MCP configuration at that command:
 }
 ```
 
-**Prerequisites:** `python3` on PATH is the only hard requirement for the plugin. It
-uses `uvx`/`uv` when available and otherwise builds a private venv under
-`~/.rtfm/fronts/<front>/venv` on first run. The PyPI path needs `uv` (for `uvx`) or `pipx`.
+**Prerequisites:** `python3` on PATH with a working `venv`/`pip` module
+(Debian/Ubuntu: `python3-venv`) is the only hard requirement for the plugin. It
+prefers `uvx`/`uv` and otherwise builds a private venv on first run —
+`$CLAUDE_PLUGIN_DATA/venv` for Claude Code, else `~/.rtfm/fronts/<front>/venv`.
+The PyPI path needs `uv` (for `uvx`) or `pipx`.
 *Optional:* install `poppler-utils` (`pdftotext`) for best-quality PDF extraction.
+
+**Platform support:** Linux and macOS. Windows is not officially supported.
 
 ## Two ways to use it
 

@@ -32,7 +32,7 @@ def read_version(root: Path) -> str:
             raise SystemExit(f"[rtfm] FATAL: cannot read {path}: {e}") from e
         if not isinstance(version, str) or not version.strip():
             raise SystemExit(f"[rtfm] FATAL: {path} has no version")
-        return version
+        return version.strip()
     raise SystemExit(
         f"[rtfm] FATAL: no package.json or .claude-plugin/plugin.json under {root}"
     )
@@ -52,9 +52,41 @@ def data_dir(front: str) -> Path:
 
 
 def _venv_python(vdir: Path) -> Path:
-    if os.name == "nt":
-        return vdir / "Scripts" / "python.exe"
     return vdir / "bin" / "python"
+
+
+def parse_front(args: list[str], root_name: str) -> str:
+    """Validate --front against the directory the bootstrap lives in."""
+    if root_name not in {"claude", "opencode"}:
+        raise SystemExit(
+            f"[rtfm] FATAL: unrecognized front directory {root_name!r}; "
+            "expected claude or opencode"
+        )
+    front = root_name
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--front":
+            if i + 1 >= len(args):
+                raise SystemExit("[rtfm] FATAL: --front needs a value")
+            value = args[i + 1]
+            i += 2
+        elif arg.startswith("--front="):
+            value = arg.split("=", 1)[1]
+            i += 1
+        else:
+            raise SystemExit(f"[rtfm] FATAL: unknown argument {arg!r}")
+        if value not in {"claude", "opencode"}:
+            raise SystemExit(
+                f"[rtfm] FATAL: unknown front {value!r}; expected claude or opencode"
+            )
+        if value != root_name:
+            raise SystemExit(
+                f"[rtfm] FATAL: --front {value!r} does not match the front "
+                f"directory {root_name!r}"
+            )
+        front = value
+    return front
 
 
 def venv_server(version: str, front: str) -> list[str]:
@@ -72,12 +104,23 @@ def venv_server(version: str, front: str) -> list[str]:
                 venv.create(vdir, with_pip=True)
         except BaseException as e:
             sys.stderr.write(captured.getvalue())
+            detail = getattr(e, "output", None) or getattr(e, "stderr", None)
+            if isinstance(detail, bytes):
+                detail = detail.decode(errors="replace")
+            if detail:
+                sys.stderr.write(detail if detail.endswith("\n") else detail + "\n")
+            # venv.create writes bin/python before ensurepip runs; a partial
+            # venv would make every retry take the pip branch and fail forever.
+            shutil.rmtree(vdir, ignore_errors=True)
             if isinstance(e, SystemExit):
                 raise RuntimeError(
                     "cannot create the venv: python3-venv may be missing "
-                    "(Debian/Ubuntu: apt install python3-venv)"
+                    "(Debian/Ubuntu: apt install python3-venv); the partial "
+                    "venv was removed, so retry is safe"
                 ) from None
             raise
+        if captured.getvalue():
+            sys.stderr.write(captured.getvalue())
     if not stamp.is_file() or stamp.read_text(encoding="utf-8") != version:
         subprocess.check_call(
             [
@@ -105,15 +148,11 @@ def resolve_command(version: str, front: str) -> list[str]:
 
 def main(argv: list[str] | None = None) -> None:
     args = list(sys.argv[1:] if argv is None else argv)
-    front = "claude"
-    if "--front" in args:
-        i = args.index("--front")
-        if i + 1 >= len(args):
-            raise SystemExit("[rtfm] FATAL: --front needs a value")
-        front = args[i + 1]
+    root = Path(__file__).resolve().parent
 
     try:
-        version = read_version(Path(__file__).resolve().parent)
+        front = parse_front(args, root.name)
+        version = read_version(root)
         command = resolve_command(version, front)
         # execvp, not execv: uvx/uv are PATH names in the fast path.
         os.execvp(command[0], command)
@@ -121,7 +160,7 @@ def main(argv: list[str] | None = None) -> None:
         raise
     except Exception as e:  # loud, actionable; never a silent MCP hang
         sys.stderr.write(
-            f"[rtfm] FATAL: could not start the server: {e}\n"
+            f"[rtfm] FATAL: could not start the server: {type(e).__name__}: {e}\n"
             "[rtfm] Recover: install uv (https://docs.astral.sh/uv/) or ensure "
             "python3 + pip work, then retry.\n"
         )

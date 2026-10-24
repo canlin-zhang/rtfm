@@ -89,7 +89,12 @@ def make_tree(
     (tmp_path / "plugins" / "opencode").mkdir(parents=True)
     (tmp_path / "plugins" / "opencode" / "package.json").write_text(
         json.dumps(
-            {"name": "rtfm-opencode-plugin", "version": opencode_version}, indent=2
+            {
+                "name": "rtfm-opencode-plugin",
+                "version": opencode_version,
+                "type": "module",
+            },
+            indent=2,
         )
         + "\n",
         encoding="utf-8",
@@ -414,13 +419,13 @@ def test_check_prints_drift_under_ascii_locale(tmp_path):
     """Non-ASCII version values must not crash the check's drift listing
     under an ASCII locale — the check's stdout reconfigure (the bump has the
     same guard) must keep the report printing."""
-    # The three fixture values (0.5.1 / 0.5.2 / 0.5.3) must stay mutually
+    # The four fixture values (0.5.1 / 0.5.2 / 0.5.3 / 0.5.4) must stay mutually
     # non-prefix: a value like 0.5.10 would make '0.5.1' match its rendering
     # and silently weaken the pins below.
-    make_tree(tmp_path, lock_version="0.5.2—β")
-    # A third distinct value for plugin.json: with only two distinct prefixes,
-    # a lock<->plugin swap of the shared value rendered identically and passed
-    # every pin; three distinct prefixes make all six permutations
+    make_tree(tmp_path, lock_version="0.5.2—β", opencode_version="0.5.4—β")
+    # A distinct value for each front manifest: with only three distinct
+    # prefixes, a swap between the two fronts' lines rendered identically and
+    # passed every pin; four distinct prefixes make all permutations
     # distinguishable. (lock_version= feeds only uv.lock; pyproject keeps the
     # skeleton's 0.5.1, plugin.json is overwritten right here.)
     (tmp_path / "plugins/claude/.claude-plugin" / "plugin.json").write_text(
@@ -438,12 +443,13 @@ def test_check_prints_drift_under_ascii_locale(tmp_path):
     # documents 'no traceback' as an independent contract.
     assert "Traceback" not in combined
     assert "pyproject.toml: 0.5.1" in proc.stdout  # the drift listing itself printed
-    # All three listing lines are pinned by their ASCII-safe prefixes, with a
-    # DISTINCT prefix per file (0.5.1 / 0.5.2 / 0.5.3) so any mis-associated
-    # value or swapped entry fails the pins. The non-ASCII tails render as
-    # '??' on the reconfigured stdout — unpinned.
+    # All four listing lines are pinned by their ASCII-safe prefixes, with a
+    # DISTINCT prefix per file (0.5.1 / 0.5.2 / 0.5.3 / 0.5.4) so any
+    # mis-associated value or swapped entry fails the pins. The non-ASCII tails
+    # render as '??' on the reconfigured stdout — unpinned.
     assert "uv.lock (rtfm-mcp entry): 0.5.2" in proc.stdout
     assert "plugins/claude/.claude-plugin/plugin.json: 0.5.3" in proc.stdout
+    assert "plugins/opencode/package.json: 0.5.4" in proc.stdout
     # The verdict is stderr and the data lines stdout — placement is part of
     # the pin, matching the suite's documented convention.
     assert "differs across files" in proc.stderr
@@ -640,6 +646,12 @@ def test_bump_refuses_on_pre_existing_drift(tmp_path, monkeypatch):
     assert '"version": "0.5.0"' in (
         tmp_path / "plugins/claude/.claude-plugin" / "plugin.json"
     ).read_text()
+
+
+def test_bump_refuses_on_opencode_drift(tmp_path, monkeypatch):
+    make_tree(tmp_path, opencode_version="0.5.0")
+    with pytest.raises(SystemExit, match="disagree"):
+        run_bump(tmp_path, monkeypatch)
 
 
 def test_bump_rejects_non_pep440_version(tmp_path, monkeypatch):

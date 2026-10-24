@@ -9,7 +9,7 @@ Answer the user's question using **only** text found in the indexed corpus via r
 
 ## Invocation
 
-The user invokes this skill directly, or the harness loads it when the description matches. The client-specific block at the end of this file names the exact command and tool names.
+The user invokes this skill directly, or the harness loads it when the description matches. The client-specific block appended to each front copy names the exact command and tool names.
 
 ## Routine
 
