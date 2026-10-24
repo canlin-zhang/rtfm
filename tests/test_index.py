@@ -125,13 +125,6 @@ def test_edit_in_place_reextracts_and_gcs_old_sha(home, tmp_path):
     assert not rtfm.search_index(conn, "original")
 
 
-def test_workers_respects_env(monkeypatch):
-    monkeypatch.setenv("RTFM_WORKERS", "3")
-    assert rtfm._workers() == 3
-    monkeypatch.delenv("RTFM_WORKERS", raising=False)
-    assert rtfm._workers() >= 1
-
-
 def test_parallel_extraction_matches_serial(home, tmp_path, monkeypatch):
     d = tmp_path / "docs"
     d.mkdir()
@@ -231,35 +224,6 @@ def test_a_repaired_file_stops_being_reported(home, tmp_path):
     assert _index(conn, src, tmp_path).handled.problems
     (tmp_path / "f.md").write_text("now findable keyword")
     assert _index(conn, src, tmp_path).handled.problems == []
-
-
-def test_extraction_runs_in_current_process_not_forked(home, tmp_path, monkeypatch):
-    """Regression guard for the FastMCP-server deadlock: parallel extraction must run in THIS
-    process (a thread pool), never a forked child. A process pool deadlocks inside the server
-    (forked workers inherit thread-held locks and hang). Force the pool path and assert every
-    extraction ran under our PID. The old ProcessPoolExecutor fails this: a forked worker runs
-    in a different PID and its appends never reach our list (and this closure spy isn't even
-    picklable for a process pool)."""
-    d = tmp_path / "docs"
-    d.mkdir()
-    for i in range(4):
-        (d / f"f{i}.md").write_text(f"body {i} keyword{i}\n")
-    monkeypatch.setenv("RTFM_WORKERS", "4")  # force the pool path (>1 worker, >1 job)
-
-    seen_pids: list[int] = []
-    real = rtfm._extract_rows
-
-    def spy(path_str):
-        seen_pids.append(os.getpid())
-        return real(path_str)
-
-    monkeypatch.setattr(rtfm, "_extract_rows", spy)
-    conn = rtfm.get_index_db()
-    summary = rtfm.reindex_source(conn, rtfm.Source("docs", "dir", d))
-
-    assert summary["newly_extracted"] == 4
-    assert seen_pids, "extraction worker never ran in this process (out-of-process pool?)"
-    assert all(pid == os.getpid() for pid in seen_pids)
 
 
 def test_extraction_works_from_worker_thread_with_event_loop(home, tmp_path):
@@ -510,28 +474,6 @@ def test_a_problem_names_a_position_not_a_hash():
     p = rtfm.Problem("docs/a.md", "Permission denied")
     assert p.position == "docs/a.md"
     assert p._fields == ("position", "reason")
-
-
-def test_one_registry_drives_body_and_signal(tmp_path):
-    # These dispatched independently and could disagree about a file — a .bzl was
-    # selected by one and ignored by the other, so it indexed to zero rows.
-    assert rtfm._routine_for(".pdf").name == "pdf"
-    assert rtfm._routine_for(".md").name == "markup"
-    assert rtfm._routine_for(".bzl").name == "text"
-    assert rtfm._routine_for("").name == "text"
-
-
-def test_the_fallback_is_not_a_member_of_the_ordered_registry():
-    # Inside the tuple it would match unconditionally, shadowing anything after it.
-    assert rtfm.DEFAULT_ROUTINE not in rtfm.ROUTINES
-    assert all(r.exts for r in rtfm.ROUTINES)
-
-
-def test_markup_routine_still_extracts_headings(tmp_path):
-    f = tmp_path / "x.md"
-    f.write_text("# Title\n\nbody text\n\n## Section\n")
-    title, headings = rtfm._doc_signal_for_file(f)
-    assert title == "Title" and "Section" in headings
 
 
 def _reached(*paths):

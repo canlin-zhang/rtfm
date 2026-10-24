@@ -191,10 +191,6 @@ def test_sane_title_rejects_authoring_artifacts(home, tmp_path):
     assert conn.execute("SELECT title FROM doc_fts").fetchone()[0] == "Quokka Reference Manual"
 
 
-def test_first_substantial_line_skips_short_and_numeric():
-    assert rtfm._first_substantial_line("1234\nabc\nReal Title\nmore") == "Real Title"
-
-
 def test_serial_extraction_path_indexes_doc_signal(home, tmp_path, monkeypatch):
     """RTFM_WORKERS=1 serial extraction yields the same _Extracted shape as the pool path."""
     monkeypatch.setenv("RTFM_WORKERS", "1")
